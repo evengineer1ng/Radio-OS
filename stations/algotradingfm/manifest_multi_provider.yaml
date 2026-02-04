@@ -1,0 +1,176 @@
+station:
+  name: AlgoTrading FM
+  host: Kai
+  category: the money glitch...
+  logo: /path/to/logo.png
+
+# =====================================================
+# MULTI-PROVIDER LLM CONFIG
+# =====================================================
+# Pick ONE provider:
+# - "ollama": local, requires endpoint
+# - "anthropic": Claude API, requires ANTHROPIC_API_KEY env var
+# - "openai": GPT API, requires OPENAI_API_KEY env var
+# - "google": Gemini API, requires GOOGLE_API_KEY env var
+
+llm:
+  provider: "ollama"  # Change this
+  # For local providers (Ollama):
+  endpoint: "http://127.0.0.1:11434/api/generate"
+  # For API providers, specify env var name:
+  api_key_env: "ANTHROPIC_API_KEY"  # or OPENAI_API_KEY, GOOGLE_API_KEY
+  # Optional model override (uses defaults if not set):
+  model: "default"
+
+models:
+  producer: "rnj-1:8b"
+  host: "glm-4.7-flash:latest"
+
+scheduler:
+  source_quotas:
+    reddit: 6
+    markets: 4
+    portfolio_event: 6
+    bluesky: 2
+    document: 4
+    rss: 1
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+
+# =====================================================
+# AUDIO / MULTI-PROVIDER VOICE CONFIG
+# =====================================================
+# Pick ONE voice provider:
+# - "piper": local ONNX models (offline)
+# - "elevenlabs": ElevenLabs API, requires ELEVENLABS_API_KEY env var
+# - "google": Google Cloud TTS, requires GOOGLE_API_KEY env var
+# - "azure": Azure Speech Services, requires AZURE_SPEECH_KEY env var
+
+audio:
+  voices_provider: "piper"  # Change this
+  
+  # For Piper (local), specify binary path:
+  piper_bin: "C:/Users/evana/Documents/radio_os/voices/piper_windows_amd64/piper/piper.exe"
+  
+  # For API providers, specify env var name:
+  api_key_env: "ELEVENLABS_API_KEY"  # or GOOGLE_API_KEY, AZURE_SPEECH_KEY
+  
+  # For Azure, also specify region:
+  region: "eastus"
+
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+
+producer:
+  target_depth: 8
+  max_depth: 20
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.35
+  per_source_cap: 2
+  source_limits:
+    rss:
+      max_share: 0.2
+      max_abs: 4
+    reddit:
+      max_share: 0.45
+      max_abs: 10
+    markets:
+      max_share: 0.4
+      max_abs: 8
+    portfolio_event:
+      max_share: 0.35
+      max_abs: 6
+    bluesky:
+      max_share: 0.3
+      max_abs: 6
+    document:
+      max_share: 0.25
+      max_abs: 4
+
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 23
+  station_id_sec: 240
+  max_tokens: 420
+  temperature: 0.6
+
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+
+# =====================================================
+# VOICES MAPPING
+# =====================================================
+# For Piper: local file paths (ONNX models)
+# For APIs: provider-specific voice IDs
+
+voices:
+  host: "en_US-lessac-high.onnx"       # Piper: file path OR ElevenLabs: voice ID
+  skeptic: "en_GB-alan-medium.onnx"
+  engineer: "en_GB-alba-medium.onnx"
+  macro: "en_GB-southern_english_female-low.onnx"
+  optimist: "en_US-hfc_female-medium.onnx"
+  coach: "en_US-danny-low.onnx"
+
+# Example with ElevenLabs IDs (if using elevenlabs provider):
+# voices:
+#   host: "21m00Tcm4TlvDq8ikWAM"        # Female voice
+#   skeptic: "AZnzlk1XvdBFFXlQXcaN"     # Male voice
+#   engineer: "FGY2WhTgzD7XNXxlIJFF"    # Different male
+#   macro: "g0OoblKlneKxw0p4SKPM"       # Female voice
+#   optimist: "JBFqnCBsd6RMkjW5QVjL"    # Different female
+#   coach: "TX3LPaxmHKQFdv7VOQHJ"       # Yet another male
+
+riff:
+  tag_catalog:
+  - execution
+  - risk
+  - performance
+  - psychology
+  - trends
+  - strategy
+  - news
+  shapes:
+  - connect_two
+  - myth_bust
+  - failure_mode
+  - tradeoff
+  - tease_next
+
+feeds:
+  reddit:
+    enabled: true
+    subreddits:
+    - algotrading
+    - cryptocurrency
+    - quant
+    poll_sec: 30
+    limit: 20
+
+  markets:
+    enabled: true
+    poll_sec: 60
+
+  rss:
+    enabled: true
+    feeds: []
+
+  bluesky:
+    enabled: false
+
+  document:
+    enabled: false
+
+  portfolio_event:
+    enabled: false

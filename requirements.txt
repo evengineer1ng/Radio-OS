@@ -8,6 +8,7 @@ numpy>=1.24.0
 
 # UI
 tk>=0.1.0
+Pillow>=9.0.0
 
 # Data
 pyyaml>=6.0

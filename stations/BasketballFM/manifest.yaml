@@ -1,0 +1,234 @@
+station:
+  name: BasketballFM
+  host: Kai
+  category: 'hoops. '
+  logo: C:/Users/evana/Downloads/ChatGPT Image Feb 2, 2026, 03_55_04 PM.png
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: rnj-1:8b
+  host: rnj-1:8b
+scheduler:
+  source_quotas:
+    bluesky: 2
+    context_memory: 1
+    document: 4
+    event_explorer: 1
+    google_alerts: 1
+    markets: 4
+    mix_rebalance: 1
+    notes: 1
+    portfolio: 1
+    radio_dial: 1
+    reddit: 6
+    rss: 1
+    timeline_replay: 1
+    video_timeline: 1
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+riff:
+  tag_catalog:
+  - execution
+  - risk
+  - performance
+  - psychology
+  - trends
+  - strategy
+  - news
+  shapes:
+  - connect_two
+  - myth_bust
+  - failure_mode
+  - tradeoff
+  - tease_next
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+producer:
+  target_depth: 8
+  max_depth: 20
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.35
+  per_source_cap: 2
+  source_limits:
+    rss:
+      max_share: 0.2
+      max_abs: 4
+    reddit:
+      max_share: 0.45
+      max_abs: 10
+    markets:
+      max_share: 0.4
+      max_abs: 8
+    portfolio_event:
+      max_share: 0.35
+      max_abs: 6
+    bluesky:
+      max_share: 0.3
+      max_abs: 6
+    document:
+      max_share: 0.25
+      max_abs: 4
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 23
+  station_id_sec: 240
+  max_tokens: 420
+  temperature: 0.6
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+audio:
+  piper_bin: C:/Users/evana/Documents/radio_os/voices/piper_windows_amd64/piper/piper.exe
+voices:
+  host: C:/Users/evana/Documents/radio_os/voices/en_US-lessac-high.onnx
+  skeptic: C:/Users/evana/Documents/radio_os/voices/en_GB-alba-medium.onnx
+  engineer: C:/Users/evana/Documents/radio_os/voices/en_US-danny-low.onnx
+  macro: C:/Users/evana/Documents/radio_os/voices/en_US-amy-medium.onnx
+  optimist: C:/Users/evana/Documents/radio_os/voices/en_US-hfc_female-medium.onnx
+  coach: C:/Users/evana/Documents/radio_os/voices/en_GB-southern_english_female-low.onnx
+  expert: C:/Users/evana/Documents/radio_os/voices/en_US-danny-low.onnx
+  storyteller: C:/Users/evana/Documents/radio_os/voices/en_GB-alan-medium.onnx
+feeds:
+  bluesky:
+    enabled: true
+    hashtags: []
+    poll_sec: 60
+    limit: 20
+    priority: 70
+  context_memory:
+    enabled: true
+  document:
+    enabled: true
+    files:
+    - name: strategy
+      path: ./strategy_reference.txt
+      max_chars: 5000
+      announce: true
+      announce_priority: 86
+      candidate: false
+    - name: playbook
+      path: ./coach_playbook.txt
+      max_chars: 7000
+      announce: false
+      candidate: true
+      candidate_priority: 80
+    poll_sec: 2.5
+    announce_cooldown_sec: 600
+  event_explorer:
+    enabled: true
+  google_alerts:
+    enabled: true
+  markets:
+    enabled: true
+    symbols:
+    - BTCUSDT
+    - ETHUSDT
+    poll_sec: 15
+    breakout_pct: 0.2
+    priority: 90
+  mix_rebalance:
+    enabled: true
+  notes:
+    enabled: true
+  portfolio:
+    enabled: true
+  radio_dial:
+    enabled: true
+  reddit:
+    enabled: true
+    subreddits:
+    - nba
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.2
+    seen_ttl_sec: 3600
+  rss:
+    enabled: true
+    urls:
+    - https://www.espn.com/espn/rss/nba/news
+    - https://www.ncaa.com/news/basketball-men/d1/rss.xml
+    poll_sec: 180
+    priority: 72
+  timeline_replay:
+    enabled: true
+  video_timeline:
+    enabled: true
+characters:
+  host:
+    role: moderator
+    traits:
+    - calm
+    - smart
+    focus:
+    - flow
+    - continuity
+  expert:
+    role: technical_voice
+    traits:
+    - precise
+    - knowledgeable
+    focus:
+    - details
+    - accuracy
+  skeptic:
+    role: critical_voice
+    traits:
+    - cautious
+    - blunt
+    focus:
+    - risk
+    - downsides
+  optimist:
+    role: positive_voice
+    traits:
+    - energetic
+    - hopeful
+    focus:
+    - opportunity
+    - strengths
+  storyteller:
+    role: narrative_voice
+    traits:
+    - creative
+    - engaging
+    focus:
+    - examples
+    - analogies
+  coach:
+    role: coach
+    traits:
+    - creative
+    - disciplined
+    - motivational
+    focus:
+    - strategy
+    - growth
+    - opportunity
+mix:
+  weights:
+    bluesky: 0.2777777777777778
+    context_memory: 0.0
+    document: 0.022222222222222223
+    event_explorer: 0.0
+    google_alerts: 0.0
+    markets: 0.11111111111111112
+    mix_rebalance: 0.0
+    notes: 0.0
+    portfolio: 0.0
+    radio_dial: 0.0
+    reddit: 0.5555555555555556
+    rss: 0.03333333333333333
+    timeline_replay: 0.0
+    video_timeline: 0.0

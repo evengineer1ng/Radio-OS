@@ -53,6 +53,9 @@ ollamatest.py
 
 # Large binary distributions (keep in releases, not repo)
 voices/ffmpeg-*/
-voices/piper_windows_amd64/
+voices/piper_windows_*/
 voices/piper_macos_*/
 voices/piper_linux_*/
+# Voice models - download separately from https://huggingface.co/rhasspy/piper-voices/
+voices/*.onnx
+voices/*.onnx.json

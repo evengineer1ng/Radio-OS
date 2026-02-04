@@ -29,13 +29,13 @@ voices/           # TTS voice models (ONNX)
 
 **Windows:**
 ```bash
-run.bat
+windows.bat
 ```
 
 **macOS/Linux:**
 ```bash
-chmod +x run.sh
-./run.sh
+chmod +x mac.sh
+./mac.sh
 ```
 
 These scripts handle everything:

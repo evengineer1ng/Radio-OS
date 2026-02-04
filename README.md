@@ -131,17 +131,27 @@ def register_widgets(registry, runtime_stub):
 
 ## License & Attribution
 
-### Piper TTS
+### Radio OS
+- **License**: GPL-3.0 (GNU General Public License v3.0)
+- **Copyright**: (c) 2026 Evan Pena
+- **Summary**: Free, open source, and hackable forever. Any derivative work must remain open source under GPL-3.0.
+
+See [LICENSE](LICENSE) for full details.
+
+### Dependencies
+
+#### Piper TTS
 - **License**: MIT
 - **Source**: [rhasspy/piper](https://github.com/rhasspy/piper)
 - **Binaries**: Downloaded on-demand via `setup.py`
 
-### Voice Models
+#### Voice Models
 - **License**: Typically CC-BY-NC per model (see [Piper Voices](https://huggingface.co/rhasspy/piper-voices/))
 - **Note**: Downloaded separately by users - verify licensing before commercial use
 
-### Radio OS
-- **License**: [Add your license here - e.g., MIT, GPL, etc.]
+#### FFmpeg
+- **License**: LGPL
+- **Source**: [ffmpeg.org](https://ffmpeg.org/)
 
 ## Environment Variables
 

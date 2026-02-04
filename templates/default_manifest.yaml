@@ -1,0 +1,72 @@
+station:
+  name: ""
+  host: ""
+  category: "Custom"
+
+break_duration_min: 20
+break_duration_max: 120
+break_duration_random: true
+flow_songs_min: 1
+flow_songs_max: 3
+flow_songs_random: true
+
+llm:
+  endpoint: ""
+
+models:
+  producer: ""
+  host: ""
+
+scheduler:
+  source_quotas: {}
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+
+riff:
+  tag_catalog: []
+  shapes: []
+
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 64
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+
+producer:
+  target_depth: 8
+  max_depth: 64
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.4
+  per_source_cap: 2
+  source_limits: {}
+
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 20
+  station_id_sec: 240
+  max_tokens: 400
+  temperature: 0.6
+
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+
+audio:
+  piper_bin: ""  # Leave empty for auto-detection, or specify absolute path to piper binary
+
+voices: {}
+
+feeds: {}
+
+characters: {}
+
+mix:
+  weights: {}

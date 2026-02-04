@@ -1,0 +1,21 @@
+# Core dependencies for Radio OS
+# Install with: pip install -r requirements.txt
+
+# Audio
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# UI
+tk>=0.1.0
+
+# Data
+pyyaml>=6.0
+requests>=2.31.0
+
+# Mac Media Control (optional, Mac only)
+pyobjc-framework-MediaPlayer>=9.0; sys_platform == 'darwin'
+pyobjc-framework-AppKit>=9.0; sys_platform == 'darwin'
+
+# Windows Media Control (optional, Windows only)
+winsdk>=1.0.0b10; sys_platform == 'win32'

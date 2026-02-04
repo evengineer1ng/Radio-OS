@@ -1,0 +1,55 @@
+HipHopFMPanel:
+  host:
+    role: host
+    traits:
+    - smooth
+    - curious
+    - charismatic
+    focus:
+    - big moments
+    - story connections
+  hype analyst:
+    role: Hype Analyst
+    traits:
+    - excitable
+    - optimistic
+    - energetic
+    focus:
+    - new releases
+    - trending tracks
+  culture historian:
+    role: Culture Historian
+    traits:
+    - thoughtful
+    - knowledgeable
+    - calm
+    focus:
+    - legacy artists
+    - cultural impact
+  industry insider:
+    role: Industry Insider
+    traits:
+    - analytical
+    - pragmatic
+    - direct
+    focus:
+    - sales
+    - streaming numbers
+  skeptic critic:
+    role: Skeptic Critic
+    traits:
+    - blunt
+    - sarcastic
+    - opinionated
+    focus:
+    - lyric quality
+    - authenticity
+  street pulse:
+    role: Street Pulse
+    traits:
+    - relatable
+    - passionate
+    - real
+    focus:
+    - fan opinions
+    - online discourse

@@ -25,14 +25,29 @@ voices/           # TTS voice models (ONNX)
 
 ## Quick Start
 
-### Prerequisites
+### Easiest: Use the Launcher Script
 
-- Python 3.10+
-- Piper TTS binary for your platform
-- FFmpeg (for audio processing)
-- Ollama (or compatible LLM endpoint)
+**Windows:**
+```bash
+run.bat
+```
 
-### Installation
+**macOS/Linux:**
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+These scripts handle everything:
+- Create virtual environment (first time)
+- Install dependencies
+- Download Piper (if needed)
+- Validate setup
+- Launch Radio OS
+
+### Manual Installation
+
+If you prefer manual setup:
 
 1. Clone the repository:
 ```bash
@@ -48,15 +63,15 @@ source radioenv/bin/activate  # On Windows: radioenv\Scripts\activate
 
 3. Install dependencies:
 ```bash
-pip install -r dependencies.txt
+pip install -r requirements.txt
 ```
 
-4. Download Piper TTS binary:
-   - **Windows**: Download from [Piper Releases](https://github.com/rhasspy/piper/releases), extract to `voices/piper_windows_amd64/`
-   - **macOS**: Download macOS build, extract to `voices/piper_macos_amd64/`
-   - **Linux**: Download Linux build, extract to `voices/piper_linux_amd64/`
+4. Download Piper TTS and voice models:
+```bash
+python setup.py
+```
 
-5. Launch the shell:
+5. Launch:
 ```bash
 python shell.py
 ```
@@ -114,19 +129,19 @@ def register_widgets(registry, runtime_stub):
     )
 ```
 
-## Platform-Specific Notes
+## License & Attribution
 
-### Windows
-- Media control integration via Windows Media API (GSMTC)
-- Piper auto-detected at `voices/piper_windows_amd64/piper/piper.exe`
+### Piper TTS
+- **License**: MIT
+- **Source**: [rhasspy/piper](https://github.com/rhasspy/piper)
+- **Binaries**: Downloaded on-demand via `setup.py`
 
-### macOS
-- Media control via AppleScript (Music.app, Spotify)
-- Piper auto-detected at `voices/piper_macos_amd64/piper/piper` or `voices/piper_macos_arm64/piper/piper`
+### Voice Models
+- **License**: Typically CC-BY-NC per model (see [Piper Voices](https://huggingface.co/rhasspy/piper-voices/))
+- **Note**: Downloaded separately by users - verify licensing before commercial use
 
-### Linux
-- Media control not yet implemented
-- Piper auto-detected at `voices/piper_linux_amd64/piper/piper`
+### Radio OS
+- **License**: [Add your license here - e.g., MIT, GPL, etc.]
 
 ## Environment Variables
 
@@ -149,12 +164,8 @@ Contributions welcome! This project is still evolving. Key areas:
 - Performance optimizations
 - Documentation
 
-## License
-
-[Add your license here]
-
 ## Credits
 
-- TTS: [Piper](https://github.com/rhasspy/piper)
-- Audio: FFmpeg
+- TTS: [Piper](https://github.com/rhasspy/piper) by Rhasspy
+- Audio: [FFmpeg](https://ffmpeg.org/)
 - LLM: Ollama-compatible endpoints

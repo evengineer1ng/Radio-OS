@@ -26,6 +26,64 @@ RUNTIME_PATH = os.path.join(BASE, "runtime.py")
 PLUGINS_DIR = os.path.join(BASE, "plugins")
 
 # -----------------------------
+# Config Helpers (Moved Up)
+# -----------------------------
+def get_global_config_path() -> str:
+    """Return path to global RadioOS settings file."""
+    if os.name == "nt":
+        # Windows: %APPDATA%\RadioOS\config.json
+        appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+        cfg_dir = os.path.join(appdata, "RadioOS")
+    else:
+        # Mac/Linux: ~/.radioOS/config.json
+        cfg_dir = os.path.expanduser("~/.radioOS")
+    
+    os.makedirs(cfg_dir, exist_ok=True)
+    return os.path.join(cfg_dir, "config.json")
+
+def get_global_config() -> Dict[str, Any]:
+    """Load global settings (creates empty dict if not exists)."""
+    path = get_global_config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_global_config(cfg: Dict[str, Any]) -> None:
+    """Save global settings."""
+    path = get_global_config_path()
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"Failed to save global config: {e}")
+
+# -----------------------------
+# Init Config & Scale
+# -----------------------------
+_G_CFG = get_global_config()
+_G_GEN = _G_CFG.get("general", {})
+
+UI_SCALE = float(_G_GEN.get("ui_scale", 1.0))
+# Attempt high-dpi awareness on Windows if scale > 1.0 or user requests
+# (Often better to just do it if possible, but let's stick to safe defaults)
+if os.name == "nt":
+    try:
+        from ctypes import windll
+        # If scale is default 1.0, user might rely on OS scaling.
+        # But if they set custom scale, they likely want us to handle it.
+        # For now, we enforce DPI awareness aggressively to avoid "squished" buttons.
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+
+# -----------------------------
 # UI Theme
 # -----------------------------
 UI = {
@@ -41,14 +99,92 @@ UI = {
     "good": "#2ee59d",
 }
 
-FONT_H1 = ("Segoe UI", 20, "bold")
-FONT_H2 = ("Segoe UI", 16, "bold")
-FONT_BODY = ("Segoe UI", 11)
-FONT_SMALL = ("Segoe UI", 10)
+# Color theme presets
+COLOR_THEMES = {
+    "dark": {
+        "bg": "#0e0e0e",
+        "panel": "#121212",
+        "card": "#181818",
+        "card_hover": "#222222",
+        "surface": "#0a0a0a",
+        "text": "#e8e8e8",
+        "muted": "#9a9a9a",
+        "accent": "#4cc9f0",
+        "danger": "#ff4d6d",
+        "good": "#2ee59d",
+    },
+    "light": {
+        "bg": "#ffffff",
+        "panel": "#f5f5f5",
+        "card": "#fafafa",
+        "card_hover": "#e8e8e8",
+        "surface": "#f0f0f0",
+        "text": "#1a1a1a",
+        "muted": "#666666",
+        "accent": "#0891b2",
+        "danger": "#dc2626",
+        "good": "#16a34a",
+    },
+    "nord": {
+        "bg": "#2e3440",
+        "panel": "#3b4252",
+        "card": "#434c5e",
+        "card_hover": "#4c566a",
+        "surface": "#2e3440",
+        "text": "#eceff4",
+        "muted": "#d8dee9",
+        "accent": "#88c0d0",
+        "danger": "#bf616a",
+        "good": "#a3be8c",
+    },
+    "dracula": {
+        "bg": "#282a36",
+        "panel": "#343746",
+        "card": "#44475a",
+        "card_hover": "#6272a4",
+        "surface": "#21222c",
+        "text": "#f8f8f2",
+        "muted": "#6272a4",
+        "accent": "#bd93f9",
+        "danger": "#ff5555",
+        "good": "#50fa7b",
+    },
+    "monokai": {
+        "bg": "#272822",
+        "panel": "#2d2e27",
+        "card": "#3e3d32",
+        "card_hover": "#49483e",
+        "surface": "#1e1f1c",
+        "text": "#f8f8f2",
+        "muted": "#75715e",
+        "accent": "#66d9ef",
+        "danger": "#f92672",
+        "good": "#a6e22e",
+    },
+}
+
+# Apply theme from config if present
+_theme_name = _G_GEN.get("theme", "dark")
+if _theme_name in COLOR_THEMES:
+    UI.update(COLOR_THEMES[_theme_name])
+
+# -----------------------------
+# Fonts (Scaled)
+# -----------------------------
+def _scale_font(size: int) -> int:
+    return int(size * UI_SCALE)
+
+FONT_H1 = ("Segoe UI", _scale_font(20), "bold")
+FONT_H2 = ("Segoe UI", _scale_font(16), "bold")
+FONT_BODY = ("Segoe UI", _scale_font(11))
+FONT_SMALL = ("Segoe UI", _scale_font(10))
 
 # -----------------------------
 # Helpers
 # -----------------------------
+def scaled_geometry(w: int, h: int) -> str:
+    return f"{int(w * UI_SCALE)}x{int(h * UI_SCALE)}"
+
 
 
 def discover_plugins() -> Dict[str, Dict[str, Any]]:
@@ -265,6 +401,30 @@ class StationProcess:
         env.setdefault("RADIO_OS_ROOT", BASE)
         env.setdefault("RADIO_OS_PLUGINS", os.path.join(BASE, "plugins"))
         env.setdefault("RADIO_OS_VOICES", os.path.join(BASE, "voices"))
+        
+        # Inject Visual Model configuration from manifest > global config
+        # 1. Start with global config
+        global_cfg = get_global_config()
+        visual_cfg = global_cfg.get("visual_models", {})
+        
+        # 2. Override with station manifest
+        manifest = station.manifest or {}
+        if "visual_models" in manifest:
+            visual_cfg.update(manifest["visual_models"])
+            
+        if visual_cfg:
+            env["VISUAL_MODEL_TYPE"] = str(visual_cfg.get("model_type", "local"))
+            env["VISUAL_MODEL_LOCAL"] = str(visual_cfg.get("local_model", "llava:latest"))
+            env["VISUAL_MODEL_API_PROVIDER"] = str(visual_cfg.get("api_provider", ""))
+            env["VISUAL_MODEL_API_MODEL"] = str(visual_cfg.get("api_model", ""))
+            env["VISUAL_MODEL_API_KEY"] = str(visual_cfg.get("api_key", ""))
+            env["VISUAL_MODEL_API_ENDPOINT"] = str(visual_cfg.get("api_endpoint", ""))
+            env["VISUAL_MODEL_MAX_IMAGE_SIZE"] = str(visual_cfg.get("max_image_size", "1024"))
+            env["VISUAL_MODEL_IMAGE_QUALITY"] = str(visual_cfg.get("image_quality", "85"))
+
+        # Ensure unbuffered UTF-8 output so logs are captured correctly
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
 
         log_path = os.path.join(station.path, "runtime.log")
         lf = None
@@ -277,23 +437,19 @@ class StationProcess:
 
         cmd = [sys.executable, "-u", RUNTIME_PATH]
 
-        creationflags = 0
-        if os.name == "nt":
-            # hide console window for runtime
-            try:
-                creationflags = subprocess.CREATE_NO_WINDOW
-            except Exception:
-                creationflags = 0
+        kwargs = {"cwd": BASE, "env": env, "stdout": lf if lf else None, "stderr": lf if lf else None}
+        if sys.platform == "win32":
+            # hide console window for runtime (Windows only)
+            # NOTE: CREATE_NO_WINDOW can prevent win32gui.EnumWindows() from working correctly.
+            # Set RADIO_OS_SHOW_CONSOLE=1 to disable this for window enumeration/debugging.
+            if not os.environ.get("RADIO_OS_SHOW_CONSOLE"):
+                try:
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                except Exception:
+                    pass
 
         self._log_file = lf
-        self.proc = subprocess.Popen(
-            cmd,
-            cwd=BASE,
-            env=env,
-            stdout=lf if lf else None,
-            stderr=lf if lf else None,
-            creationflags=creationflags,
-        )
+        self.proc = subprocess.Popen(cmd, **kwargs)
         self.station = station
 
     def stop(self) -> None:
@@ -317,9 +473,15 @@ class StationProcess:
 # -----------------------------
 class RadioShell:
     def __init__(self):
+        # Load theme before creating UI
+        cfg = get_global_config()
+        theme_name = cfg.get("general", {}).get("theme", "dark")
+        if theme_name in COLOR_THEMES:
+            UI.update(COLOR_THEMES[theme_name])
+        
         self.root = tk.Tk()
         self.root.title("Radio OS")
-        self.root.geometry("1440x860")
+        self.root.geometry(scaled_geometry(1440, 860))
         self.root.configure(bg=UI["bg"])
 
         self.proc = StationProcess()
@@ -339,6 +501,58 @@ class RadioShell:
 
         self.show_home(instant=True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _refresh_ui_colors(self):
+        """Refresh all UI elements with current theme colors."""
+        # Update window background
+        self.root.configure(bg=UI["bg"])
+        
+        # Update all frames and widgets recursively
+        def update_widget_colors(widget):
+            try:
+                # Try common color options
+                if hasattr(widget, 'configure'):
+                    try:
+                        widget.configure(bg=UI["bg"])
+                    except:
+                        pass
+                    try:
+                        widget.configure(fg=UI["text"])
+                    except:
+                        pass
+            except:
+                pass
+            
+            # Recurse on children
+            for child in widget.winfo_children():
+                update_widget_colors(child)
+        
+        # Update theme styles
+        self._build_styles()
+        
+        # Update main widget tree
+        update_widget_colors(self.root)
+        
+        # Force redraw
+        self.root.update()
+
+    def _restart_app(self):
+        """Restart the application by closing and reopening."""
+        import subprocess
+        import sys
+        
+        # Save the current script path
+        script_path = sys.argv[0]
+        
+        # Close the current app
+        self.root.quit()
+        self.root.destroy()
+        
+        # Restart the app in a new process
+        subprocess.Popen([sys.executable, script_path])
+        
+        # Exit cleanly
+        sys.exit(0)
 
     def _build_styles(self):
         style = ttk.Style()
@@ -418,13 +632,13 @@ class RadioShell:
         # Scroll container
         # ============================
 
-        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0)
-        canvas.pack(fill="both", expand=True)
-
-        scrollbar = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
         scrollbar.pack(side="right", fill="y")
 
-        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar.configure(command=canvas.yview)
 
         frame = tk.Frame(canvas, bg=UI["bg"])
         canvas.create_window((0, 0), window=frame, anchor="nw")
@@ -433,6 +647,13 @@ class RadioShell:
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         # ============================
         # Current station feeds
@@ -531,8 +752,23 @@ class RadioShell:
         bar = tk.Frame(self.root, bg=UI["bg"], height=56)
         bar.pack(fill="x", side="top")
 
+        # Try to load custom icon
+        icon_label = None
+        icon_path = os.path.join(BASE, "radioos.png")
+        if os.path.exists(icon_path):
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(icon_path)
+                # Resize to fit in title bar (height ~52px, account for padding)
+                img.thumbnail((52, 52), Image.Resampling.LANCZOS)
+                self.icon_photo = ImageTk.PhotoImage(img)
+                icon_label = tk.Label(bar, image=self.icon_photo, bg=UI["bg"])
+                icon_label.pack(side="left", padx=(16, 12))
+            except Exception as e:
+                print(f"Failed to load icon: {e}")
+
         self.title_lbl = tk.Label(bar, text="Radio OS", font=FONT_H1, fg=UI["text"], bg=UI["bg"])
-        self.title_lbl.pack(side="left", padx=16)
+        self.title_lbl.pack(side="left", padx=(0 if icon_label else 16, 0))
 
         self.mode_lbl = tk.Label(bar, text="Station Browser", font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"])
         self.mode_lbl.pack(side="left", padx=10)
@@ -607,7 +843,7 @@ class RadioShell:
 
         for i, st in enumerate(self.stations):
             card = self._create_station_card(self.carousel, st, i)
-            card.pack(side="left", padx=18, pady=140)
+            card.pack(side="left", padx=int(18 * UI_SCALE), pady=int(140 * UI_SCALE))
             self.cards.append({"frame": card, "station": st})
 
         self._highlight_selected()
@@ -670,7 +906,8 @@ class RadioShell:
         logo_path = st_meta.get("logo", "")
 
         # Square-ish dimensions
-        CARD_W, CARD_H = 320, 360
+        CARD_W = int(320 * UI_SCALE)
+        CARD_H = int(400 * UI_SCALE)
         
         card = tk.Frame(parent, bg=UI["card"], width=CARD_W, height=CARD_H)
         card.pack_propagate(False)
@@ -687,7 +924,8 @@ class RadioShell:
                     pil_img = Image.open(p).convert("RGBA")
                     
                     # Target size for the art area
-                    target_w, target_h = CARD_W - 24, 180 
+                    target_w = CARD_W - int(24 * UI_SCALE)
+                    target_h = int(180 * UI_SCALE)
                     
                     # Crop/Resize to fill
                     pil_img = ImageOps.fit(pil_img, (target_w, target_h), method=Image.Resampling.LANCZOS)
@@ -695,7 +933,7 @@ class RadioShell:
                     # Round corners of the image
                     mask = Image.new("L", (target_w, target_h), 0)
                     draw = ImageDraw.Draw(mask)
-                    radius = 16
+                    radius = int(16 * UI_SCALE)
                     draw.rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
                     
                     # Apply mask
@@ -706,17 +944,17 @@ class RadioShell:
                     
                     lbl_art = tk.Label(card, image=tk_img, bg=UI["card"])
                     lbl_art.image = tk_img  # keep ref
-                    lbl_art.pack(pady=(12, 0))
-                    art_height = 180
+                    lbl_art.pack(pady=(int(12 * UI_SCALE), 0))
+                    art_height = target_h
                 except Exception as e:
                     print(f"Failed to load logo {logo_path}: {e}")
 
         # If no art, add spacer or generic header
         if art_height == 0:
-            tk.Frame(card, bg=UI["card"], height=20).pack()
+            tk.Frame(card, bg=UI["card"], height=int(20 * UI_SCALE)).pack()
 
-        title = tk.Label(card, text=name, font=("Segoe UI", 18, "bold"), fg=UI["text"], bg=UI["card"], wraplength=280, justify="center")
-        title.pack(pady=(12, 4))
+        title = tk.Label(card, text=name, font=("Segoe UI", _scale_font(18), "bold"), fg=UI["text"], bg=UI["card"], wraplength=int(280 * UI_SCALE), justify="center")
+        title.pack(pady=(int(12 * UI_SCALE), int(4 * UI_SCALE)))
 
         tag = tk.Label(card, text=str(cat).upper(), font=FONT_SMALL, fg=UI["accent"], bg=UI["card"])
         tag.pack()
@@ -744,28 +982,28 @@ class RadioShell:
 
         # Buttons area
         actions = tk.Frame(card, bg=UI["card"])
-        actions.pack(fill="x", padx=14, pady=(0, 16), side="bottom")
+        actions.pack(fill="x", padx=int(14 * UI_SCALE), pady=(0, int(16 * UI_SCALE)), side="bottom")
 
         # Play Button (Primary)
         # Using a slightly taller/bolder look
         btn_play = tk.Button(
-            actions, text="▶ PLAY", font=("Segoe UI", 11, "bold"),
+            actions, text="▶ PLAY", font=("Segoe UI", _scale_font(11), "bold"),
             bg=UI["accent"], fg="#000", relief="flat",
             activebackground=UI["good"], activeforeground="#000",
             cursor="hand2",
             command=lambda s=station: self.launch_station(s)
         )
-        btn_play.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=4)
+        btn_play.pack(side="left", fill="x", expand=True, padx=(0, int(6 * UI_SCALE)), ipady=int(8 * UI_SCALE))
 
         # Edit Button (Secondary)
         btn_edit = tk.Button(
-            actions, text="EDIT", font=("Segoe UI", 11, "bold"),
+            actions, text="EDIT", font=("Segoe UI", _scale_font(11), "bold"),
             bg=UI["panel"], fg=UI["text"], relief="flat",
              activebackground=UI["card_hover"], activeforeground=UI["text"],
              cursor="hand2",
             command=lambda s=station: self.edit_station(s)
         )
-        btn_edit.pack(side="left", fill="x", expand=True, padx=(6, 0), ipady=4)
+        btn_edit.pack(side="left", fill="x", expand=True, padx=(int(6 * UI_SCALE), 0), ipady=int(8 * UI_SCALE))
 
         def hover_in(_):
             self._set_card_bg(card, UI["card_hover"])
@@ -793,7 +1031,7 @@ class RadioShell:
             )
 
         # Apply rounded corners mask to the card frame itself
-        self._add_rounded_corners(card, 16, UI["bg"], UI["card"])
+        self._add_rounded_corners(card, int(16 * UI_SCALE), UI["bg"], UI["card"])
 
         return card
 
@@ -924,7 +1162,7 @@ class RadioShell:
     def _build_runtime_view(self):
         self.runtime = tk.Frame(self.root, bg=UI["bg"])
 
-        left = tk.Frame(self.runtime, bg=UI["panel"], width=320)
+        left = tk.Frame(self.runtime, bg=UI["panel"], width=int(320 * UI_SCALE))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -1025,7 +1263,7 @@ class RadioShell:
     def open_settings(self):
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("900x600")
+        win.geometry(scaled_geometry(900, 600))
         win.configure(bg=UI["bg"])
 
         nb = ttk.Notebook(win)
@@ -1033,23 +1271,816 @@ class RadioShell:
 
         gen = tk.Frame(nb, bg=UI["bg"])
         nb.add(gen, text="General")
-        tk.Label(gen, text="General Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=14)
+        self._build_general_settings(gen)
 
         mdl = tk.Frame(nb, bg=UI["bg"])
         nb.add(mdl, text="Models")
-        tk.Label(mdl, text="Model Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=14)
+        self._build_model_settings(mdl)
 
         voc = tk.Frame(nb, bg=UI["bg"])
         nb.add(voc, text="Voices")
-        tk.Label(voc, text="Voice Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=14)
+        self._build_voice_settings(voc)
 
         plug = tk.Frame(nb, bg=UI["bg"])
         nb.add(plug, text="Plugins")
         self._build_plugin_manager(plug)
 
+        vis = tk.Frame(nb, bg=UI["bg"])
+        nb.add(vis, text="Visual Models")
+        self._build_visual_models_panel(vis)
+
         st = tk.Frame(nb, bg=UI["bg"])
         nb.add(st, text="Storage")
-        tk.Label(st, text="Storage Tools", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=14)
+        self._build_storage_tools(st)
+
+    def _build_general_settings(self, parent: tk.Frame) -> None:
+        """Build the General settings panel."""
+        
+        # Make scrollable
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.configure(command=canvas.yview)
+        
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        tk.Label(scroll_frame, text="General Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 8)
+        )
+        
+        wrap = tk.Frame(scroll_frame, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=8)
+        
+        cfg = get_global_config()
+        general = cfg.get("general", {})
+        
+        # Auto-start last station
+        auto_start_var = tk.BooleanVar(value=general.get("auto_start_last_station", False))
+        auto_frame = tk.Frame(wrap, bg=UI["panel"], padx=12, pady=10)
+        auto_frame.pack(fill="x", pady=8)
+        tk.Checkbutton(
+            auto_frame, 
+            text="Auto-start last active station on launch",
+            variable=auto_start_var,
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY
+        ).pack(anchor="w")
+        
+        # Status poll interval
+        poll_frame = tk.LabelFrame(wrap, text="Status Update Interval", fg=UI["text"], 
+                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        poll_frame.pack(fill="x", pady=8)
+        
+        tk.Label(poll_frame, text="Update runtime status every (ms):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        poll_var = tk.StringVar(value=str(general.get("status_poll_ms", 1000)))
+        tk.Entry(poll_frame, textvariable=poll_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"], width=10).pack(anchor="w", pady=(2, 4))
+        tk.Label(poll_frame, text="(Lower = more responsive, higher = less CPU usage)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        # Theme
+        theme_frame = tk.LabelFrame(wrap, text="UI Theme", fg=UI["text"], 
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        theme_frame.pack(fill="x", pady=8)
+        
+        tk.Label(theme_frame, text="Choose a color theme:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        theme_var = tk.StringVar(value=general.get("theme", "dark"))
+        
+        # Theme selection with preview swatches
+        theme_select_frame = tk.Frame(theme_frame, bg=UI["panel"])
+        theme_select_frame.pack(fill="x", pady=(2, 4))
+        
+        tk.Label(theme_select_frame, text="Theme:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(side="left", padx=(0, 8))
+        
+        theme_combo = ttk.Combobox(theme_select_frame, textvariable=theme_var, 
+                                   values=list(COLOR_THEMES.keys()), state="readonly", width=15)
+        theme_combo.pack(side="left", padx=(0, 12))
+        
+        # Preview swatches
+        swatch_frame = tk.Frame(theme_select_frame, bg=UI["panel"])
+        swatch_frame.pack(side="left")
+        
+        preview_swatches = []
+        
+        def update_preview(*args):
+            theme_name = theme_var.get()
+            if theme_name in COLOR_THEMES:
+                colors = COLOR_THEMES[theme_name]
+                swatch_colors = [colors["bg"], colors["panel"], colors["accent"], colors["text"]]
+                for i, swatch in enumerate(preview_swatches):
+                    if i < len(swatch_colors):
+                        swatch.config(bg=swatch_colors[i])
+        
+        # Create 4 color swatches
+        for i in range(4):
+            swatch = tk.Label(swatch_frame, text="  ", bg=UI["bg"], width=3, height=1, relief="solid", borderwidth=1)
+            swatch.pack(side="left", padx=1)
+            preview_swatches.append(swatch)
+        
+        theme_combo.bind("<<ComboboxSelected>>", update_preview)
+        update_preview()  # Initial preview
+        
+        tk.Label(theme_frame, text="(Requires restart to apply)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(4, 0))
+
+        # UI Scale
+        scale_frame = tk.LabelFrame(wrap, text="UI Scale (DPI Zoom)", fg=UI["text"], 
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        scale_frame.pack(fill="x", pady=8)
+
+        tk.Label(scale_frame, text="Zoom Level (0.8 - 2.5):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # Use global UI_SCALE as default
+        # Note: we re-read config here to be safe, though UI_SCALE global exists
+        _cur_gen = get_global_config().get("general", {})
+        scale_var = tk.DoubleVar(value=_cur_gen.get("ui_scale", 1.0))
+        
+        scale_slider = tk.Scale(scale_frame, from_=0.8, to=2.5, resolution=0.1, orient="horizontal",
+                                variable=scale_var, bg=UI["panel"], fg=UI["text"], highlightthickness=0, length=300)
+        scale_slider.pack(anchor="w", pady=(2, 4))
+        
+        tk.Label(scale_frame, text="(Requires restart to apply)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        # Save button
+        def save_general():
+            cfg = get_global_config()
+            new_theme = theme_var.get()
+            new_scale = scale_var.get()
+            
+            old_gen = cfg.get("general", {})
+            old_theme = old_gen.get("theme", "dark")
+            old_scale = float(old_gen.get("ui_scale", 1.0))
+            
+            cfg["general"] = {
+                "auto_start_last_station": auto_start_var.get(),
+                "status_poll_ms": int(poll_var.get() or 1000),
+                "theme": new_theme,
+                "ui_scale": new_scale,
+            }
+            save_global_config(cfg)
+            
+            # If theme or scale changed, restart the app
+            if new_theme != old_theme or abs(new_scale - old_scale) > 0.001:
+                if messagebox.askyesno("Display Settings Changed", 
+                    "Display settings will be applied after restart.\n\nClose and reopen the application?"):
+                    self._restart_app()
+                    return
+            
+            messagebox.showinfo("Success", "General settings saved!")
+        
+        tk.Button(wrap, text="Save Settings", font=FONT_BODY, bg=UI["accent"], 
+                 fg="#000", relief="flat", command=save_general).pack(anchor="w", pady=16)
+
+    def _build_model_settings(self, parent: tk.Frame) -> None:
+        """Build the Model Provider settings panel (defaults for new stations)."""
+        
+        # Make scrollable
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.configure(command=canvas.yview)
+        
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        tk.Label(scroll_frame, text="Default Model Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 4)
+        )
+        tk.Label(scroll_frame, text="Set default LLM providers, endpoints, and models for new stations", 
+                font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=(0, 8))
+        
+        wrap = tk.Frame(scroll_frame, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=8)
+        
+        cfg = get_global_config()
+        models = cfg.get("default_models", {})
+        
+        # LLM Provider Selection
+        provider_frame = tk.LabelFrame(wrap, text="LLM Provider", fg=UI["text"], 
+                                       bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        provider_frame.pack(fill="x", pady=8)
+        
+        tk.Label(provider_frame, text="Primary Provider:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        provider_var = tk.StringVar(value=models.get("provider", "ollama"))
+        provider_options = ["ollama", "anthropic", "openai", "google"]
+        provider_combo = ttk.Combobox(provider_frame, textvariable=provider_var, 
+                                     values=provider_options, state="readonly", width=30)
+        provider_combo.pack(anchor="w", pady=(2, 8))
+        
+        tk.Label(provider_frame, text="• ollama: Local models or OpenAI-compatible API\n"
+                                     "• anthropic: Claude API (requires API key)\n"
+                                     "• openai: GPT models (requires API key)\n"
+                                     "• google: Gemini API (requires API key)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w")
+        
+        # Ollama/Local Endpoint
+        ollama_frame = tk.LabelFrame(wrap, text="Ollama / Local LLM Endpoint", fg=UI["text"], 
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        ollama_frame.pack(fill="x", pady=8)
+        
+        tk.Label(ollama_frame, text="Endpoint URL:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Label(ollama_frame, text="(e.g., http://localhost:11434 or any OpenAI-compatible endpoint)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        ollama_var = tk.StringVar(value=models.get("llm_endpoint", "http://127.0.0.1:11434/api/generate"))
+        tk.Entry(ollama_frame, textvariable=ollama_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(fill="x", pady=(2, 8))
+        
+        # API Keys for Cloud Providers
+        api_frame = tk.LabelFrame(wrap, text="Cloud Provider API Keys", fg=UI["text"], 
+                                  bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        api_frame.pack(fill="x", pady=8)
+        
+        # Anthropic API Key
+        tk.Label(api_frame, text="Anthropic API Key (Claude):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        anthropic_var = tk.StringVar(value=models.get("anthropic_api_key", ""))
+        tk.Entry(api_frame, textvariable=anthropic_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"], show="•").pack(fill="x", pady=(2, 8))
+        
+        # OpenAI API Key
+        tk.Label(api_frame, text="OpenAI API Key (GPT):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        openai_var = tk.StringVar(value=models.get("openai_api_key", ""))
+        tk.Entry(api_frame, textvariable=openai_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"], show="•").pack(fill="x", pady=(2, 8))
+        
+        # Google/Gemini API Key
+        tk.Label(api_frame, text="Google API Key (Gemini):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        google_var = tk.StringVar(value=models.get("google_api_key", ""))
+        tk.Entry(api_frame, textvariable=google_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"], show="•").pack(fill="x", pady=(2, 8))
+        
+        # Producer Model
+        producer_frame = tk.LabelFrame(wrap, text="Default Producer Model", fg=UI["text"], 
+                                       bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        producer_frame.pack(fill="x", pady=8)
+        
+        tk.Label(producer_frame, text="Model Name:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Label(producer_frame, text="(e.g., llama3.1:70b, claude-3-opus-20240229, gpt-4o, gemini-1.5-pro)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        producer_var = tk.StringVar(value=models.get("producer_model", "rnj-1:8b"))
+        tk.Entry(producer_frame, textvariable=producer_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(fill="x", pady=(2, 8))
+        tk.Label(producer_frame, text="(Context-building, slower, higher quality)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        # Host Model
+        host_frame = tk.LabelFrame(wrap, text="Default Host Model", fg=UI["text"], 
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        host_frame.pack(fill="x", pady=8)
+        
+        tk.Label(host_frame, text="Model Name:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Label(host_frame, text="(e.g., llama3.1:70b, claude-3-opus-20240229, gpt-4o, gemini-1.5-pro)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        host_var = tk.StringVar(value=models.get("host_model", "rnj-1:8b"))
+        tk.Entry(host_frame, textvariable=host_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(fill="x", pady=(2, 8))
+        tk.Label(host_frame, text="(Live hosting, faster responses)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        # Save button
+        def save_models():
+            cfg = get_global_config()
+            cfg["default_models"] = {
+                "provider": provider_var.get(),
+                "llm_endpoint": ollama_var.get(),
+                "anthropic_api_key": anthropic_var.get(),
+                "openai_api_key": openai_var.get(),
+                "google_api_key": google_var.get(),
+                "producer_model": producer_var.get(),
+                "host_model": host_var.get(),
+            }
+            save_global_config(cfg)
+            messagebox.showinfo("Success", "Model settings saved!")
+        
+        tk.Button(wrap, text="Save Settings", font=FONT_BODY, bg=UI["accent"], 
+                 fg="#000", relief="flat", command=save_models).pack(anchor="w", pady=16)
+
+    def _build_voice_settings(self, parent: tk.Frame) -> None:
+        """Build the Voice settings panel (defaults for new stations)."""
+        
+        # Make scrollable
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.configure(command=canvas.yview)
+        
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        tk.Label(scroll_frame, text="Default Voice Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 4)
+        )
+        tk.Label(scroll_frame, text="Set global voice paths used as defaults for new stations", 
+                font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=(0, 8))
+        
+        wrap = tk.Frame(scroll_frame, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=8)
+        
+        cfg = get_global_config()
+        voices = cfg.get("default_voices", {})
+        
+        # Voice Provider Selection
+        provider_frame = tk.LabelFrame(wrap, text="Voice Provider", fg=UI["text"], 
+                                       bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        provider_frame.pack(fill="x", pady=8)
+        
+        tk.Label(provider_frame, text="TTS Provider:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        provider_var = tk.StringVar(value=voices.get("provider", "piper"))
+        provider_options = ["piper", "elevenlabs", "google_cloud_tts", "azure_speech"]
+        provider_combo = ttk.Combobox(provider_frame, textvariable=provider_var, 
+                                     values=provider_options, state="readonly", width=30)
+        provider_combo.pack(anchor="w", pady=(2, 8))
+        
+        tk.Label(provider_frame, text="• piper: Local offline TTS (requires binary + ONNX models)\n"
+                                     "• elevenlabs: ElevenLabs API (requires API key)\n"
+                                     "• google_cloud_tts: Google Cloud TTS (requires credentials)\n"
+                                     "• azure_speech: Azure Speech Services (requires API key)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w")
+        
+        # Piper Binary (for local)
+        piper_frame = tk.LabelFrame(wrap, text="Piper TTS Binary (Local Only)", fg=UI["text"], 
+                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        piper_frame.pack(fill="x", pady=8)
+        
+        tk.Label(piper_frame, text="Piper Binary Path:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        piper_row = tk.Frame(piper_frame, bg=UI["panel"])
+        piper_row.pack(fill="x", pady=(2, 4))
+        
+        piper_var = tk.StringVar(value=voices.get("piper_bin", ""))
+        tk.Entry(piper_row, textvariable=piper_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        
+        def browse_piper():
+            path = filedialog.askopenfilename(parent=parent.winfo_toplevel(),
+                                              title="Select Piper Binary")
+            if path:
+                piper_var.set(path)
+        
+        tk.Button(piper_row, text="Browse", bg=UI["card"], fg=UI["text"], relief="flat",
+                 command=browse_piper).pack(side="left")
+        
+        # API Configuration (for cloud providers)
+        api_frame = tk.LabelFrame(wrap, text="API Provider Configuration", fg=UI["text"], 
+                                  bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        api_frame.pack(fill="x", pady=8)
+        
+        tk.Label(api_frame, text="API Key (ElevenLabs/Azure):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        api_key_var = tk.StringVar(value=voices.get("api_key", ""))
+        tk.Entry(api_frame, textvariable=api_key_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"], show="•").pack(fill="x", pady=(2, 8))
+        
+        tk.Label(api_frame, text="Google Cloud Credentials Path (JSON):", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        gcloud_row = tk.Frame(api_frame, bg=UI["panel"])
+        gcloud_row.pack(fill="x", pady=(2, 4))
+        
+        gcloud_var = tk.StringVar(value=voices.get("google_credentials", ""))
+        tk.Entry(gcloud_row, textvariable=gcloud_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        
+        def browse_gcloud():
+            path = filedialog.askopenfilename(parent=parent.winfo_toplevel(),
+                                              title="Select Google Credentials JSON",
+                                              filetypes=[("JSON", "*.json"), ("All", "*.*")])
+            if path:
+                gcloud_var.set(path)
+        
+        tk.Button(gcloud_row, text="Browse", bg=UI["card"], fg=UI["text"], relief="flat",
+                 command=browse_gcloud).pack(side="left")
+        
+        # Global Voices Directory
+        voices_dir_frame = tk.LabelFrame(wrap, text="Global Voices Directory (Local Models)", fg=UI["text"], 
+                                         bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        voices_dir_frame.pack(fill="x", pady=8)
+        
+        tk.Label(voices_dir_frame, text="Voice Models Directory:", fg=UI["text"], 
+                bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Label(voices_dir_frame, text="(Stations can reference voices relative to this path)", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        voices_dir_row = tk.Frame(voices_dir_frame, bg=UI["panel"])
+        voices_dir_row.pack(fill="x", pady=(2, 4))
+        
+        voices_dir_var = tk.StringVar(value=voices.get("voices_directory", ""))
+        tk.Entry(voices_dir_row, textvariable=voices_dir_var, bg=UI["card"], fg=UI["text"], 
+                insertbackground=UI["text"]).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        
+        def browse_voices_dir():
+            path = filedialog.askdirectory(parent=parent.winfo_toplevel(),
+                                          title="Select Voices Directory")
+            if path:
+                voices_dir_var.set(path)
+        
+        tk.Button(voices_dir_row, text="Browse", bg=UI["card"], fg=UI["text"], relief="flat",
+                 command=browse_voices_dir).pack(side="left")
+        
+        # Default Voice Presets (for Piper local models or API voice IDs)
+        presets_frame = tk.LabelFrame(wrap, text="Default Character Voices", fg=UI["text"], 
+                                      bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        presets_frame.pack(fill="x", pady=8)
+        
+        tk.Label(presets_frame, text="For Piper: .onnx file paths | For APIs: voice IDs (e.g., 'EXAVITQu4vr4xnSDxMaL')", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(0, 8))
+        
+        voice_chars = ["host", "expert", "skeptic", "optimist", "coach"]
+        voice_vars = {}
+        
+        for char in voice_chars:
+            char_row = tk.Frame(presets_frame, bg=UI["panel"])
+            char_row.pack(fill="x", pady=2)
+            
+            tk.Label(char_row, text=f"{char.title()}:", fg=UI["text"], bg=UI["panel"], 
+                    font=FONT_SMALL, width=10, anchor="w").pack(side="left")
+            
+            var = tk.StringVar(value=voices.get(f"voice_{char}", ""))
+            voice_vars[char] = var
+            
+            tk.Entry(char_row, textvariable=var, bg=UI["card"], fg=UI["text"], 
+                    insertbackground=UI["text"]).pack(side="left", fill="x", expand=True, padx=(0, 4))
+            
+            tk.Button(char_row, text="...", bg=UI["card"], fg=UI["text"], relief="flat", width=3,
+                     command=lambda v=var: self._browse_voice_file(v, parent)).pack(side="left")
+        
+        # Save button
+        def save_voices():
+            cfg = get_global_config()
+            voice_cfg = {
+                "provider": provider_var.get(),
+                "piper_bin": piper_var.get(),
+                "api_key": api_key_var.get(),
+                "google_credentials": gcloud_var.get(),
+                "voices_directory": voices_dir_var.get(),
+            }
+            for char, var in voice_vars.items():
+                voice_cfg[f"voice_{char}"] = var.get()
+            
+            cfg["default_voices"] = voice_cfg
+            save_global_config(cfg)
+            messagebox.showinfo("Success", "Voice settings saved!")
+        
+        tk.Button(wrap, text="Save Settings", font=FONT_BODY, bg=UI["accent"], 
+                 fg="#000", relief="flat", command=save_voices).pack(anchor="w", pady=16)
+
+    def _browse_voice_file(self, var: tk.StringVar, parent: tk.Widget) -> None:
+        """Browse for a voice file (.onnx)."""
+        path = filedialog.askopenfilename(
+            parent=parent.winfo_toplevel(),
+            title="Select Voice Model",
+            filetypes=[("ONNX Models", "*.onnx"), ("All Files", "*.*")]
+        )
+        if path:
+            var.set(path)
+
+    def _build_storage_tools(self, parent: tk.Frame) -> None:
+        """Build the Storage tools panel."""
+        
+        # Make scrollable
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.configure(command=canvas.yview)
+        
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        tk.Label(scroll_frame, text="Storage & Maintenance", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 8)
+        )
+        
+        wrap = tk.Frame(scroll_frame, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=8)
+        
+        # Log Management
+        log_frame = tk.LabelFrame(wrap, text="Log Management", fg=UI["text"], 
+                                  bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        log_frame.pack(fill="x", pady=8)
+        
+        tk.Label(log_frame, text="Clean up old runtime logs to free disk space", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(0, 8))
+        
+        def clear_all_logs():
+            if not messagebox.askyesno("Clear Logs", 
+                                      "Delete all runtime.log files from all stations?\n\nThis cannot be undone."):
+                return
+            
+            count = 0
+            for station in self.stations:
+                log_path = os.path.join(station.path, "runtime.log")
+                if os.path.exists(log_path):
+                    try:
+                        os.remove(log_path)
+                        count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {log_path}: {e}")
+            
+            messagebox.showinfo("Logs Cleared", f"Deleted {count} log file(s)")
+        
+        tk.Button(log_frame, text="Clear All Station Logs", bg=UI["card"], fg=UI["text"], 
+                 relief="flat", command=clear_all_logs, font=FONT_BODY).pack(anchor="w", pady=4)
+        
+        # Database Management
+        db_frame = tk.LabelFrame(wrap, text="Database Management", fg=UI["text"], 
+                                 bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        db_frame.pack(fill="x", pady=8)
+        
+        tk.Label(db_frame, text="Manage station databases and queue state", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(0, 8))
+        
+        def vacuum_databases():
+            if not messagebox.askyesno("Vacuum Databases", 
+                                      "Optimize all station databases?\n\nThis may take a moment."):
+                return
+            
+            import sqlite3
+            count = 0
+            for station in self.stations:
+                db_path = os.path.join(station.path, "station.sqlite")
+                if os.path.exists(db_path):
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        conn.execute("VACUUM")
+                        conn.close()
+                        count += 1
+                    except Exception as e:
+                        print(f"Failed to vacuum {db_path}: {e}")
+            
+            messagebox.showinfo("Databases Optimized", f"Vacuumed {count} database(s)")
+        
+        tk.Button(db_frame, text="Vacuum All Databases", bg=UI["card"], fg=UI["text"], 
+                 relief="flat", command=vacuum_databases, font=FONT_BODY).pack(anchor="w", pady=4)
+        
+        # Export/Backup
+        export_frame = tk.LabelFrame(wrap, text="Backup & Export", fg=UI["text"], 
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        export_frame.pack(fill="x", pady=8)
+        
+        tk.Label(export_frame, text="Export station configurations for backup or sharing", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(0, 8))
+        
+        def export_station():
+            if not self.stations:
+                messagebox.showwarning("No Stations", "No stations to export")
+                return
+            
+            # Let user pick which station
+            station_names = [s.station_id for s in self.stations]
+            # Simple: just use the selected one
+            if self.selected_idx >= 0 and self.selected_idx < len(self.stations):
+                station = self.stations[self.selected_idx]
+                
+                dest = filedialog.asksaveasfilename(
+                    parent=parent.winfo_toplevel(),
+                    title=f"Export {station.station_id}",
+                    defaultextension=".yaml",
+                    initialfile=f"{station.station_id}_manifest.yaml",
+                    filetypes=[("YAML Files", "*.yaml"), ("All Files", "*.*")]
+                )
+                
+                if dest:
+                    import shutil
+                    src = os.path.join(station.path, "manifest.yaml")
+                    try:
+                        shutil.copy2(src, dest)
+                        messagebox.showinfo("Success", f"Exported manifest to:\n{dest}")
+                    except Exception as e:
+                        messagebox.showerror("Export Failed", str(e))
+        
+        tk.Button(export_frame, text="Export Selected Station Manifest", bg=UI["card"], 
+                 fg=UI["text"], relief="flat", command=export_station, font=FONT_BODY).pack(anchor="w", pady=4)
+        
+        # Global config path info
+        info_frame = tk.LabelFrame(wrap, text="Configuration Location", fg=UI["text"], 
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        info_frame.pack(fill="x", pady=8)
+        
+        config_path = get_global_config_path()
+        tk.Label(info_frame, text=f"Global config: {config_path}", 
+                fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, wraplength=800).pack(anchor="w")
+        
+        def open_config_dir():
+            import subprocess
+            import platform
+            config_dir = os.path.dirname(config_path)
+            
+            if platform.system() == "Windows":
+                os.startfile(config_dir)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", config_dir])
+            else:
+                subprocess.Popen(["xdg-open", config_dir])
+        
+        tk.Button(info_frame, text="Open Config Directory", bg=UI["card"], fg=UI["text"], 
+                 relief="flat", command=open_config_dir, font=FONT_BODY).pack(anchor="w", pady=(8, 0))
+
+    def _build_visual_models_panel(self, parent: tk.Frame) -> None:
+        """Build the Visual Models settings panel."""
+        # Title
+        tk.Label(parent, text="Vision Model Configuration", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 8)
+        )
+        
+        # Scrollable container
+        scrollbar = ttk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True, padx=14, pady=8)
+        
+        scrollbar.configure(command=canvas.yview)
+        
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        # Load current config
+        cfg = get_global_config()
+        visual_cfg = cfg.get("visual_models", {})
+        
+        # Model Type Selection (Local or API)
+        model_type_var = tk.StringVar(value=visual_cfg.get("model_type", "local"))
+        
+        type_frame = tk.LabelFrame(scroll_frame, text="Model Type", fg=UI["text"], bg=UI["panel"], 
+                                    font=FONT_BODY, padx=12, pady=8)
+        type_frame.pack(fill="x", pady=8)
+        
+        tk.Radiobutton(type_frame, text="Local Model (e.g., Ollama/LLaVA)", variable=model_type_var, 
+                       value="local", fg=UI["text"], bg=UI["panel"], selectcolor=UI["accent"]).pack(anchor="w")
+        tk.Radiobutton(type_frame, text="API-based Model", variable=model_type_var, 
+                       value="api", fg=UI["text"], bg=UI["panel"], selectcolor=UI["accent"]).pack(anchor="w")
+        
+        # Local Model Config
+        local_frame = tk.LabelFrame(scroll_frame, text="Local Model Settings", fg=UI["text"], 
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        local_frame.pack(fill="x", pady=8)
+        
+        tk.Label(local_frame, text="Model Name / Endpoint:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        local_model_var = tk.StringVar(value=visual_cfg.get("local_model", ""))
+        local_model_entry = tk.Entry(local_frame, textvariable=local_model_var, bg=UI["card"], fg=UI["text"], 
+                                      insertbackground=UI["text"])
+        local_model_entry.pack(fill="x", pady=(2, 8))
+        tk.Label(local_frame, text="(e.g., llava:latest, or http://localhost:11434)", 
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
+        # API Model Config
+        api_frame = tk.LabelFrame(scroll_frame, text="API Model Settings", fg=UI["text"], 
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        api_frame.pack(fill="x", pady=8)
+        
+        tk.Label(api_frame, text="API Provider:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        api_provider_var = tk.StringVar(value=visual_cfg.get("api_provider", "openai"))
+        provider_options = ["openai", "anthropic", "google", "custom"]
+        provider_menu = ttk.Combobox(api_frame, textvariable=api_provider_var, values=provider_options, 
+                                     state="readonly", width=30)
+        provider_menu.pack(fill="x", pady=(2, 8))
+        
+        tk.Label(api_frame, text="Model Name:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        api_model_var = tk.StringVar(value=visual_cfg.get("api_model", "gpt-4-vision"))
+        api_model_entry = tk.Entry(api_frame, textvariable=api_model_var, bg=UI["card"], fg=UI["text"], 
+                                    insertbackground=UI["text"])
+        api_model_entry.pack(fill="x", pady=(2, 8))
+        
+        tk.Label(api_frame, text="API Key:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        api_key_var = tk.StringVar(value=visual_cfg.get("api_key", ""))
+        api_key_entry = tk.Entry(api_frame, textvariable=api_key_var, bg=UI["card"], fg=UI["text"], 
+                                  insertbackground=UI["text"], show="•")
+        api_key_entry.pack(fill="x", pady=(2, 8))
+        
+        tk.Label(api_frame, text="API Endpoint (optional):", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        api_endpoint_var = tk.StringVar(value=visual_cfg.get("api_endpoint", ""))
+        api_endpoint_entry = tk.Entry(api_frame, textvariable=api_endpoint_var, bg=UI["card"], fg=UI["text"], 
+                                       insertbackground=UI["text"])
+        api_endpoint_entry.pack(fill="x", pady=(2, 8))
+        
+        # Vision-specific options
+        opts_frame = tk.LabelFrame(scroll_frame, text="Vision Processing Options", fg=UI["text"], 
+                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        opts_frame.pack(fill="x", pady=8)
+        
+        tk.Label(opts_frame, text="Max Image Size (width):", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        max_size_var = tk.StringVar(value=visual_cfg.get("max_image_size", "1024"))
+        max_size_entry = tk.Entry(opts_frame, textvariable=max_size_var, bg=UI["card"], fg=UI["text"], 
+                                   insertbackground=UI["text"], width=10)
+        max_size_entry.pack(anchor="w", pady=(2, 8))
+        
+        tk.Label(opts_frame, text="Image Quality (1-100):", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        quality_var = tk.StringVar(value=visual_cfg.get("image_quality", "85"))
+        quality_entry = tk.Entry(opts_frame, textvariable=quality_var, bg=UI["card"], fg=UI["text"], 
+                                  insertbackground=UI["text"], width=10)
+        quality_entry.pack(anchor="w", pady=(2, 8))
+        
+        # Save button
+        def save_visual_config():
+            cfg = get_global_config()
+            cfg["visual_models"] = {
+                "model_type": model_type_var.get(),
+                "local_model": local_model_var.get(),
+                "api_provider": api_provider_var.get(),
+                "api_model": api_model_var.get(),
+                "api_key": api_key_var.get(),
+                "api_endpoint": api_endpoint_var.get(),
+                "max_image_size": max_size_var.get(),
+                "image_quality": quality_var.get(),
+            }
+            save_global_config(cfg)
+            messagebox.showinfo("Success", "Visual model settings saved!")
+
+        quick_frame = tk.Frame(scroll_frame, bg=UI["bg"])
+        quick_frame.pack(fill="x", pady=(0, 8), before=type_frame)
+        tk.Button(
+            quick_frame,
+            text="Save Settings",
+            font=FONT_BODY,
+            bg=UI["accent"],
+            fg="#000",
+            relief="flat",
+            command=save_visual_config,
+        ).pack(side="right")
+        
+        btn_frame = tk.Frame(scroll_frame, bg=UI["bg"])
+        btn_frame.pack(fill="x", pady=(16, 0))
+        
+        tk.Button(btn_frame, text="Save Settings", font=FONT_BODY, bg=UI["accent"], 
+                  fg="#000", relief="flat", command=save_visual_config).pack(side="left", padx=4)
 
     # -----------------------------
     # Station editor / builder
@@ -1080,8 +2111,16 @@ class RadioShell:
         self.edit_station(self._find_station(station_id))
 
     def edit_station(self, station: Optional[StationInfo]):
-        if station:
-            EditorWindow(self, station)
+        if not station:
+            return
+        
+        # Use the wizard but pre-populate with existing station data
+        wiz = StationWizard(self, edit_mode=True, station=station)
+        result = wiz.run_and_get_result()
+        
+        if result:
+            # Manifest already saved by wizard, just refresh
+            self.refresh_stations(select_id=station.station_id)
 
     def _find_station(self, station_id: str) -> Optional[StationInfo]:
         for s in self.stations:
@@ -1102,7 +2141,7 @@ class RadioShell:
     def _prompt_text(self, title: str, prompt: str) -> Optional[str]:
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry("520x200")
+        win.geometry(scaled_geometry(520, 200))
         win.configure(bg=UI["bg"])
 
         tk.Label(win, text=prompt, font=FONT_BODY, fg=UI["text"], bg=UI["bg"], wraplength=480, justify="left").pack(
@@ -1347,7 +2386,7 @@ PRESET_FOCUS = [
 FEED_TEMPLATES: Dict[str, Dict[str, Any]] = {
     "reddit": {
         "enabled": True,
-        "subreddits": ["algotrading", "cryptocurrency", "quant"],
+        "subreddits": [],
         "poll_sec": 30,
         "limit": 20,
         "priority": 60,
@@ -1356,7 +2395,7 @@ FEED_TEMPLATES: Dict[str, Dict[str, Any]] = {
     },
     "markets": {
         "enabled": True,
-        "symbols": ["BTCUSDT", "ETHUSDT"],
+        "symbols": [],
         "poll_sec": 15,
         "breakout_pct": 0.2,
         "priority": 90,
@@ -1376,16 +2415,13 @@ FEED_TEMPLATES: Dict[str, Dict[str, Any]] = {
     },
     "rss": {
         "enabled": True,
-        "urls": [
-            "https://news.google.com/rss/search?q=crypto",
-            "https://news.google.com/rss/search?q=bitcoin",
-        ],
+        "urls": [],
         "poll_sec": 180,
         "priority": 72,
     },
     "bluesky": {
         "enabled": True,
-        "hashtags": ["crypto", "bitcoin", "trading"],
+        "hashtags": [],
         "poll_sec": 60,
         "limit": 20,
         "priority": 70,
@@ -1415,23 +2451,49 @@ FEED_TEMPLATES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-DEFAULT_SCHED_QUOTAS = {
-    "reddit": 6,
-    "markets": 4,
-    "portfolio_event": 6,
-    "bluesky": 2,
-    "document": 4,
-    "rss": 1,
-}
+def _build_default_quotas() -> Dict[str, int]:
+    # Baseline defaults
+    base = {
+        "reddit": 6,
+        "markets": 4,
+        "portfolio_event": 6,
+        "bluesky": 2,
+        "document": 4,
+        "rss": 1,
+    }
+    # Dynamically correct based on installed plugins
+    try:
+        for name, info in discover_plugins().items():
+            if info.get("is_feed", True):
+                if name not in base:
+                    base[name] = 3
+    except Exception:
+        pass
+    return base
 
-DEFAULT_MIX_WEIGHTS = {
-    "reddit": 0.50,
-    "bluesky": 0.25,
-    "markets": 0.10,
-    "portfolio_event": 0.10,
-    "rss": 0.03,
-    "document": 0.02,
-}
+DEFAULT_SCHED_QUOTAS = _build_default_quotas()
+
+def _build_default_weights() -> Dict[str, float]:
+    # Baseline defaults
+    base = {
+        "reddit": 0.50,
+        "bluesky": 0.25,
+        "markets": 0.10,
+        "portfolio_event": 0.10,
+        "rss": 0.03,
+        "document": 0.02,
+    }
+    # Dynamically correct based on installed plugins
+    try:
+        for name, info in discover_plugins().items():
+            if info.get("is_feed", True):
+                if name not in base:
+                    base[name] = 0.05
+    except Exception:
+        pass
+    return base
+
+DEFAULT_MIX_WEIGHTS = _build_default_weights()
 
 DEFAULT_CHARSET = {
     "host":   {"role": "host",   "traits": ["calm", "smart"],              "focus": ["flow", "continuity"]},
@@ -1492,8 +2554,10 @@ def _try_play_wav(path: str) -> None:
 
     # Last resort: open file (user can play it)
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
         else:
             subprocess.Popen(["xdg-open", path])
     except Exception:
@@ -1503,42 +2567,55 @@ def _try_play_wav(path: str) -> None:
 class StationWizard:
     """
     Friendly wizard that produces the gold-standard manifest.yaml.
-    Keeps the existing "Edit Station" window intact.
+    Can create new stations or edit existing ones.
     """
-    def __init__(self, shell: "RadioShell"):
+    def __init__(self, shell: "RadioShell", edit_mode: bool = False, station: Optional["StationInfo"] = None):
         self.shell = shell
         self.root = shell.root
+        self.edit_mode = edit_mode
+        self.station = station
 
         self.plugins = discover_plugins()  # available plugin modules
 
         # Result payload
         self._result: Optional[Dict[str, Any]] = None
 
-        # State
+        # Load global config for defaults
+        global_cfg = get_global_config()
+        default_models = global_cfg.get("default_models", {})
+        default_voices = global_cfg.get("default_voices", {})
+
+        # State - defaults for new station (use global config or fallback)
         self.station_id = ""
-        self.station_name = "AlgoTrading FM"
-        self.station_host = "Kai"
+        self.station_name = "My Radio Station"
+        self.station_host = "Host"
         self.station_category = "Custom"
+        self.station_logo = ""
 
-        self.llm_endpoint = "http://127.0.0.1:11434/api/generate"
-        self.model_producer = "rnj-1:8b"
-        self.model_host = "rnj-1:8b"
+        self.llm_endpoint = default_models.get("llm_endpoint", "http://127.0.0.1:11434/api/generate")
+        self.model_producer = default_models.get("producer_model", "rnj-1:8b")
+        self.model_host = default_models.get("host_model", "rnj-1:8b")
 
-        self.piper_bin = ""
-        # voices assigned per character (dynamic)
-        self.voices: Dict[str, str] = {}
+        self.piper_bin = default_voices.get("piper_bin", "")
+        # voices assigned per character (dynamic) - use global defaults
+        self.voices: Dict[str, str] = {
+            "host": default_voices.get("voice_host", ""),
+            "expert": default_voices.get("voice_expert", ""),
+            "skeptic": default_voices.get("voice_skeptic", ""),
+            "optimist": default_voices.get("voice_optimist", ""),
+            "coach": default_voices.get("voice_coach", ""),
+        }
 
         # Feeds chosen/configured
         self.feed_cfg: Dict[str, Dict[str, Any]] = {}
         # Characters chosen/configured (2-10, must include host)
         self.characters = {
             "host": {
-                "role": "host",
-                "traits": [],
-                "focus": []
+                "role": "moderator",
+                "traits": ["calm", "smart"],
+                "focus": ["flow", "continuity"]
             }
         }
-
 
         # Mix weights (ready for runtime later)
         self.mix_weights: Dict[str, float] = _deepcopy_jsonable(DEFAULT_MIX_WEIGHTS)
@@ -1546,10 +2623,17 @@ class StationWizard:
         # Scheduler quotas
         self.scheduler_quotas: Dict[str, int] = _deepcopy_jsonable(DEFAULT_SCHED_QUOTAS)
 
+        # Preserve original manifest to avoid data loss on save
+        self.existing_manifest: Optional[Dict[str, Any]] = None
+
+        # If editing, load existing station data
+        if edit_mode and station:
+            self._load_existing_station(station)
+
         # Wizard window
         self.win = tk.Toplevel(self.root)
-        self.win.title("New Station Wizard")
-        self.win.geometry("1100x760")
+        self.win.title("Edit Station" if edit_mode else "New Station Wizard")
+        self.win.geometry(scaled_geometry(1100, 760))
         self.win.configure(bg=UI["bg"])
         self.win.grab_set()
 
@@ -1561,6 +2645,67 @@ class StationWizard:
     def run_and_get_result(self) -> Optional[Dict[str, Any]]:
         self.root.wait_window(self.win)
         return self._result
+    
+    def _load_existing_station(self, station: "StationInfo"):
+        """Load existing station manifest data into wizard state."""
+        manifest_path = station_manifest_path(station.path)
+        cfg = safe_read_yaml(manifest_path)
+        
+        if not cfg:
+            return
+
+        # Keep a copy of the full manifest to preserve extra fields (pacing, riff, etc)
+        self.existing_manifest = _deepcopy_jsonable(cfg)
+        
+        # Load station basics
+        st_block = cfg.get("station", {})
+        self.station_id = station.station_id
+        self.station_name = st_block.get("name", station.station_id)
+        self.station_host = st_block.get("host", "Kai")
+        self.station_category = st_block.get("category", "Custom")
+        self.station_logo = st_block.get("logo", "")
+        
+        # Load models
+        llm_block = cfg.get("llm", {})
+        self.llm_endpoint = llm_block.get("endpoint", "http://127.0.0.1:11434/api/generate")
+        
+        models_block = cfg.get("models", {})
+        self.model_producer = models_block.get("producer", "rnj-1:8b")
+        self.model_host = models_block.get("host", "rnj-1:8b")
+        
+        # Load audio
+        audio_block = cfg.get("audio", {})
+        self.piper_bin = audio_block.get("piper_bin", "")
+        
+        # Load voices
+        voices_block = cfg.get("voices", {})
+        if isinstance(voices_block, dict):
+            self.voices = dict(voices_block)
+        
+        # Load feeds
+        feeds_block = cfg.get("feeds", {})
+        if isinstance(feeds_block, dict):
+            self.feed_cfg = _deepcopy_jsonable(feeds_block)
+        
+        # Load characters
+        chars_block = cfg.get("characters", {})
+        if isinstance(chars_block, dict) and chars_block:
+            self.characters = _deepcopy_jsonable(chars_block)
+        
+        # Load mix weights
+        mix_block = cfg.get("mix", {})
+        if isinstance(mix_block, dict):
+            weights = mix_block.get("weights", {})
+            if isinstance(weights, dict):
+                self.mix_weights = dict(weights)
+        
+        # Load scheduler quotas
+        sched_block = cfg.get("scheduler", {})
+        if isinstance(sched_block, dict):
+            quotas = sched_block.get("source_quotas", {})
+            if isinstance(quotas, dict):
+                self.scheduler_quotas = dict(quotas)
+    
     def _refresh_voices_tab(self):
         # Capture any current UI edits before we destroy the widgets
         try:
@@ -1623,7 +2768,12 @@ class StationWizard:
             # delta is platform dependent; normalize a bit
             delta = 0
             try:
-                delta = int(-1 * (e.delta / 120))
+                if sys.platform == "darwin":
+                    # macOS: delta usually matches scroll units directly
+                    delta = int(-1 * e.delta)
+                else:
+                    # Windows: 120 increments
+                    delta = int(-1 * (e.delta / 120))
             except Exception:
                 delta = 0
             if delta != 0:
@@ -1675,7 +2825,7 @@ class StationWizard:
         body = tk.Frame(self.mix_wrap, bg=UI["bg"])
         body.pack(fill="both", expand=True)
 
-        left = tk.Frame(body, bg=UI["panel"], width=360)
+        left = tk.Frame(body, bg=UI["panel"], width=int(360 * UI_SCALE))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -1745,11 +2895,12 @@ class StationWizard:
             right,
             bg=UI["surface"],
             highlightthickness=0,
-            width=520,
-            height=520
+            width=int(520 * UI_SCALE),
+            height=int(520 * UI_SCALE)
         )
         self.pie.pack(pady=12)
-
+        
+        # Draw initial pie chart
         self._mix_redraw()
 
     # -------------
@@ -1773,6 +2924,7 @@ class StationWizard:
         self.tab_feeds = tk.Frame(self.nb, bg=UI["bg"])
         self.tab_chars = tk.Frame(self.nb, bg=UI["bg"])
         self.tab_voices = tk.Frame(self.nb, bg=UI["bg"])
+        self.tab_visual = tk.Frame(self.nb, bg=UI["bg"])
         self.tab_mix = tk.Frame(self.nb, bg=UI["bg"])
         self.tab_review = tk.Frame(self.nb, bg=UI["bg"])
 
@@ -1780,13 +2932,15 @@ class StationWizard:
         self.nb.add(self.tab_feeds, text="2) Feeds")
         self.nb.add(self.tab_chars, text="3) Characters")
         self.nb.add(self.tab_voices, text="4) Voices")
-        self.nb.add(self.tab_mix, text="5) Mix")
-        self.nb.add(self.tab_review, text="6) Review")
+        self.nb.add(self.tab_visual, text="5) Visual Models")
+        self.nb.add(self.tab_mix, text="6) Mix")
+        self.nb.add(self.tab_review, text="7) Review")
 
         self._build_basics()
         self._build_feeds()
         self._build_characters()
         self._build_voices()
+        self._build_visual_models()
         self._build_mix()
         self._build_review()
 
@@ -1944,6 +3098,127 @@ class StationWizard:
             insertbackground=UI["text"]
         ).grid(row=r+1, column=1, columnspan=2, sticky="ew")
 
+    def _build_visual_models(self):
+        """Build visual models configuration tab (prefilled with global settings)."""
+        wrap = tk.Frame(self.tab_visual, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=14)
+
+        # Title
+        tk.Label(
+            wrap,
+            text="Vision Model (Optional)",
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["bg"]
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Scrollable container
+        scrollbar = ttk.Scrollbar(wrap, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        canvas = tk.Canvas(wrap, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True, pady=8)
+
+        scrollbar.configure(command=canvas.yview)
+
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # Model Type Selection
+        type_frame = tk.LabelFrame(scroll_frame, text="Model Type", fg=UI["text"], bg=UI["panel"],
+                                    font=FONT_BODY, padx=12, pady=8)
+        type_frame.pack(fill="x", pady=8, padx=8)
+
+        tk.Radiobutton(type_frame, text="Local Model (e.g., Ollama/LLaVA)", 
+                       variable=self.var_visual_model_type, value="local",
+                       fg=UI["text"], bg=UI["panel"], selectcolor=UI["accent"]).pack(anchor="w", pady=4)
+        tk.Radiobutton(type_frame, text="API-based Model", 
+                       variable=self.var_visual_model_type, value="api",
+                       fg=UI["text"], bg=UI["panel"], selectcolor=UI["accent"]).pack(anchor="w", pady=4)
+
+        # Local Model Config
+        local_frame = tk.LabelFrame(scroll_frame, text="Local Model Settings", fg=UI["text"],
+                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        local_frame.pack(fill="x", pady=8, padx=8)
+
+        tk.Label(local_frame, text="Model Name / Endpoint:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Entry(local_frame, textvariable=self.var_visual_model_local, bg=UI["card"], fg=UI["text"],
+                insertbackground=UI["text"]).pack(fill="x", pady=(2, 8))
+        tk.Label(local_frame, text="(e.g., llava:latest or http://localhost:11434)",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # API Model Config
+        api_frame = tk.LabelFrame(scroll_frame, text="API Model Settings", fg=UI["text"],
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        api_frame.pack(fill="x", pady=8, padx=8)
+
+        tk.Label(api_frame, text="API Provider:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        provider_menu = ttk.Combobox(api_frame, textvariable=self.var_visual_model_api_provider,
+                                     values=["openai", "anthropic", "google", "custom"],
+                                     state="readonly", width=30)
+        provider_menu.pack(fill="x", pady=(2, 8))
+
+        tk.Label(api_frame, text="Model Name:", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Entry(api_frame, textvariable=self.var_visual_model_api_model, bg=UI["card"], fg=UI["text"],
+                insertbackground=UI["text"]).pack(fill="x", pady=(2, 8))
+
+        # Max image size
+        opts_frame = tk.LabelFrame(scroll_frame, text="Processing Options", fg=UI["text"],
+                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        opts_frame.pack(fill="x", pady=8, padx=8)
+
+        tk.Label(opts_frame, text="Max Image Size (width):", fg=UI["text"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        tk.Entry(opts_frame, textvariable=self.var_visual_model_max_size, bg=UI["card"], fg=UI["text"],
+                insertbackground=UI["text"], width=10).pack(anchor="w", pady=(2, 8))
+
+        btn_row = tk.Frame(scroll_frame, bg=UI["bg"])
+        btn_row.pack(fill="x", pady=(12, 0), padx=8)
+        tk.Button(
+            btn_row,
+            text="Save Visual Models",
+            bg=UI["accent"],
+            fg="#000",
+            relief="flat",
+            command=self._save_visual_models_tab,
+            font=FONT_BODY,
+        ).pack(side="right")
+
+    def _save_visual_models_tab(self):
+        """Save visual model settings from the wizard tab."""
+        # Persist immediately for edit mode; otherwise just keep staged values.
+        if self.edit_mode and self.station:
+            manifest_path = station_manifest_path(self.station.path)
+            cfg = safe_read_yaml(manifest_path)
+            if not isinstance(cfg, dict):
+                cfg = {}
+
+            cfg.setdefault("visual_models", {})
+            cfg["visual_models"]["model_type"] = self.var_visual_model_type.get().strip()
+            cfg["visual_models"]["local_model"] = self.var_visual_model_local.get().strip()
+            cfg["visual_models"]["api_provider"] = self.var_visual_model_api_provider.get().strip()
+            cfg["visual_models"]["api_model"] = self.var_visual_model_api_model.get().strip()
+            cfg["visual_models"]["api_key"] = self.var_visual_model_api_key.get().strip()
+            cfg["visual_models"]["max_image_size"] = self.var_visual_model_max_size.get().strip()
+
+            safe_write_yaml(manifest_path, cfg)
+            messagebox.showinfo("Success", "Visual model settings saved!")
+        else:
+            # For new stations, values are staged in the wizard and will be written on Create.
+            self._refresh_preview()
+            messagebox.showinfo("Saved", "Visual model settings staged for this station.")
+
     # -------------
     # Step 1: basics
     # -------------
@@ -1955,30 +3230,94 @@ class StationWizard:
             row=0, column=0, sticky="w", pady=(0, 12), columnspan=3
         )
 
-        self.var_station_id = tk.StringVar(value="")
+        self.var_station_id = tk.StringVar(value=self.station_id if self.edit_mode else "")
         self.var_station_name = tk.StringVar(value=self.station_name)
         self.var_station_host = tk.StringVar(value=self.station_host)
         self.var_station_cat = tk.StringVar(value=self.station_category)
+        self.var_station_logo = tk.StringVar(value=self.station_logo)
 
         self.var_llm_endpoint = tk.StringVar(value=self.llm_endpoint)
         self.var_model_producer = tk.StringVar(value=self.model_producer)
         self.var_model_host = tk.StringVar(value=self.model_host)
+        self.var_llm_provider = tk.StringVar(value="ollama")  # Default to ollama
+        
+        # Visual model variables
+        global_cfg = get_global_config()
+        visual_cfg = global_cfg.get("visual_models", {})
+        self.var_visual_model_type = tk.StringVar(value=visual_cfg.get("model_type", "local"))
+        self.var_visual_model_local = tk.StringVar(value=visual_cfg.get("local_model", ""))
+        self.var_visual_model_api_provider = tk.StringVar(value=visual_cfg.get("api_provider", "openai"))
+        self.var_visual_model_api_model = tk.StringVar(value=visual_cfg.get("api_model", "gpt-4-vision"))
+        self.var_visual_model_api_key = tk.StringVar(value=visual_cfg.get("api_key", ""))
+        self.var_visual_model_max_size = tk.StringVar(value=visual_cfg.get("max_image_size", "1024"))
 
-        self._row(wrap, 1, "Station ID (folder name)", self.var_station_id, hint="e.g. algotradingfm2")
+        # Station ID row - read-only in edit mode
+        if self.edit_mode:
+            tk.Label(wrap, text="Station ID (folder name)", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
+                row=1, column=0, sticky="w", padx=(0, 10), pady=6
+            )
+            tk.Label(wrap, text=self.station_id, font=FONT_BODY, fg=UI["accent"], bg=UI["bg"]).grid(
+                row=1, column=1, sticky="w", pady=6
+            )
+        else:
+            self._row(wrap, 1, "Station ID (folder name)", self.var_station_id, hint="e.g. algotradingfm2")
+        
         self._row(wrap, 2, "Station name", self.var_station_name)
         self._row(wrap, 3, "Host name", self.var_station_host)
         self._row(wrap, 4, "Category", self.var_station_cat)
+        self._row_with_browse(wrap, 5, "Logo", self.var_station_logo, kind="file")
 
-        ttk.Separator(wrap, orient="horizontal").grid(row=5, column=0, columnspan=3, sticky="ew", pady=14)
+        ttk.Separator(wrap, orient="horizontal").grid(row=6, column=0, columnspan=3, sticky="ew", pady=14)
 
-        tk.Label(wrap, text="Models", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).grid(
-            row=6, column=0, sticky="w", pady=(0, 10), columnspan=3
+        tk.Label(wrap, text="Models & LLM", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).grid(
+            row=7, column=0, sticky="w", pady=(0, 10), columnspan=3
         )
-        self._row(wrap, 7, "Ollama endpoint", self.var_llm_endpoint, width=64)
-        self._row(wrap, 8, "Producer model", self.var_model_producer, width=64)
-        self._row(wrap, 9, "Host model", self.var_model_host, width=64)
+        
+        # Provider selector
+        tk.Label(wrap, text="LLM Provider", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
+            row=8, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        provider_combo = ttk.Combobox(
+            wrap, textvariable=self.var_llm_provider,
+            values=["ollama", "anthropic", "openai", "google"],
+            state="readonly", width=30
+        )
+        provider_combo.grid(row=8, column=1, sticky="ew", pady=6)
+        provider_combo.bind("<<ComboboxSelected>>", lambda e: self._update_llm_labels())
+        
+        # Endpoint label - changes based on provider
+        self.endpoint_label = tk.Label(wrap, text="Endpoint", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"])
+        self.endpoint_label.grid(row=9, column=0, sticky="w", padx=(0, 10), pady=6)
+        
+        endpoint_ent = tk.Entry(wrap, textvariable=self.var_llm_endpoint, font=FONT_BODY, 
+                               bg=UI["surface"], fg=UI["text"], insertbackground=UI["text"], width=64)
+        endpoint_ent.grid(row=9, column=1, sticky="ew", pady=6)
+        
+        self.endpoint_hint = tk.Label(wrap, text="", font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"])
+        self.endpoint_hint.grid(row=9, column=2, sticky="w", padx=(10, 0))
+        
+        self._row(wrap, 10, "Producer model", self.var_model_producer, width=64)
+        self._row(wrap, 11, "Host model", self.var_model_host, width=64)
+        
+        # Character Manager model
+        self.var_model_char_manager = tk.StringVar(value="")
+        self._row(wrap, 12, "Character Manager model", self.var_model_char_manager, width=64, 
+                 hint="(Optional) LLM for routing context queries")
 
         wrap.grid_columnconfigure(1, weight=1)
+    
+    def _update_llm_labels(self):
+        """Update labels based on selected LLM provider."""
+        provider = self.var_llm_provider.get()
+        
+        hints = {
+            "ollama": "http://127.0.0.1:11434/api/generate",
+            "anthropic": "Set ANTHROPIC_API_KEY env var, model name e.g. claude-3-opus",
+            "openai": "Set OPENAI_API_KEY env var, model name e.g. gpt-4",
+            "google": "Set GOOGLE_API_KEY env var, model name e.g. gemini-pro",
+        }
+        
+        self.endpoint_hint.config(text=hints.get(provider, ""))
 
     def _row(self, parent, r, label, var, width=40, hint=""):
         tk.Label(parent, text=label, font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
@@ -1991,6 +3330,21 @@ class StationWizard:
             tk.Label(parent, text=hint, font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"]).grid(
                 row=r, column=2, sticky="w", padx=(10, 0)
             )
+    
+    def _row_with_browse(self, parent, r, label, var, width=40, kind="file"):
+        """Row with browse button for files/folders."""
+        tk.Label(parent, text=label, font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
+            row=r, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        ent = tk.Entry(parent, textvariable=var, font=FONT_BODY, bg=UI["surface"], fg=UI["text"],
+                       insertbackground=UI["text"], width=width)
+        ent.grid(row=r, column=1, sticky="ew", pady=6)
+        
+        tk.Button(
+            parent, text="Browse",
+            bg=UI["panel"], fg=UI["text"], relief="flat",
+            command=lambda: self._browse_file_into(var, kind=kind)
+        ).grid(row=r, column=2, padx=8)
 
     # -------------
     # Step 2: feeds (HIGH-LEVEL TOGGLES + editor)
@@ -2015,7 +3369,7 @@ class StationWizard:
         body.pack(fill="both", expand=True)
 
         # LEFT SIDE: High-level toggles + feed list
-        left = tk.Frame(body, bg=UI["panel"], width=360)
+        left = tk.Frame(body, bg=UI["panel"], width=int(360 * UI_SCALE))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -2268,6 +3622,17 @@ class StationWizard:
             return
 
         cfg = self._ensure_feed_cfg(n)
+
+        # Merge defaults so new keys (like auth) appear
+        meta = (self.plugins or {}).get(n, {})
+        if isinstance(meta, dict):
+            defs = meta.get("defaults")
+            if isinstance(defs, dict):
+                for k, v in defs.items():
+                    if k not in cfg:
+                        # Copy default value if missing
+                        cfg[k] = v
+
         self._clear(self.feed_editor)
         self.feed_editor_title.config(text=f"{n} feed")
 
@@ -2475,6 +3840,13 @@ class StationWizard:
         self.var_char_role.set(str(c.get("role", "")))
         self.var_char_traits.set(json.dumps(c.get("traits", []), ensure_ascii=False))
         self.var_char_focus.set(json.dumps(c.get("focus", []), ensure_ascii=False))
+        
+        # Load context engine config
+        if hasattr(self, "context_engine_frame"):
+            context_cfg = c.get("context_engine", {})
+            self.context_engine_frame.load_config(context_cfg)
+            if hasattr(self, "_char_context_engines"):
+                self._char_context_engines[k] = context_cfg
     def _char_apply(self):
         old = self._char_selected_key()
         if not old:
@@ -2504,12 +3876,27 @@ class StationWizard:
                 messagebox.showerror("Character", f"'{new_key}' already exists.")
                 return
             self.characters[new_key] = self.characters.pop(old)
+            
+            # Rename context engine config if exists
+            if hasattr(self, "_char_context_engines") and old in self._char_context_engines:
+                self._char_context_engines[new_key] = self._char_context_engines.pop(old)
+
+        # Get context engine config
+        context_engine = {}
+        if hasattr(self, "context_engine_frame"):
+            context_engine = self.context_engine_frame.get_config()
+            if hasattr(self, "_char_context_engines"):
+                self._char_context_engines[new_key] = context_engine
 
         self.characters[new_key] = {
             "role": role,
             "traits": traits,
             "focus": focus
         }
+        
+        # Add context_engine if enabled
+        if context_engine.get("enabled"):
+            self.characters[new_key]["context_engine"] = context_engine
 
         self._refresh_char_list()
         self._characters_changed()   # 🔥 SYNC VOICES
@@ -2525,13 +3912,10 @@ class StationWizard:
         messagebox.showinfo("Character saved", f"{new_key} updated.")
 
     def _char_add(self):
-        if len(self.characters) >= 10:
-            messagebox.showerror("Characters", "Max 10 characters.")
-            return
 
         win = tk.Toplevel(self.win)
         win.title("Add Character")
-        win.geometry("520x300")
+        win.geometry(scaled_geometry(520, 300))
         win.configure(bg=UI["bg"])
         win.grab_set()
 
@@ -2657,7 +4041,7 @@ class StationWizard:
 
         win = tk.Toplevel(self.win)
         win.title("Load Character Preset Set")
-        win.geometry("520x520")
+        win.geometry(scaled_geometry(520, 520))
         win.configure(bg=UI["bg"])
         win.grab_set()
 
@@ -2722,7 +4106,7 @@ class StationWizard:
 
         tk.Label(
             wrap,
-            text="Choose 2–10 characters",
+            text="Choose your characters",
             font=FONT_H2,
             fg=UI["text"],
             bg=UI["bg"]
@@ -2730,7 +4114,7 @@ class StationWizard:
 
         tk.Label(
             wrap,
-            text="Host is required. Add others from presets, then customize role/traits/focus.",
+            text="Host is required (minimum). Add others from presets, then customize role/traits/focus.",
             font=FONT_BODY,
             fg=UI["muted"],
             bg=UI["bg"]
@@ -2743,7 +4127,7 @@ class StationWizard:
         # LEFT PANEL (LIST + BUTTONS)
         # =========================
 
-        left = tk.Frame(body, bg=UI["panel"], width=260)
+        left = tk.Frame(body, bg=UI["panel"], width=int(260 * UI_SCALE))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -2956,6 +4340,35 @@ class StationWizard:
             )
         ).pack(side="left")
 
+        # ---- Context Engine ----
+        
+        from context_engine_ui import build_context_engine_ui
+        
+        # Store context engine config per character
+        if not hasattr(self, "_char_context_engines"):
+            self._char_context_engines = {}
+        
+        def get_context_cfg():
+            char_key = self.var_char_key.get().strip()
+            return self._char_context_engines.get(char_key, {})
+        
+        def set_context_cfg(cfg):
+            char_key = self.var_char_key.get().strip()
+            self._char_context_engines[char_key] = cfg
+        
+        self.context_engine_frame = build_context_engine_ui(
+            parent=right,
+            bg=UI["panel"],
+            surface=UI["surface"],
+            text_color=UI["text"],
+            muted=UI["muted"],
+            accent=UI["accent"],
+            get_context_cfg_func=get_context_cfg,
+            set_context_cfg_func=set_context_cfg,
+            station_dir=""  # Will use station_dir when available
+        )
+        self.context_engine_frame.pack(fill="x", pady=10)
+
         # ---- Apply ----
 
         tk.Button(
@@ -2980,8 +4393,11 @@ class StationWizard:
             self.char_list.selection_set(0)
             self._char_load_selected()
 
-    def _browse_file_into(self, var: tk.StringVar):
-        p = filedialog.askopenfilename(parent=self.win)
+    def _browse_file_into(self, var: tk.StringVar, kind: str = "file"):
+        if kind == "file":
+            p = filedialog.askopenfilename(parent=self.win)
+        else:
+            p = filedialog.askdirectory(parent=self.win)
 
         if p:
             var.set(p)
@@ -3068,80 +4484,13 @@ class StationWizard:
     # Step 5: mix weights pie + sliders
     # -------------
     def _build_mix(self):
+        # Create wrapper frame - actual rendering happens in _render_mix_ui when tab is shown
         self.weight_sliders = {}
-
         self.mix_wrap = tk.Frame(self.tab_mix, bg=UI["bg"])
         self.mix_wrap.pack(fill="both", expand=True, padx=14, pady=14)
-
-        # Clear old UI
-        for w in self.mix_wrap.winfo_children():
-            w.destroy()
-
-        body = tk.Frame(self.mix_wrap, bg=UI["bg"])
-        body.pack(fill="both", expand=True)
-
-        # LEFT PANEL (controls)
-        left = tk.Frame(body, bg=UI["panel"], width=360)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
-
-        # RIGHT PANEL (pie preview)
-        right = tk.Frame(body, bg=UI["bg"])
-        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
-
-
-        def enabled_feeds_list() -> List[str]:
-            enabled = [k for k, v in self.feed_cfg.items() if isinstance(v, dict) and v.get("enabled", False)]
-            if not enabled:
-                enabled = list(DEFAULT_MIX_WEIGHTS.keys())
-            return enabled
-
-        self._mix_keys = enabled_feeds_list()
-
-        for k in self._mix_keys:
-            if k not in self.mix_weights:
-                self.mix_weights[k] = 0.0
-
-        # ---- SCROLLABLE SLIDER AREA ----
-        slider_outer = tk.Frame(left, bg=UI["panel"])
-        slider_outer.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-
-        _, slider_frame, _canvas = self._make_scrollable_frame(slider_outer, bg=UI["panel"])
-
-        for k in self._mix_keys:
-            row = tk.Frame(slider_frame, bg=UI["panel"])
-            row.pack(fill="x", pady=6)
-
-            tk.Label(row, text=k, fg=UI["muted"], bg=UI["panel"], width=14, anchor="w").pack(side="left")
-
-            v = tk.DoubleVar(value=float(self.mix_weights.get(k, 0.0)))
-            self.weight_sliders[k] = v
-
-            s = tk.Scale(
-                row,
-                from_=0.0, to=1.0, resolution=0.01,
-                orient="horizontal",
-                variable=v,
-                length=200,
-                showvalue=True,
-                bg=UI["panel"], fg=UI["text"],
-                highlightthickness=0,
-                command=lambda _=None: self._mix_redraw()
-            )
-            s.pack(side="left", fill="x", expand=True)
-
-        # Normalize button (stays fixed at bottom)
-        tk.Button(
-            left, text="Normalize (sum=1)", bg=UI["panel"], fg=UI["accent"], relief="flat",
-            command=self._mix_normalize_clicked
-        ).pack(anchor="w", padx=12, pady=(0, 12))
-
-        # Pie chart canvas
-        tk.Label(right, text="Preview pie", font=("Segoe UI", 12, "bold"), fg=UI["text"], bg=UI["bg"]).pack(anchor="w")
-        self.pie = tk.Canvas(right, bg=UI["surface"], highlightthickness=0, width=520, height=520)
-        self.pie.pack(pady=12)
-
-        self._mix_redraw()
+        
+        # Initialize pie canvas placeholder
+        self.pie = None
 
 
     def _mix_collect(self) -> Dict[str, float]:
@@ -3165,6 +4514,10 @@ class StationWizard:
         w = _normalize_weights(w)
         # update state
         self.mix_weights.update(w)
+        
+        # Safety check - pie canvas may not exist yet
+        if not self.pie:
+            return
 
         self.pie.delete("all")
         cx, cy = 260, 260
@@ -3213,7 +4566,8 @@ class StationWizard:
         tk.Button(btnrow, text="Refresh preview", bg=UI["panel"], fg=UI["text"], relief="flat", command=self._refresh_preview).pack(
             side="left", padx=6
         )
-        tk.Button(btnrow, text="Create station", bg=UI["accent"], fg="#000", relief="flat", command=self._finish).pack(
+        button_text = "Save Changes" if self.edit_mode else "Create station"
+        tk.Button(btnrow, text=button_text, bg=UI["accent"], fg="#000", relief="flat", command=self._finish).pack(
             side="right", padx=6
         )
 
@@ -3231,26 +4585,60 @@ class StationWizard:
         except Exception as e:
             raise RuntimeError(f"Failed loading default manifest: {e}")
 
+    def _merge_manifests(self, base: Dict[str, Any], override: Dict[str, Any]) -> None:
+        """Recursive merge of override into base."""
+        for k, v in override.items():
+            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                self._merge_manifests(base[k], v)
+            else:
+                base[k] = _deepcopy_jsonable(v)
+
     def _build_manifest(self) -> Dict[str, Any]:
 
         manifest = self._load_default_manifest()
+
+        # If editing an existing station, overlay its configuration first.
+        # This ensures that fields NOT managed by the wizard (pacing, riff, producer settings)
+        # are preserved, rather than being reset to default template values.
+        if self.existing_manifest:
+            self._merge_manifests(manifest, self.existing_manifest)
 
         # -------- Station --------
 
         manifest["station"]["name"] = self.var_station_name.get().strip()
         manifest["station"]["host"] = self.var_station_host.get().strip()
         manifest["station"]["category"] = self.var_station_cat.get().strip()
+        manifest["station"]["logo"] = self.var_station_logo.get().strip()
 
         # -------- Models --------
 
         manifest["llm"]["endpoint"] = self.var_llm_endpoint.get().strip()
+        manifest["llm"]["provider"] = self.var_llm_provider.get().strip()
 
         manifest["models"]["producer"] = self.var_model_producer.get().strip()
         manifest["models"]["host"] = self.var_model_host.get().strip()
+        manifest["models"]["character_manager"] = self.var_model_char_manager.get().strip()
+        
+        # -------- Visual Models --------
+        manifest.setdefault("visual_models", {})
+        manifest["visual_models"]["model_type"] = self.var_visual_model_type.get().strip()
+        manifest["visual_models"]["local_model"] = self.var_visual_model_local.get().strip()
+        manifest["visual_models"]["api_provider"] = self.var_visual_model_api_provider.get().strip()
+        manifest["visual_models"]["api_model"] = self.var_visual_model_api_model.get().strip()
+        manifest["visual_models"]["api_key"] = self.var_visual_model_api_key.get().strip()
+        manifest["visual_models"]["max_image_size"] = self.var_visual_model_max_size.get().strip()
 
         # -------- Audio --------
 
         manifest["audio"]["piper_bin"] = self.var_piper_bin.get().strip()
+
+        # Sync voice vars from UI before saving
+        if hasattr(self, "voice_vars") and isinstance(self.voice_vars, dict):
+            for k, var in self.voice_vars.items():
+                try:
+                    self.voices[k] = var.get().strip()
+                except Exception:
+                    pass
 
         manifest["voices"] = _deepcopy_jsonable(self.voices)
 
@@ -3323,15 +4711,20 @@ class StationWizard:
         try:
             manifest = self._build_manifest()
         except Exception as e:
-            messagebox.showerror("Create station", f"Failed to build manifest:\n\n{e}")
+            messagebox.showerror("Save station" if self.edit_mode else "Create station", f"Failed to build manifest:\n\n{e}")
             return
 
-        station_id = (self.var_station_id.get() or "").strip()
-        if not station_id:
-            messagebox.showerror("Create station", "Station ID is required.")
-            return
-
-        station_dir = os.path.join(STATIONS_DIR, station_id)
+        # In edit mode, use existing station_id and path
+        if self.edit_mode and self.station:
+            station_id = self.station.station_id
+            station_dir = self.station.path
+        else:
+            station_id = (self.var_station_id.get() or "").strip()
+            if not station_id:
+                messagebox.showerror("Create station", "Station ID is required.")
+                return
+            station_dir = os.path.join(STATIONS_DIR, station_id)
+        
         os.makedirs(station_dir, exist_ok=True)
 
         out_path = os.path.join(station_dir, "manifest.yaml")
@@ -3345,7 +4738,7 @@ class StationWizard:
                     allow_unicode=True
                 )
         except Exception as e:
-            messagebox.showerror("Create station", f"Failed to write manifest:\n\n{e}")
+            messagebox.showerror("Save station" if self.edit_mode else "Create station", f"Failed to write manifest:\n\n{e}")
             return
 
         self._result = {"manifest": manifest}
@@ -3408,22 +4801,17 @@ def _validate_step(self, idx: int) -> bool:
         self.station_name = (self.var_station_name.get() or sid).strip()
         self.station_host = (self.var_station_host.get() or "Kai").strip()
         self.station_category = (self.var_station_cat.get() or "Custom").strip()
+        self.station_logo = (self.var_station_logo.get() or "").strip()
 
         self.llm_endpoint = (self.var_llm_endpoint.get() or "").strip()
         self.model_producer = (self.var_model_producer.get() or "").strip()
         self.model_host = (self.var_model_host.get() or "").strip()
         return True
 
-    # 2 characters step: ensure 2-10 and host exists
+    # Characters step: ensure host exists (no hard max)
     if idx == 2:
         if "host" not in self.characters:
-            messagebox.showerror("Characters", "Host is required.")
-            return False
-        if len(self.characters) < 2:
-            messagebox.showerror("Characters", "Choose at least 2 characters.")
-            return False
-        if len(self.characters) > 10:
-            messagebox.showerror("Characters", "Max 10 characters.")
+            messagebox.showerror("Characters", "Host character is required.")
             return False
         return True
 
@@ -3483,12 +4871,18 @@ def _validate_step(self, idx: int) -> bool:
         voices = dict(self.voices)
 
         # Build gold-standard manifest structure
+        station_block: Dict[str, Any] = {
+            "name": self.station_name,
+            "host": self.station_host,
+            "category": self.station_category,
+        }
+        
+        # Add logo if set
+        if self.station_logo and self.station_logo.strip():
+            station_block["logo"] = self.station_logo
+        
         manifest: Dict[str, Any] = {
-            "station": {
-                "name": self.station_name,
-                "host": self.station_host,
-                "category": self.station_category,
-            },
+            "station": station_block,
             "llm": {
                 "endpoint": self.llm_endpoint,
             },
@@ -3602,7 +4996,7 @@ class EditorWindow:
 
         self.win = tk.Toplevel(shell.root)
         self.win.title(f"Edit Station — {station.station_id}")
-        self.win.geometry("980x720")
+        self.win.geometry(scaled_geometry(980, 720))
         self.win.configure(bg=UI["bg"])
         self.win.grab_set()
 
@@ -3746,6 +5140,27 @@ class EditorWindow:
 
         wrap.grid_columnconfigure(1, weight=1)
 
+        # Add Save button for station settings
+        btn_row = tk.Frame(wrap, bg=UI["bg"])
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        tk.Button(
+            btn_row,
+            text="Save Settings",
+            font=FONT_BODY,
+            bg=UI["accent"],
+            fg="#000",
+            relief="flat",
+            command=self._quick_save_station_settings
+        ).pack(side="right", padx=6)
+    def _quick_save_station_settings(self):
+        """Save only station metadata (name, host, category, logo) without touching other config."""
+        self._cfg_set(["station", "name"], self.var_name.get())
+        self._cfg_set(["station", "host"], self.var_host.get())
+        self._cfg_set(["station", "category"], self.var_cat.get())
+        self._cfg_set(["station", "logo"], self.var_logo.get())
+        self._write_manifest()
+        messagebox.showinfo("Success", "Station settings saved!")
+
     def _build_models_tab(self):
         wrap = tk.Frame(self.tab_models, bg=UI["bg"])
         wrap.pack(fill="both", expand=True, padx=14, pady=14)
@@ -3757,19 +5172,97 @@ class EditorWindow:
         self.var_endpoint   = tk.StringVar(value=str(self._cfg_get(["llm", "endpoint"], "")))
         self.var_model_host = tk.StringVar(value=str(self._cfg_get(["models", "host"], "")))
         self.var_model_prod = tk.StringVar(value=str(self._cfg_get(["models", "producer"], "")))
+        self.var_model_char_mgr = tk.StringVar(value=str(self._cfg_get(["models", "character_manager"], "")))
+        
+        # Detect provider from existing config
+        endpoint = self._cfg_get(["llm", "endpoint"], "")
+        provider = "ollama"
+        if "anthropic" in str(endpoint).lower() or "claude" in str(self._cfg_get(["models", "host"], "")).lower():
+            provider = "anthropic"
+        elif "openai" in str(endpoint).lower() or "gpt" in str(self._cfg_get(["models", "host"], "")).lower():
+            provider = "openai"
+        elif "google" in str(endpoint).lower() or "gemini" in str(self._cfg_get(["models", "host"], "")).lower():
+            provider = "google"
+        
+        self.var_provider = tk.StringVar(value=provider)
 
-        self._row_entry(wrap, 1, "Ollama endpoint", self.var_endpoint, width=60)
-        self._row_entry(wrap, 2, "Host model", self.var_model_host, width=60)
-        self._row_entry(wrap, 3, "Producer model", self.var_model_prod, width=60)
+        # Provider selector
+        tk.Label(wrap, text="LLM Provider", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
+            row=1, column=0, sticky="w", padx=(0, 10), pady=4
+        )
+        provider_combo = ttk.Combobox(
+            wrap, textvariable=self.var_provider,
+            values=["ollama", "anthropic", "openai", "google"],
+            state="readonly", width=30
+        )
+        provider_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        
+        # Endpoint row
+        endpoint_label = tk.Label(wrap, text="Endpoint / API", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"])
+        endpoint_label.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=4)
+        
+        tk.Entry(wrap, textvariable=self.var_endpoint, bg=UI["surface"], fg=UI["text"],
+                insertbackground=UI["text"], width=60).grid(row=2, column=1, sticky="ew", pady=4)
+        
+        hint_text = "Ollama: http://localhost:11434  |  Others: Set env var"
+        tk.Label(wrap, text=hint_text, font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"]).grid(
+            row=2, column=2, sticky="w", padx=(10, 0)
+        )
+        
+        self._row_entry(wrap, 3, "Host model", self.var_model_host, width=60)
+        self._row_entry(wrap, 4, "Producer model", self.var_model_prod, width=60)
+        self._row_entry(wrap, 5, "Character Manager model", self.var_model_char_mgr, width=60)
 
-        ttk.Separator(wrap, orient="horizontal").grid(row=4, column=0, columnspan=3, sticky="ew", pady=12)
+        ttk.Separator(wrap, orient="horizontal").grid(row=6, column=0, columnspan=3, sticky="ew", pady=12)
+
+        # Visual Models section
+        tk.Label(wrap, text="Vision Model (Optional)", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).grid(
+            row=7, column=0, sticky="w", pady=(0, 10), columnspan=3
+        )
+
+        # Load visual model config from manifest or global settings
+        vis_cfg = self._cfg_get(["visual_models"], {})
+        if not isinstance(vis_cfg, dict) or not vis_cfg:
+            global_cfg = get_global_config()
+            vis_cfg = global_cfg.get("visual_models", {})
+
+        self.var_vis_model_type = tk.StringVar(value=vis_cfg.get("model_type", "local"))
+        self.var_vis_model_local = tk.StringVar(value=vis_cfg.get("local_model", ""))
+        self.var_vis_model_api_provider = tk.StringVar(value=vis_cfg.get("api_provider", "openai"))
+        self.var_vis_model_api_model = tk.StringVar(value=vis_cfg.get("api_model", "gpt-4-vision"))
+        self.var_vis_model_max_size = tk.StringVar(value=vis_cfg.get("max_image_size", "1024"))
+
+        # Model type selection
+        tk.Label(wrap, text="Model Type", font=FONT_BODY, fg=UI["muted"], bg=UI["bg"]).grid(
+            row=8, column=0, sticky="w", padx=(0, 10), pady=4
+        )
+        type_frame = tk.Frame(wrap, bg=UI["bg"])
+        type_frame.grid(row=8, column=1, sticky="w", pady=4, columnspan=2)
+
+        tk.Radiobutton(type_frame, text="Local", variable=self.var_vis_model_type, value="local",
+                       fg=UI["text"], bg=UI["bg"], selectcolor=UI["accent"]).pack(side="left", padx=8)
+        tk.Radiobutton(type_frame, text="API", variable=self.var_vis_model_type, value="api",
+                       fg=UI["text"], bg=UI["bg"], selectcolor=UI["accent"]).pack(side="left", padx=8)
+
+        self._row_entry(wrap, 9, "Local model", self.var_vis_model_local, width=60)
+        self._row_entry(wrap, 10, "API provider", self.var_vis_model_api_provider, width=60)
+        self._row_entry(wrap, 11, "API model", self.var_vis_model_api_model, width=60)
+        self._row_entry(wrap, 12, "Max image width", self.var_vis_model_max_size, width=60)
+        
+        # Quick save button for visual models
+        vis_btn_row = tk.Frame(wrap, bg=UI["bg"])
+        vis_btn_row.grid(row=12, column=2, sticky="e", pady=(8, 4))
+        tk.Button(vis_btn_row, text="Save", bg=UI["accent"], fg="#000", relief="flat",
+                 command=self._quick_save_visual_models, font=FONT_SMALL).pack()
+
+        ttk.Separator(wrap, orient="horizontal").grid(row=13, column=0, columnspan=3, sticky="ew", pady=12)
 
         tk.Label(wrap, text="Audio / Voices", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).grid(
-            row=5, column=0, sticky="w", pady=(0, 10), columnspan=3
+            row=14, column=0, sticky="w", pady=(0, 10), columnspan=3
         )
 
         self.var_piper = tk.StringVar(value=str(self._cfg_get(["audio", "piper_bin"], "")))
-        self._row_entry(wrap, 6, "Piper binary", self.var_piper, width=60, browse=True, browse_kind="file")
+        self._row_entry(wrap, 15, "Piper binary", self.var_piper, width=60, browse=True, browse_kind="file")
 
         voices = self._cfg_get(["voices"], {})
         if not isinstance(voices, dict):
@@ -3783,7 +5276,7 @@ class EditorWindow:
         voice_keys = sorted(chars.keys())
 
         self.voice_vars: Dict[str, tk.StringVar] = {}
-        r = 7
+        r = 16
         for k in voice_keys:
             v = tk.StringVar(value=str(voices.get(k, "")))
             self.voice_vars[k] = v
@@ -3968,7 +5461,7 @@ class EditorWindow:
         # LEFT PANEL (LIST + BUTTONS)
         # ============================
 
-        left = tk.Frame(body, bg=UI["panel"], width=240)
+        left = tk.Frame(body, bg=UI["panel"], width=int(240 * UI_SCALE))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -4050,6 +5543,40 @@ class EditorWindow:
             bg=UI["surface"], fg=UI["text"],
             insertbackground=UI["text"]
         ).pack(fill="x", pady=(0, 10))
+        
+        # ---- Context Engine UI ----
+        
+        from context_engine_ui import build_context_engine_ui
+        
+        # Store context engine config per character
+        if not hasattr(self, "_char_context_engines"):
+            self._char_context_engines = {}
+        
+        def get_context_cfg():
+            sel = self.char_list.curselection()
+            if not sel:
+                return {}
+            key = self.char_list.get(sel[0])
+            return self._char_context_engines.get(key, {})
+        
+        def set_context_cfg(cfg):
+            sel = self.char_list.curselection()
+            if sel:
+                key = self.char_list.get(sel[0])
+                self._char_context_engines[key] = cfg
+        
+        self.context_engine_frame = build_context_engine_ui(
+            parent=right,
+            bg=UI["bg"],
+            surface=UI["surface"],
+            text_color=UI["text"],
+            muted=UI["muted"],
+            accent=UI["accent"],
+            get_context_cfg_func=get_context_cfg,
+            set_context_cfg_func=set_context_cfg,
+            station_dir=self.station_dir
+        )
+        self.context_engine_frame.pack(fill="x", pady=10)
 
         tk.Button(
             right,
@@ -4072,7 +5599,7 @@ class EditorWindow:
     def _load_character_preset(self):
         win = tk.Toplevel(self.win)
         win.title("Load Character Preset")
-        win.geometry("320x340")
+        win.geometry(scaled_geometry(320, 340))
         win.configure(bg=UI["bg"])
         win.grab_set()
 
@@ -4148,6 +5675,13 @@ class EditorWindow:
         self.var_char_role.set(str(c.get("role", "")))
         self.var_char_traits.set(json.dumps(c.get("traits", []), ensure_ascii=False))
         self.var_char_focus.set(json.dumps(c.get("focus", []), ensure_ascii=False))
+        
+        # Load context engine config
+        if hasattr(self, "context_engine_frame"):
+            context_cfg = c.get("context_engine", {})
+            self.context_engine_frame.load_config(context_cfg)
+            if hasattr(self, "_char_context_engines"):
+                self._char_context_engines[key] = context_cfg
 
 
     def _char_add_safe(self):
@@ -4212,11 +5746,22 @@ class EditorWindow:
             if not isinstance(focus, list):
                 focus = []
 
+            # Get context engine config
+            context_engine = {}
+            if hasattr(self, "context_engine_frame"):
+                context_engine = self.context_engine_frame.get_config()
+                if hasattr(self, "_char_context_engines"):
+                    self._char_context_engines[key] = context_engine
+
             self._chars[key] = {
                 "role": role,
                 "traits": traits,
                 "focus": focus
             }
+            
+            # Add context_engine if enabled
+            if context_engine.get("enabled"):
+                self._chars[key]["context_engine"] = context_engine
 
 
         except Exception as e:
@@ -4269,12 +5814,33 @@ class EditorWindow:
 
     def open_folder(self):
         try:
-            os.startfile(self.path)  # Windows
-        except Exception:
-            try:
+            if sys.platform == "win32":
+                os.startfile(self.path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", self.path])
+            else:
                 subprocess.Popen(["xdg-open", self.path])
-            except Exception:
-                pass
+        except Exception:
+            pass
+
+    def _quick_save_visual_models(self):
+        """Save only visual model settings without touching other config."""
+        self._cfg_set(["visual_models", "model_type"], self.var_vis_model_type.get())
+        self._cfg_set(["visual_models", "local_model"], self.var_vis_model_local.get())
+        self._cfg_set(["visual_models", "api_provider"], self.var_vis_model_api_provider.get())
+        self._cfg_set(["visual_models", "api_model"], self.var_vis_model_api_model.get())
+        self._cfg_set(["visual_models", "max_image_size"], self.var_vis_model_max_size.get())
+        
+        self._write_manifest()
+        messagebox.showinfo("Success", "Visual model settings saved!")
+    
+    def _write_manifest(self):
+        """Write the manifest to disk."""
+        try:
+            with open(self.mp, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self.cfg, f, sort_keys=False, allow_unicode=True)
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to write manifest: {e}")
 
     def duplicate_station(self):
         new_id = self.shell._prompt_text("Duplicate Station", "New station id:")
@@ -4304,8 +5870,17 @@ class EditorWindow:
 
         # LLM / models
         self._cfg_set(["llm", "endpoint"], self.var_endpoint.get())
+        self._cfg_set(["llm", "provider"], self.var_provider.get())
         self._cfg_set(["models", "host"], self.var_model_host.get())
         self._cfg_set(["models", "producer"], self.var_model_prod.get())
+        self._cfg_set(["models", "character_manager"], self.var_model_char_mgr.get())
+
+        # Visual Models
+        self._cfg_set(["visual_models", "model_type"], self.var_vis_model_type.get())
+        self._cfg_set(["visual_models", "local_model"], self.var_vis_model_local.get())
+        self._cfg_set(["visual_models", "api_provider"], self.var_vis_model_api_provider.get())
+        self._cfg_set(["visual_models", "api_model"], self.var_vis_model_api_model.get())
+        self._cfg_set(["visual_models", "max_image_size"], self.var_vis_model_max_size.get())
 
         # Audio / voices
         self._cfg_set(["audio", "piper_bin"], self.var_piper.get())

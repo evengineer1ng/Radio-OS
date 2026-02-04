@@ -13,6 +13,24 @@ echo Radio OS Windows Launcher
 echo ========================================
 echo.
 
+REM Verify Python installation and version
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo [!] Python is not installed or not in your PATH.
+    echo.
+    echo [*] Radio OS requires Python 3.10 or newer.
+    echo.
+    echo     1. Download it here: https://www.python.org/downloads/
+    echo     2. IMPORTANT: Check the box "Add Python to PATH" during installation.
+    echo.
+    echo     Alternatively, if you have winget installed:
+    echo     winget install -e --id Python.Python.3.11
+    echo.
+    pause
+    exit /b 1
+)
+
 REM Check if venv exists
 if not exist "radioenv\" (
     echo [*] Creating virtual environment...
@@ -32,13 +50,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Install/update dependencies
-echo [*] Installing dependencies...
-pip install -q -r requirements.txt
+REM Upgrade pip and install dependencies
+echo [*] Checking dependencies...
+python -m pip install --upgrade pip -q
+pip install -r requirements.txt
 if errorlevel 1 (
     echo [!] Failed to install dependencies.
     pause
     exit /b 1
+)
+
+REM Optional: Check for FFMPEG (needed for some audio plugins)
+where ffmpeg >nul 2>&1
+if errorlevel 1 (
+    echo [!] Warning: ffmpeg not found in PATH.
+    echo [!] Some audio processing features (pydub) may not work.
+    echo [!] Install from: https://ffmpeg.org/download.html
+    echo. 
 )
 
 REM Check if Piper is set up

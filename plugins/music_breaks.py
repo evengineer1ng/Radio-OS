@@ -10,6 +10,7 @@ PLUGIN_NAME = "music_breaks"
 IS_FEED = True
 
 DEFAULT_CONFIG = {
+    "enabled": False,
     "break_duration_min": 20,
     "break_duration_max": 150,
     "break_duration_random": True,
@@ -921,6 +922,12 @@ def feed_worker(stop_event, mem, cfg, runtime=None):
             except Exception:
                 pass
 
+            # Check if plugin is enabled
+            is_enabled = mem.get("config", cfg).get("enabled", True)
+            if not is_enabled:
+                 await asyncio.sleep(max(poll_sec, 0.5))
+                 continue
+
             # =====================================================
             # TALK CONTROL (after state update)
             # =====================================================
@@ -1257,12 +1264,13 @@ def feed_worker(stop_event, mem, cfg, runtime=None):
                 state_mem["boundary_fired"] = True
                 
                 # --- RESET FLOW, SETUP TALK BREAK ---
-                cfg = mem.get("config", {}) or {}
+                # Resolve config (prefer mem override, fallback to closure cfg)
+                live_cfg = mem.get("config", cfg)
                 
                 # New Flow Target
-                f_min = int(cfg.get("flow_songs_min", 1))
-                f_max = int(cfg.get("flow_songs_max", 3))
-                f_rnd = bool(cfg.get("flow_songs_random", True))
+                f_min = int(live_cfg.get("flow_songs_min", 1))
+                f_max = int(live_cfg.get("flow_songs_max", 3))
+                f_rnd = bool(live_cfg.get("flow_songs_random", True))
                 
                 if not f_rnd:
                     next_target = f_min
@@ -1274,9 +1282,9 @@ def feed_worker(stop_event, mem, cfg, runtime=None):
                 mem["_mb_flow_target"] = next_target
                 
                 # Talk Duration
-                t_min = int(cfg.get("break_duration_min", 20))
-                t_max = int(cfg.get("break_duration_max", 150))
-                t_rnd = bool(cfg.get("break_duration_random", True))
+                t_min = int(live_cfg.get("break_duration_min", 20))
+                t_max = int(live_cfg.get("break_duration_max", 150))
+                t_rnd = bool(live_cfg.get("break_duration_random", True))
                 
                 if not t_rnd:
                     talk_dur = t_min
@@ -1443,6 +1451,24 @@ def register_widgets(registry, runtime):
                 font=("Segoe UI", 10)
             )
             self.status.pack(side="right")
+
+            # ---------------- Enabled Toggle
+
+            cfg = self.runtime.get("config", {}) or {}
+            self.v_enabled = tk.BooleanVar(value=cfg.get("enabled", False))
+
+            self.chk_enabled = tk.Checkbutton(
+                box,
+                text="Enable Music Logic",
+                variable=self.v_enabled,
+                bg=SURFACE,
+                fg=TXT,
+                selectcolor=SURFACE,
+                activebackground=SURFACE,
+                activeforeground=TXT,
+                command=self._on_cfg_change
+            )
+            self.chk_enabled.pack(anchor="w", padx=10, pady=(0, 8))
 
             # ---------------- Track line
 
@@ -1639,6 +1665,7 @@ def register_widgets(registry, runtime):
             try:
                 # Update local runtime copy just in case, but MAINLY send to real runtime over queue
                 updates = {
+                    "enabled": bool(self.v_enabled.get()),
                     "break_duration_min": self.v_break_min.get(),
                     "break_duration_max": self.v_break_max.get(),
                     "break_duration_random": self.v_break_rnd.get(),

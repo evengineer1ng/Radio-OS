@@ -71,6 +71,7 @@ def feed_worker(stop_event, mem, cfg):
 
     poll_sec = float(cfg.get("poll_sec", 2.5))
     announce_cooldown_sec = float(cfg.get("announce_cooldown_sec", 600))
+    burst_delay = float(cfg.get("burst_delay", 0.1))
 
     mem.setdefault("docs", {})
     ann_last = mem.setdefault("_doc_announce_last", {})
@@ -181,6 +182,9 @@ def feed_worker(stop_event, mem, cfg):
                         "comments": [],
                         "heur": candidate_priority,
                     })
+
+                if burst_delay > 0:
+                    time.sleep(burst_delay)
 
         except Exception:
             pass

@@ -7,12 +7,13 @@ soundfile>=0.12.1
 numpy>=1.24.0
 
 # UI
-tk>=0.1.0
+# tk is usually included in standard Python. On Linux: sudo apt-get install python3-tk
 Pillow>=9.0.0
 
 # Data
 pyyaml>=6.0
 requests>=2.31.0
+feedparser>=6.0.10
 
 # Mac Media Control (optional, Mac only)
 pyobjc-framework-MediaPlayer>=9.0; sys_platform == 'darwin'
@@ -20,3 +21,25 @@ pyobjc-framework-AppKit>=9.0; sys_platform == 'darwin'
 
 # Windows Media Control (optional, Windows only)
 winsdk>=1.0.0b10; sys_platform == 'win32'
+
+# Visual Reader Plugin (optional, for visual content analysis)
+# Install required for ANY visual_reader use:
+mss>=1.8.0                          # Fast screen capture
+pyautogui>=0.9.53                   # Fallback screen/window capture
+opencv-python>=4.8.0                # Video frame extraction
+pygetwindow>=0.0.9; sys_platform == 'win32'  # Robust window enumeration (Windows)
+
+# Optional plugin dependencies (install as needed)
+pydub>=0.25.1                       # Audio manipulation/editing (requires ffmpeg)
+imageio>=2.31.0                     # Image/video I/O (video_timeline, etc.)
+SpeechRecognition>=3.10.0           # Speech-to-text (if using audio input plugins)
+matplotlib>=3.7.0                   # Visualization/plotting (analysis widgets)
+
+# Vision providers (optional, install ONE):
+openai>=1.3.0                       # For OpenAI GPT-4-Vision / GPT-4o
+anthropic>=0.7.0                    # For Anthropic Claude
+google-generativeai>=0.3.0          # For Google Gemini
+
+# Windows-only (optional, for window capture):
+pywin32>=305; sys_platform == 'win32'
+

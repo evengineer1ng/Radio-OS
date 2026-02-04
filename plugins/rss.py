@@ -80,6 +80,10 @@ def feed_worker(stop_event, mem, cfg, runtime):
     urls = list(cfg.get("urls", []))
     poll_sec = float(cfg.get("poll_sec", 180))
     priority = float(cfg.get("priority", 72.0))
+    
+    # New pacing to prevent overwhelming the feed
+    burst_delay = float(cfg.get("burst_delay", 0.5))
+    feed_delay = float(cfg.get("feed_delay", 2.0))
 
     deep_cfg = cfg.get("deep_fetch", {}) or {}
     deep_enabled = bool(deep_cfg.get("enabled", False))
@@ -172,28 +176,29 @@ def feed_worker(stop_event, mem, cfg, runtime):
                         pass
 
                     # -----------------------
-                    # Live station event (for producer)
+                    # Live station event (OPTIONAL)
                     # -----------------------
-
-                    evt = StationEvent(
-                        source="rss",
-                        type="alert",
-                        ts=now_ts(),
-                        priority=priority,
-                        payload={
-                            "title": title,
-                            "body": summary,
-                            "source_site": src_site,
-                            "link": e.get("link"),
-                            "ts": pub_ts,
-                            "angle": "React naturally to this news update.",
-                            "why": "A new headline just appeared.",
-                            "key_points": ["breaking update"],
-                            "host_hint": "News pulse."
-                        }
-                    )
-                    
-                    event_q.put(evt)
+                    # Only emit live event if explicitly configured. 
+                    # Default to False to let the Producer/Mixer handle selection.
+                    if cfg.get("as_live_events", False):
+                        evt = StationEvent(
+                            source="rss",
+                            type="alert",
+                            ts=now_ts(),
+                            priority=priority,
+                            payload={
+                                "title": title,
+                                "body": summary,
+                                "source_site": src_site,
+                                "link": e.get("link"),
+                                "ts": pub_ts,
+                                "angle": "React naturally to this news update.",
+                                "why": "A new headline just appeared.",
+                                "key_points": ["breaking update"],
+                                "host_hint": "News pulse."
+                            }
+                        )
+                        event_q.put(evt)
 
                     # -----------------------
                     # Widget Update (Live Feed)
@@ -225,9 +230,15 @@ def feed_worker(stop_event, mem, cfg, runtime):
                         "source_site": src_site,
                     })
                     emitted += 1
+                    
+                    if burst_delay > 0:
+                        time.sleep(burst_delay)
 
             except Exception:
                 pass
+
+            if feed_delay > 0:
+                time.sleep(feed_delay)
 
         time.sleep(poll_sec)
 

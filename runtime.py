@@ -1,10 +1,39 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Radio OS Station Runtime Engine
 Content-agnostic AI radio loop with modular feeds, event routing, audio, and UI.
 """
-from __future__ import annotations
 
+# =======================
+# Voice Path Resolution
+# =======================
+def resolve_voice_path(p: str) -> str:
+    """
+    Resolve a voice model path, honoring station dir, RADIO_OS_ROOT/voices, and GLOBAL_VOICES_DIR.
+    """
+    p = (p or "").strip()
+    if not p:
+        return ""
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    # Try station dir
+    cand = os.path.join(STATION_DIR, p)
+    if os.path.exists(cand):
+        return cand
+    # Try RADIO_OS_ROOT/voices
+    if RADIO_OS_ROOT:
+        voices_dir = os.path.join(RADIO_OS_ROOT, "voices")
+        cand = os.path.join(voices_dir, p)
+        if os.path.exists(cand):
+            return cand
+    # Try GLOBAL_VOICES_DIR
+    if GLOBAL_VOICES_DIR:
+        cand = os.path.join(GLOBAL_VOICES_DIR, p)
+        if os.path.exists(cand):
+            return cand
+    # Fallback to plain relative
+    return p
 
 import os, time, json, re, tempfile, subprocess, queue, sqlite3, random, hashlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +65,13 @@ import threading
 import asyncio
 import yaml
 
+# Character Context Engine
+try:
+    from context_engine import query_context_engine, format_context_for_prompt
+    HAS_CONTEXT_ENGINE = True
+except ImportError:
+    HAS_CONTEXT_ENGINE = False
+
 # Optional PIL for advanced image/gradient support
 try:
     from PIL import Image as PILImage, ImageDraw as PILDraw, ImageTk as PILImageTk
@@ -49,6 +85,7 @@ import math
 
 status_lock = threading.Lock()
 
+
 # =======================
 # Manifest & Environment
 # =======================
@@ -56,11 +93,9 @@ status_lock = threading.Lock()
 # Safe Host Defaults
 # =======================
 
-
 STATION_DIR = os.environ.get("STATION_DIR", ".")
 DB_PATH = os.environ.get("STATION_DB_PATH", "station.sqlite")
 MEMORY_PATH = os.environ.get("STATION_MEMORY_PATH", "station_memory.json")
-
 
 RADIO_OS_ROOT = os.environ.get("RADIO_OS_ROOT", "")
 GLOBAL_VOICES_DIR = os.environ.get("RADIO_OS_VOICES", "")
@@ -70,10 +105,51 @@ CONTEXT_MODEL = os.environ.get("CONTEXT_MODEL", "")
 HOST_MODEL = os.environ.get("HOST_MODEL", "")
 
 # =======================
+# Live Feed Config Reloader
+# =======================
+import threading
+_FEED_CONFIGS = {}
+_FEED_CONFIG_LOCK = threading.Lock()
+def _start_feed_config_reloader(feeds_dict, poll_sec=2.0):
+    """Background thread to reload manifest and update feed configs live."""
+    import time
+    def _reload_loop():
+        last_manifest = None
+        import yaml
+        while True:
+            try:
+                path = os.path.join(STATION_DIR, "manifest.yaml")
+                with open(path, "r", encoding="utf-8") as f:
+                    manifest = f.read()
+                if manifest != last_manifest:
+                    last_manifest = manifest
+                    cfg = yaml.safe_load(manifest) or {}
+                    feeds = (cfg.get("feeds") or {})
+                    with _FEED_CONFIG_LOCK:
+                        for k, v in feeds.items():
+                            if k in feeds_dict:
+                                # Update the config dict in-place only
+                                feeds_dict[k].clear()
+                                feeds_dict[k].update(v)
+                                print(f"[RELOADER DEBUG] feed '{k}' config id={id(feeds_dict[k])} enabled={feeds_dict[k].get('enabled')} contents={feeds_dict[k]}")
+                time.sleep(poll_sec)
+            except Exception as e:
+                print(f"[RELOADER DEBUG] Exception: {e}")
+                time.sleep(poll_sec)
+    t = threading.Thread(target=_reload_loop, daemon=True)
+    t.start()
+
+# =======================
 # 📝 PROMPT REGISTRY
 # =======================
 
 DEFAULT_PROMPTS = {
+        # -------------------
+        # Visual Reader Prompts
+        # -------------------
+        "visual_throwaway_comment": "Let's watch this video together. {comment}",
+        "visual_realtime_reaction": "Material: {material}\n\nReact in real time to what you see in the video. Speak ONE natural concise sentence.",
+        "visual_summarize_reaction": "Material: {material}\n\nThe video has ended. Summarize your reaction as if you just finished watching. Speak naturally, as if talking to a friend on air.",
     # -------------------
     # Producer
     # -------------------
@@ -195,10 +271,13 @@ Return STRICT JSON in this format:
     "cold_open_user": """Mood: {mood}
 Focus: {focus}
 
+{station_context}
+
 Recent tags: {hot_tags}
 Active themes: {themes}
 
-Create a cold open that naturally reflects this context.""",
+Create a cold open that naturally reflects this context.
+Use the Station name and implied identity from the sources to ground the show's voice.""",
 
     # -------------------
     # Host Packet (Manifest)
@@ -331,18 +410,23 @@ No filler. Conversational tone.""",
 
 
 def get_prompt(mem: Dict[str, Any], key: str, **kwargs) -> str:
-    # 1. Try custom prompts in memory
-    cust = mem.get("custom_prompts", {})
+    # 1. Try manifest first (configuration source of truth)
+    cust = CFG.get("prompts", {})
     if not isinstance(cust, dict):
         cust = {}
-    
     raw = cust.get(key)
     
-    # 2. Fallback to default
+    # 2. Try custom prompts in memory (legacy/runtime overrides)
+    if not raw:
+        cust_mem = mem.get("custom_prompts", {})
+        if isinstance(cust_mem, dict):
+            raw = cust_mem.get(key)
+    
+    # 3. Fallback to default
     if not raw:
         raw = DEFAULT_PROMPTS.get(key, "")
 
-    # 3. Format
+    # 4. Format
     try:
         return raw.format(**kwargs)
     except Exception as e:
@@ -607,7 +691,7 @@ def resolve_cfg_path(p: str) -> str:
     if os.path.isabs(p):
         return p
 
-    # Try station dir first (most intuitive)
+    # Try STATION_DIR
     cand = os.path.join(STATION_DIR, p)
     if os.path.exists(cand):
         return cand
@@ -617,55 +701,15 @@ def resolve_cfg_path(p: str) -> str:
         cand = os.path.join(RADIO_OS_ROOT, p)
         if os.path.exists(cand):
             return cand
-
-    # Fall back to plain relative (maybe already correct)
-    return p
-
-def _normalize_source_alias(src: str) -> str:
-    s = (src or "").strip().lower()
-    if not s:
-        return "feed"
-
-    alias = {
-        # markets drift
-        "market": "markets",
-        "mkt": "markets",
-
-        # portfolio drift
-        "portfolio": "portfolio_event",
-        "portfolioevents": "portfolio_event",
-        "port_event": "portfolio_event",
-        "portfolio_event": "portfolio_event",
-
-        # documents drift
-        "docs": "document",
-        "documents": "document",
-        "document": "document",
-
-        # bluesky drift
-        "bsky": "bluesky",
-        "bluesky": "bluesky",
-    }
-    return alias.get(s, s)
-
-def resolve_voice_path(p: str) -> str:
-    """
-    Voice files can live under GLOBAL_VOICES_DIR.
-    """
-    p = (p or "").strip()
-    if not p:
-        return ""
-    if os.path.isabs(p):
-        return p
-
-    # If user set RADIO_OS_VOICES, try that first
+            
+    # Try GLOBAL_VOICES_DIR
     if GLOBAL_VOICES_DIR:
         cand = os.path.join(GLOBAL_VOICES_DIR, p)
         if os.path.exists(cand):
             return cand
 
-    # Otherwise same rules as normal
-    return resolve_cfg_path(p)
+    return p
+
 
 
 def _auto_detect_piper_bin() -> str:
@@ -826,6 +870,24 @@ def normalize_source(src: str) -> str:
     src = _normalize_source_alias(src)
     return src if src else "feed"
 
+def save_cfg_to_manifest():
+    """
+    Persist the current in-memory CFG back to manifest.yaml.
+    """
+    try:
+        path = os.path.join(STATION_DIR, "manifest.yaml")
+        # We need to preserve comments if possible, but standard yaml dump won't.
+        # For now, just dump. Users should know this might reformat their file.
+        # To be safe, we only modify specific sections if we could, but CFG is monolithic.
+        # Using a simple locking approach to avoid partial writes.
+        
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(CFG, f, sort_keys=False, allow_unicode=True)
+        log("system", "Saved configuration to manifest.yaml")
+    except Exception as e:
+        log("system", f"Failed to save manifest: {e}")
+
+
 
 def normalize_event_type(t: str) -> str:
     t = (t or "").strip().lower()
@@ -878,6 +940,24 @@ class DataBuffer:
 def sha1(s: Any) -> str:
     s = "" if s is None else str(s)
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def get_visual_model_config() -> dict:
+    """
+    Get visual model configuration from environment variables.
+    Returns a dict with keys: model_type, local_model, api_provider, api_model, 
+    api_key, api_endpoint, max_image_size, image_quality.
+    """
+    return {
+        "model_type": os.getenv("VISUAL_MODEL_TYPE", "local"),
+        "local_model": os.getenv("VISUAL_MODEL_LOCAL", ""),
+        "api_provider": os.getenv("VISUAL_MODEL_API_PROVIDER", ""),
+        "api_model": os.getenv("VISUAL_MODEL_API_MODEL", ""),
+        "api_key": os.getenv("VISUAL_MODEL_API_KEY", ""),
+        "api_endpoint": os.getenv("VISUAL_MODEL_API_ENDPOINT", ""),
+        "max_image_size": int(os.getenv("VISUAL_MODEL_MAX_IMAGE_SIZE", "1024")),
+        "image_quality": int(os.getenv("VISUAL_MODEL_IMAGE_QUALITY", "85")),
+    }
 
 
 def clamp01(x: float) -> float:
@@ -1768,6 +1848,23 @@ def speak(text: str, voice_key: str = "host"):
 
     if SHOW_INTERRUPT.is_set():
         return
+        
+    # Apply global volume/speed (Radio Dial)
+    try:
+        audio_cfg = CFG.get("audio", {})
+        vol = float(audio_cfg.get("volume", 1.0))
+        spd = float(audio_cfg.get("speed", 1.0))
+        
+        # Volume (simple gain)
+        if vol != 1.0:
+            data = data * vol
+            
+        # Speed (playback rate modification - chipmunk key)
+        # Higher speed = higher sample rate to consume samples faster
+        if spd != 1.0:
+            sr = int(sr * spd)
+    except Exception:
+        pass
 
 
     # =====================================================
@@ -2237,11 +2334,11 @@ class FloatingWindow:
                              font=("Segoe UI", 9, "bold"))
         title_lbl.pack(side="left", padx=8, pady=4)
         
-        # Minimize button on title bar
-        min_btn = tk.Button(self.title_bar, text="−", command=self.minimize, 
+        # Minimize button on title bar (callback will be bound by StationUI)
+        self.min_btn = tk.Button(self.title_bar, text="−", command=self.minimize, 
                            bg="#1a1a1a", fg="#999", relief="flat", font=("Segoe UI", 10), 
                            width=2, padx=0)
-        min_btn.pack(side="right", padx=2, pady=2)
+        self.min_btn.pack(side="right", padx=2, pady=2)
         
         # Content area (holds tabs + widget content)
         self.content_frame = tk.Frame(self.frame, bg="#121212")
@@ -2260,10 +2357,11 @@ class FloatingWindow:
         self.widget_container = tk.Frame(self.content_frame, bg="#121212")
         self.widget_container.pack(fill="both", expand=True, side="top")
         
-        # Resize handle (bottom-right corner)
+        # Resize handle (bottom-right corner) - place in frame with proper stacking
         self.resize_handle = tk.Label(self.frame, text="◢", bg="#121212", fg="#444", 
-                                     font=("Segoe UI", 12), width=2)
+                                     font=("Segoe UI", 16), width=3, height=2)
         self.resize_handle.pack(side="bottom", anchor="se", padx=2, pady=2)
+        self.resize_handle.lift()  # Ensure handle stays on top
         
         # Drag/resize state
         self._drag_data = {"x": 0, "y": 0}
@@ -2287,9 +2385,9 @@ class FloatingWindow:
         x = event.x_root - self._drag_data["x"]
         y = event.y_root - self._drag_data["y"]
         
-        # Grid snap
-        x = (x // self.GRID_SIZE) * self.GRID_SIZE
-        y = (y // self.GRID_SIZE) * self.GRID_SIZE
+        # Keep within parent bounds
+        x = max(0, x)
+        y = max(0, y)
         
         self.geometry["x"] = x
         self.geometry["y"] = y
@@ -2308,10 +2406,6 @@ class FloatingWindow:
         
         new_w = max(self.MIN_WIDTH, self.geometry["width"] + dx)
         new_h = max(self.MIN_HEIGHT, self.geometry["height"] + dy)
-        
-        # Grid snap
-        new_w = (new_w // self.GRID_SIZE) * self.GRID_SIZE
-        new_h = (new_h // self.GRID_SIZE) * self.GRID_SIZE
         
         self.geometry["width"] = new_w
         self.geometry["height"] = new_h
@@ -2353,10 +2447,12 @@ class FloatingWindow:
         self.widgets[widget_key].pack(fill="both", expand=True)
         self.tabs[widget_key].configure(bg="#2a2a2a", fg="#4cc9f0")
     
-    def minimize(self):
+    def minimize(self, on_minimize_callback=None):
         """Minimize this window to taskbar."""
         self.is_minimized = True
         self.frame.place_forget()
+        if on_minimize_callback:
+            on_minimize_callback(self.window_id)
     
     def restore(self):
         """Restore minimized window."""
@@ -2379,6 +2475,7 @@ class FloatingWindow:
 class StationUI:
     def __init__(self, widget_registry: WidgetRegistry):
         self.widgets = widget_registry
+        self._theme_editor_open = False  # Singleton check
 
         # =========================
         # LOAD ART / THEME FIRST
@@ -2387,11 +2484,11 @@ class StationUI:
         DEFAULT_ART = {
             "global_bg": {"type": "color", "value": "#0e0e0e", "path": ""},
             "panels": {
-                "left": {"bg": "#121212"},
-                "center": {"bg": "#121212"},
-                "right": {"bg": "#121212"},
-                "toolbar": {"bg": "#0e0e0e"},
-                "subtitle": {"bg": "#0e0e0e"},
+                "left": {"type": "color", "value": "#121212"},
+                "center": {"type": "color", "value": "#121212"},
+                "right": {"type": "color", "value": "#121212"},
+                "toolbar": {"type": "color", "value": "#0e0e0e"},
+                "subtitle": {"type": "color", "value": "#0e0e0e"},
             },
             "accent": "#4cc9f0",
             "subtitle_wave": True
@@ -2433,64 +2530,68 @@ class StationUI:
         self.root.rowconfigure(1, weight=1)  # main panels
         self.root.rowconfigure(2, weight=0)  # subtitles
         self.root.columnconfigure(0, weight=1)
+        
+        # Bind window resize for GIF animation
+        self.root.bind('<Configure>', self._on_window_resize)
 
         # =========================
         # TOOLBAR
         # =========================
 
+        # self._build_toolbar() -> Deferred until after window_canvas init
+
+
+        # =========================
+        # FLOATING WINDOW CANVAS
+        # =========================
+        
+        # Canvas container for floating windows (replaces main_paned)
+        # Use the fallback color for now, background image is applied via root window label
+        self.window_canvas = tk.Frame(self.root, bg=bg.get("value", "#0e0e0e"))
+        self.window_canvas.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        
+        # Window manager state
+        self.floating_windows = {}  # {window_id: FloatingWindow}
+        self.widget_panels = {}  # {window_id: WidgetPanel}
+        
+        # Create 3 default floating windows filling canvas area
+        # Canvas is ~1400px wide, 600px tall (after toolbar)
+        canvas_width = 1400
+        canvas_height = 600
+        window_width = canvas_width // 3  # ~466px each
+        gap = 0  # No gaps for clean fill
+        
+        # Window 1 (left position)
+        self._create_floating_window(
+            "window_1", "Window 1", 
+            x=0, y=0,
+            width=window_width, height=canvas_height
+        )
+        
+        # Window 2 (center position)
+        self._create_floating_window(
+            "window_2", "Window 2",
+            x=window_width, y=0,
+            width=window_width, height=canvas_height
+        )
+        
+        # Window 3 (right position)
+        self._create_floating_window(
+            "window_3", "Window 3",
+            x=window_width * 2, y=0,
+            width=window_width, height=canvas_height
+        )
+        
+        # Maintain backward compatibility references
+        self.panel_left = self.widget_panels["window_1"]
+        self.panel_center = self.widget_panels["window_2"]
+        self.panel_right = self.widget_panels["window_3"]
+
+        # =========================
+        # TOOLBAR (Built deferred)
+        # =========================
+        # Must be built after canvas/windows exist because apply_art/load_layout depend on them
         self._build_toolbar()
-
-        # =========================
-        # MAIN PANED AREA
-        # =========================
-
-        self.main_paned = tk.PanedWindow(
-            self.root,
-            orient="horizontal",
-            sashrelief="raised",
-            bg=bg.get("value", "#0e0e0e"),
-            bd=0,
-            showhandle=False
-        )
-        self.main_paned.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-
-        # -------------------------
-        # PANELS
-        # -------------------------
-
-        self.panel_left = WidgetPanel(
-            self.main_paned,
-            name="left",
-            registry=self.widgets,
-            ui_theme={
-                "bg": bg.get("value", "#0e0e0e"),
-                "panel": self.art["panels"]["left"]["bg"]
-            }
-        )
-
-        self.panel_center = WidgetPanel(
-            self.main_paned,
-            name="center",
-            registry=self.widgets,
-            ui_theme={
-                "bg": bg.get("value", "#0e0e0e"),
-                "panel": self.art["panels"]["center"]["bg"]
-            }
-        )
-
-        self.panel_right = WidgetPanel(
-            self.main_paned,
-            name="right",
-            registry=self.widgets,
-            ui_theme={
-                "bg": bg.get("value", "#0e0e0e"),
-                "panel": self.art["panels"]["right"]["bg"]
-            }
-        )
-
-        self.main_paned.add(self.panel_left, minsize=240, width=360)
-        self.main_paned.add(self.panel_center, minsize=360, width=680)
-        self.main_paned.add(self.panel_right, minsize=240, width=360)
 
         # =========================
         # DEFAULT WIDGETS
@@ -2499,10 +2600,20 @@ class StationUI:
         self._install_builtin_widgets()
 
         # =========================
+        # MINIMIZE TASKBAR (inside canvas at bottom, hidden by default)
+        # =========================
+        
+        self.taskbar = tk.Frame(self.window_canvas, bg="#0a0a0a", height=40)
+        self.taskbar.pack(side="bottom", fill="x")
+        self.taskbar.pack_forget()  # Hidden initially
+        
+        self.taskbar_tabs = {}  # {window_id: tab_button}
+
+        # =========================
         # SUBTITLE + WAVEFORM AREA
         # =========================
 
-        sub_bg = self.art["panels"]["subtitle"]["bg"]
+        sub_bg = self.art["panels"]["subtitle"].get("value", "#0e0e0e")
 
         bottom = tk.Frame(self.root, bg=sub_bg)
         bottom.grid(row=2, column=0, sticky="ew")
@@ -2513,7 +2624,7 @@ class StationUI:
         self.sub_canvas = tk.Canvas(
             bottom,
             height=70,
-            bg="#000000",          # solid black background
+            bg=sub_bg,
             highlightthickness=0
         )
 
@@ -2538,21 +2649,20 @@ class StationUI:
             w = self.sub_canvas.winfo_width()
             h = self.sub_canvas.winfo_height()
 
+            # Draw panel background across full width
             draw_rounded_rect(
                 self.sub_canvas,
                 6, 6,
                 w - 6, h - 6,
                 r=18,
-                fill="#000000",
+                fill=sub_bg,
                 outline="",
                 tags="panel"
             )
 
             self.sub_canvas.tag_lower("panel")
 
-            # ---- limit subtitle width to middle 66%
-            text_width = int(w * 0.66)
-
+            # Center subtitle text across full width
             self.sub_canvas.coords(
                 self.sub_label_window,
                 w // 2,
@@ -2561,7 +2671,7 @@ class StationUI:
 
             self.sub_canvas.itemconfigure(
                 self.sub_label_window,
-                width=text_width
+                width=w - 20
             )
 
 
@@ -2574,10 +2684,13 @@ class StationUI:
             self.sub_canvas,
             text="",
             font=("Segoe UI", 20),
-            fg="#e8e8e8",
-            bg="#000000",
+            fg=self.art.get("text_color", "#e8e8e8"),
+            bg=sub_bg,
             anchor="center",
-            justify="center"
+            justify="center",
+            relief="flat",
+            highlightthickness=0,
+            borderwidth=0
         )
 
         self.sub_label_window = self.sub_canvas.create_window(
@@ -2639,18 +2752,57 @@ class StationUI:
     # Toolbar
     # -----------------------
     def _build_toolbar(self):
-        bar = tk.Frame(self.root, bg="#0e0e0e")
+        # Create background label for toolbar (supports gradients/images)
+        toolbar_bg = self.art.get("panels", {}).get("toolbar", {}).get("value", "#0e0e0e")
+        self._toolbar_bg_label = tk.Label(self.root, bg=toolbar_bg, bd=0)
+        self._toolbar_bg_label.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        self._toolbar_bg_label.lower()
+        
+        bar = tk.Frame(self.root, bg=toolbar_bg)
         self._toolbar_frame = bar
         bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8,0))
         bar.columnconfigure(20, weight=1)
 
+        # Helper to create styled toolbar buttons with hover effects
+        def create_toolbar_button(parent, text, command, icon="", bg_color="#1e3a4d", fg_color="#4cc9f0", hover_bg="#2a4f65"):
+            """Create a styled button with hover effects."""
+            btn_text = f"{icon} {text}" if icon else text
+            btn = tk.Button(
+                parent, 
+                text=btn_text,
+                command=command,
+                bg=bg_color, 
+                fg=fg_color, 
+                relief="solid",
+                bd=1,
+                font=("Segoe UI", 8),
+                padx=8, 
+                pady=4,
+                activebackground=hover_bg,
+                activeforeground=fg_color,
+                highlightthickness=0,
+                cursor="hand2"
+            )
+            
+            # Add hover effects
+            def on_enter(e):
+                btn.configure(bg=hover_bg)
+            
+            def on_leave(e):
+                btn.configure(bg=bg_color)
+            
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+            
+            return btn
+
         tk.Label(bar, text="Panel:", bg="#0e0e0e", fg="#9a9a9a", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(6,6))
 
-        self._panel_choice = tk.StringVar(value="left")
+        self._panel_choice = tk.StringVar(value="1")
         panel_menu = ttk.Combobox(
             bar,
             textvariable=self._panel_choice,
-            values=["left","center","right"],
+            values=["1","2","3"],
             width=10,
             state="readonly"
         )
@@ -2663,52 +2815,34 @@ class StationUI:
             bar,
             textvariable=self._widget_choice,
             values=self.widgets.keys(),
-            width=34,
+            width=17,
             state="readonly"
         )
         self._widget_menu.pack(side="left", padx=(0,10))
 
-        tk.Button(
-            bar, text="Theme…",
-            command=self._open_theme_editor,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,8))
-
-        tk.Button(
-            bar, text="Add Widget",
-            command=self._ui_add_widget,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,8))
-
-        tk.Button(
-            bar, text="Remove Current",
-            command=self._ui_remove_widget,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,14))
-
-        tk.Button(
-            bar, text="Save Layout",
-            command=lambda: ui_cmd_q.put(("save_ui_layout", None)),
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,8))
-
-        tk.Button(
-            bar, text="Load Layout",
-            command=lambda: ui_cmd_q.put(("load_ui_layout", None)),
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,8))
-
-        tk.Button(
-            bar, text="Reset Layout",
-            command=lambda: ui_cmd_q.put(("reset_ui_layout", None)),
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,12))
-
-        tk.Button(
-            bar, text="Prompts",
-            command=self._open_prompts_editor,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=(0,12))
+        # "Theme" - Purple
+        create_toolbar_button(bar, "Theme…", self._open_theme_editor, "🎨", bg_color="#5e3c7d", fg_color="#e6d5f0", hover_bg="#704895").pack(side="left", padx=(0,8))
+        
+        # "Add Widget" - Green
+        create_toolbar_button(bar, "Add Widget", self._ui_add_widget, "➕", bg_color="#2e5c3c", fg_color="#d0f0d0", hover_bg="#387049").pack(side="left", padx=(0,8))
+        
+        # "Remove Current" - Red
+        create_toolbar_button(bar, "Remove Current", self._ui_remove_widget, "➖", bg_color="#7d2e2e", fg_color="#f0d0d0", hover_bg="#953838").pack(side="left", padx=(0,14))
+        
+        # "Save Layout" - Blue
+        create_toolbar_button(bar, "Save Layout", lambda: ui_cmd_q.put(("save_ui_layout", None)), "💾", bg_color="#2e4a7d", fg_color="#d0e0f0", hover_bg="#385a95").pack(side="left", padx=(0,8))
+        
+        # "Load Layout" - Orangeish Brown
+        create_toolbar_button(bar, "Load Layout", lambda: ui_cmd_q.put(("load_ui_layout", None)), "📂", bg_color="#7d5e2e", fg_color="#f0e6d0", hover_bg="#957038").pack(side="left", padx=(0,8))
+        
+        # "Reset Layout" - Teal
+        create_toolbar_button(bar, "Reset Layout", lambda: ui_cmd_q.put(("reset_ui_layout", None)), "🔄", bg_color="#2e7d7d", fg_color="#d0f0f0", hover_bg="#389595").pack(side="left", padx=(0,8))
+        
+        # "Reset Windows" - Dark Grey
+        create_toolbar_button(bar, "Reset Windows", self._reset_window_positions, "⊞", bg_color="#4a4a4a", fg_color="#ffffff", hover_bg="#5e5e5e").pack(side="left", padx=(0,12))
+        
+        # "Prompts" - Magenta
+        create_toolbar_button(bar, "Prompts", self._open_prompts_editor, "📝", bg_color="#7d2e5e", fg_color="#f0d0e6", hover_bg="#953870").pack(side="left", padx=(0,12))
 
 
         # =====================================
@@ -2747,17 +2881,40 @@ class StationUI:
     def _open_theme_editor(self):
         """
         Advanced Theme Editor: Colors, Gradients, Wallpapers (Images/GIFs/MP4s), with live previews.
+        Only one instance allowed at a time (singleton).
         """
+        try:
+            log("ui", "Theme editor opening...")
+            self._open_theme_editor_impl()
+            log("ui", "Theme editor opened successfully")
+        except Exception as e:
+            import traceback
+            log("ui", f"CRITICAL: Theme editor failed: {type(e).__name__}: {e}")
+            log("ui", f"Traceback: {traceback.format_exc()}")
+            self._theme_editor_open = False
+
+    def _open_theme_editor_impl(self):
+        if self._theme_editor_open:
+            return  # Theme editor already open
+        
+        self._theme_editor_open = True
+        
         win = tk.Toplevel(self.root)
         win.title("Station Theme Editor")
         win.geometry("750x900")
         win.configure(bg="#121212")
         # Keep theme editor on top of runtime window
         win.attributes('-topmost', True)
+        
+        # Clean up singleton flag on close
+        def on_close():
+            self._theme_editor_open = False
+            win.destroy()
+        
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
-        # Local copy of art config to edit
+        # Work directly with self.art to show live values (not a deep copy)
         import copy
-        current_art = copy.deepcopy(self.art)
 
         # Scrollable container
         canvas = tk.Canvas(win, bg="#121212", highlightthickness=0)
@@ -2775,6 +2932,22 @@ class StationUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # Mouse wheel scrolling support
+        def _on_mousewheel(event):
+            """Handle mouse wheel scrolling on Windows and Linux."""
+            if event.num == 5 or event.delta < 0:  # Scroll down
+                canvas.yview_scroll(3, "units")
+            elif event.num == 4 or event.delta > 0:  # Scroll up
+                canvas.yview_scroll(-3, "units")
+
+        # Bind mouse wheel events
+        canvas.bind("<MouseWheel>", _on_mousewheel)  # Windows
+        canvas.bind("<Button-4>", _on_mousewheel)    # Linux scroll up
+        canvas.bind("<Button-5>", _on_mousewheel)    # Linux scroll down
+        scroll_frame.bind("<MouseWheel>", _on_mousewheel)  # Windows (on frame)
+        scroll_frame.bind("<Button-4>", _on_mousewheel)    # Linux scroll up (on frame)
+        scroll_frame.bind("<Button-5>", _on_mousewheel)    # Linux scroll down (on frame)
+
         def section_lbl(txt):
             tk.Label(scroll_frame, text=txt, bg="#121212", fg="#4cc9f0", 
                      font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10, pady=(15, 5))
@@ -2786,11 +2959,11 @@ class StationUI:
 
         def make_color_row(parent, label, get_fn, set_fn, show_preview=True):
             """Enhanced color row with large preview swatch."""
-            row = tk.Frame(parent, bg="#121212")
-            row.pack(fill="x", padx=15, pady=5)
+            row = tk.Frame(parent, bg="#1a1a1a", relief="groove", bd=1)
+            row.pack(fill="x", padx=12, pady=6, ipady=6)
             
-            tk.Label(row, text=label, bg="#121212", fg="#e8e8e8", width=18, anchor="w", 
-                     font=("Segoe UI", 9)).pack(side="left")
+            tk.Label(row, text=label, bg="#1a1a1a", fg="#4cc9f0", width=16, anchor="w", 
+                     font=("Segoe UI", 9, "bold")).pack(side="left", padx=10)
             
             curr = get_fn()
             
@@ -2807,13 +2980,20 @@ class StationUI:
             ent.pack(side="left", padx=5)
 
             def on_pick():
-                c = colorchooser.askcolor(color=var.get(), title=f"Choose {label}")
-                if c and c[1]:
-                    var.set(c[1])
-                    if swatch:
-                        swatch.configure(bg=c[1])
-                    set_fn(c[1])
-                win.lift()  # Bring theme editor back to front
+                try:
+                    c = colorchooser.askcolor(color=var.get(), title=f"Choose {label}", parent=win)
+                    if c and c[1]:
+                        var.set(c[1])
+                        if swatch:
+                            swatch.configure(bg=c[1])
+                        set_fn(c[1])
+                except Exception as e:
+                    log("ui", f"Color picker error: {type(e).__name__}: {e}")
+                try:
+                    win.lift()  # Bring theme editor back to front
+                    win.attributes('-topmost', True)  # Keep it topmost
+                except:
+                    pass
 
             tk.Button(row, text="Pick", command=on_pick, bg="#2a2a2a", fg="#ffffff", 
                       relief="flat", font=("Segoe UI", 8), padx=8).pack(side="left", padx=2)
@@ -2853,8 +3033,19 @@ class StationUI:
             colors_frame.pack(fill="x", padx=10, pady=5)
             
             gradient_data = get_fn()
-            c1_var = tk.StringVar(value=gradient_data.get("color1", "#0e0e0e"))
-            c2_var = tk.StringVar(value=gradient_data.get("color2", "#1e1e1e"))
+            c1_val = gradient_data.get("color1") or "#0e0e0e"
+            c2_val = gradient_data.get("color2") or "#1e1e1e"
+            
+            # Validate color format
+            if not c1_val or not isinstance(c1_val, str) or len(c1_val) < 4:
+                log("ui", f"Gradient editor: Invalid color1 from get_fn(): {repr(c1_val)}, using default")
+                c1_val = "#0e0e0e"
+            if not c2_val or not isinstance(c2_val, str) or len(c2_val) < 4:
+                log("ui", f"Gradient editor: Invalid color2 from get_fn(): {repr(c2_val)}, using default")
+                c2_val = "#1e1e1e"
+            
+            c1_var = tk.StringVar(value=c1_val)
+            c2_var = tk.StringVar(value=c2_val)
             
             # Color 1
             tk.Label(colors_frame, text="From:", bg="#121212", fg="#e8e8e8", width=8).pack(side="left")
@@ -2862,12 +3053,13 @@ class StationUI:
             c1_swatch.pack(side="left", padx=5)
             
             def pick_c1():
-                c = colorchooser.askcolor(color=c1_var.get(), title="Gradient Start Color")
+                c = colorchooser.askcolor(color=c1_var.get(), title="Gradient Start Color", parent=win)
                 if c and c[1]:
                     c1_var.set(c[1])
                     c1_swatch.configure(bg=c[1])
                     update_gradient()
                 win.lift()  # Bring theme editor back to front
+                win.attributes('-topmost', True)
             
             tk.Button(colors_frame, text="Pick", command=pick_c1, bg="#2a2a2a", 
                       fg="#fff", relief="flat", font=("Segoe UI", 8), padx=6).pack(side="left")
@@ -2878,12 +3070,13 @@ class StationUI:
             c2_swatch.pack(side="left", padx=5)
             
             def pick_c2():
-                c = colorchooser.askcolor(color=c2_var.get(), title="Gradient End Color")
+                c = colorchooser.askcolor(color=c2_var.get(), title="Gradient End Color", parent=win)
                 if c and c[1]:
                     c2_var.set(c[1])
                     c2_swatch.configure(bg=c[1])
                     update_gradient()
                 win.lift()  # Bring theme editor back to front
+                win.attributes('-topmost', True)
             
             tk.Button(colors_frame, text="Pick", command=pick_c2, bg="#2a2a2a", 
                       fg="#fff", relief="flat", font=("Segoe UI", 8), padx=6).pack(side="left")
@@ -2896,10 +3089,23 @@ class StationUI:
             preview_canvas.pack(fill="x")
             
             def update_gradient():
+                c1_current = c1_var.get()
+                c2_current = c2_var.get()
+                
+                # Validate before updating
+                if not c1_current or len(c1_current) < 4:
+                    log("ui", f"Gradient editor: update_gradient - c1_var is invalid: {repr(c1_current)}")
+                    c1_current = "#0e0e0e"
+                    c1_var.set(c1_current)
+                if not c2_current or len(c2_current) < 4:
+                    log("ui", f"Gradient editor: update_gradient - c2_var is invalid: {repr(c2_current)}")
+                    c2_current = "#1e1e1e"
+                    c2_var.set(c2_current)
+                
                 new_grad = {
                     "type": grad_type.get(),
-                    "color1": c1_var.get(),
-                    "color2": c2_var.get()
+                    "color1": c1_current,
+                    "color2": c2_current
                 }
                 set_fn(new_grad)
                 draw_gradient_preview()
@@ -2943,10 +3149,7 @@ class StationUI:
             c2_var.trace_add("write", lambda *a: draw_gradient_preview())
 
         def make_media_row(parent, label, get_fn, set_fn, media_types=["color", "image", "gradient"]):
-            """Create media editor with color/image/gradient/video options.
-            IMPORTANT: get_fn() must return a fresh dict each time to prevent reference issues.
-            set_fn(cfg_dict) must properly update the backing storage without race conditions.
-            """
+            """Create unified media editor - pick ONE type, show relevant controls."""
             import copy
             
             container = tk.Frame(parent, bg="#121212")
@@ -2955,63 +3158,113 @@ class StationUI:
             tk.Label(container, text=label, bg="#121212", fg="#e8e8e8", 
                      font=("Segoe UI", 9, "bold")).pack(anchor="w")
             
-            # Get current config
-            initial_cfg = copy.deepcopy(get_fn())
-            media_type = tk.StringVar(value=initial_cfg.get("type", "color"))
+            # Get current config from backing storage
+            current_cfg = copy.deepcopy(get_fn())
+            media_type = tk.StringVar(value=current_cfg.get("type", "color"))
             
-            # Type selector FIRST (visual hierarchy)
+            # Type selector radio buttons - ALL on one line
             type_frame = tk.Frame(container, bg="#121212")
             type_frame.pack(fill="x", anchor="w", padx=10, pady=5)
             
-            # Options frame (will be cleared and repopulated) - packed AFTER type_frame
+            # Options frame (will be cleared and repopulated based on type selection)
             opts_frame = tk.Frame(container, bg="#121212")
             opts_frame.pack(fill="x", padx=10, pady=5)
             
             # Define refresh_media BEFORE using it in radio buttons
             def refresh_media():
-                # Clear all options
+                # Clear all option controls
                 for w in opts_frame.winfo_children(): 
                     w.destroy()
                 
                 t = media_type.get()
-                # Always fetch fresh from backing storage to avoid stale references
+                # Always fetch FRESH from backing storage
                 cfg = copy.deepcopy(get_fn())
+                
+                # Update type in config
                 cfg["type"] = t
                 
+                # CLEAR all other type data when switching types
                 if t == "color":
-                    # Ensure color structure
-                    if "value" not in cfg:
-                        cfg["value"] = "#121212"
+                    cfg = {"type": "color", "value": cfg.get("value", "#121212")}
+                elif t == "gradient":
+                    cfg = {"type": "gradient", "gradient": cfg.get("gradient", {"type": "linear", "color1": "#121212", "color2": "#1e1e1e"})}
+                elif t == "image":
+                    cfg = {"type": "image", "path": cfg.get("path", "")}
+                
+                # Persist the type change immediately
+                set_fn(cfg)
+                
+                if t == "color":
+                    color_val = [cfg.get("value", "#121212")]  # mutable container to track changes
+                    
+                    def get_color():
+                        return color_val[0]
+                    
+                    def set_color(v):
+                        color_val[0] = v
+                        cfg["value"] = v
+                        set_fn(cfg)
                     
                     make_color_row(
                         opts_frame, "Color", 
-                        lambda: cfg.get("value", "#121212"),
-                        lambda v: (cfg.update({"value": v}), set_fn(cfg)),
+                        get_color, set_color,
                         show_preview=True
                     )
                 
+                elif t == "gradient":
+                    grad_data = [cfg.get("gradient", {"type": "linear", "color1": "#121212", "color2": "#1e1e1e"})]
+                    
+                    def get_grad():
+                        return grad_data[0]
+                    
+                    def set_grad(v):
+                        grad_data[0] = v
+                        cfg["gradient"] = v
+                        set_fn(cfg)
+                    
+                    make_gradient_editor(
+                        opts_frame, "Gradient Settings", 
+                        get_grad, set_grad
+                    )
+                
                 elif t == "image":
-                    if "path" not in cfg:
-                        cfg["path"] = ""
+                    path_val = [cfg.get("path", "")]
                     
                     img_row = tk.Frame(opts_frame, bg="#121212")
                     img_row.pack(fill="x", padx=5, pady=3)
                     
-                    path_var = tk.StringVar(value=cfg.get("path", ""))
+                    path_var = tk.StringVar(value=path_val[0])
                     tk.Entry(img_row, textvariable=path_var, bg="#1e1e1e", fg="#e8e8e8", 
                              font=("Segoe UI", 8)).pack(side="left", fill="x", expand=True, padx=5)
                     
+                    def on_path_change(*args):
+                        """Update on entry change"""
+                        new_path = path_var.get()
+                        path_val[0] = new_path
+                        cfg["path"] = new_path
+                        set_fn(cfg)
+                    
+                    path_var.trace_add("write", on_path_change)
+                    
                     def browse_img():
-                        f = filedialog.askopenfilename(
-                            parent=win,
-                            title=f"Select {label} Image",
-                            filetypes=[("Images", "*.png *.jpg *.jpeg *.gif"), ("All", "*.*")]
-                        )
-                        if f:
-                            path_var.set(f)
-                            cfg["path"] = f
-                            set_fn(cfg)
-                        win.lift()  # Bring theme editor back to front
+                        try:
+                            f = filedialog.askopenfilename(
+                                parent=win,
+                                title=f"Select {label} Image",
+                                filetypes=[("Images", "*.png *.jpg *.jpeg *.gif"), ("All", "*.*")]
+                            )
+                            if f:
+                                path_var.set(f)
+                                path_val[0] = f
+                                cfg["path"] = f
+                                set_fn(cfg)
+                        except Exception as e:
+                            log("ui", f"Image browse error: {type(e).__name__}: {e}")
+                        try:
+                            win.lift()
+                            win.attributes('-topmost', True)
+                        except:
+                            pass
                     
                     tk.Button(img_row, text="Browse", command=browse_img, bg="#2a2a2a", 
                               fg="#fff", relief="flat", font=("Segoe UI", 8), padx=8).pack(side="left", padx=5)
@@ -3021,93 +3274,158 @@ class StationUI:
                                           text="[Image Preview]", fg="#666")
                     preview_lbl.pack(fill="x", padx=5, pady=5)
                     
-                    if cfg.get("path") and os.path.exists(cfg["path"]):
+                    if path_val[0] and os.path.exists(path_val[0]):
                         try:
                             if HAS_PIL:
                                 from PIL import Image as PILImage, ImageTk as PILImageTk
-                                img = PILImage.open(cfg["path"])
+                                img = PILImage.open(path_val[0])
                                 img.thumbnail((200, 60))
                                 preview_lbl._img = PILImageTk.PhotoImage(img)
                                 preview_lbl.configure(image=preview_lbl._img, text="")
                         except Exception as e:
+                            log("ui", f"Preview image load error: {type(e).__name__}: {e}")
                             preview_lbl.configure(text=f"Preview error: {str(e)[:30]}")
-                
-                
-                elif t == "gradient":
-                    # Ensure gradient structure
-                    if "gradient" not in cfg:
-                        cfg["gradient"] = {"type": "linear", "color1": "#121212", "color2": "#1e1e1e"}
-                    
-                    make_gradient_editor(
-                        opts_frame, "Gradient", 
-                        lambda: cfg.get("gradient", {"type": "linear", "color1": "#121212", "color2": "#1e1e1e"}),
-                        lambda v: (cfg.update({"gradient": v}), set_fn(cfg))
-                    )
             
-            # Create radio buttons with refresh_media callback
+            # Create radio buttons + Clear button
+            btn_row = tk.Frame(type_frame, bg="#121212")
+            btn_row.pack(fill="x", side="left", expand=True, padx=0, pady=0)
+            
             for mtype in media_types:
-                tk.Radiobutton(type_frame, text=mtype.title(), variable=media_type, 
+                tk.Radiobutton(btn_row, text=mtype.title(), variable=media_type, 
                                value=mtype, bg="#121212", fg="#e8e8e8", 
                                selectcolor="#2a2a2a", activebackground="#121212",
                                command=refresh_media).pack(side="left", padx=3)
+            
+            def clear_media():
+                """Clear the current tab's data and refresh UI."""
+                current_type = media_type.get()
+                
+                # Build cleared config
+                if current_type == "color":
+                    cleared_cfg = {"type": "color", "value": "#0e0e0e"}
+                elif current_type == "gradient":
+                    cleared_cfg = {"type": "gradient", "gradient": {"type": "linear", "color1": "#0e0e0e", "color2": "#1e1e1e"}}
+                elif current_type == "image":
+                    cleared_cfg = {"type": "image", "path": ""}
+                else:
+                    cleared_cfg = {"type": "color", "value": "#0e0e0e"}
+                
+                # Update backing storage
+                set_fn(cleared_cfg)
+                
+                log("ui", f"Cleared {current_type} for {label}")
+                
+                # Refresh UI
+                refresh_media()
+            
+            tk.Button(btn_row, text="Clear", command=clear_media, bg="#666", fg="#fff",
+                     relief="flat", font=("Segoe UI", 8), padx=6).pack(side="right", padx=3)
             
             # Initial population
             refresh_media()
 
         # --- SECTIONS ---
 
-        # 1. GLOBAL BACKGROUND (Wallpaper)
-        section_lbl("🎨 Global Wallpaper / Background")
+        # 1. GLOBAL BACKGROUND (Canvas Area)
+        section_lbl("🎨 Canvas Background / Wallpaper")
         tk.Label(scroll_frame, text="Supports: Colors, Gradients, Images (PNG/JPG/GIF)", 
                  bg="#121212", fg="#9a9a9a", font=("Segoe UI", 8)).pack(anchor="w", padx=15)
         
-        g_bg = current_art.setdefault("global_bg", {})
+        g_bg = self.art.setdefault("global_bg", {})
         make_media_row(scroll_frame, "Background", 
-                      lambda: g_bg, 
+                      lambda: copy.deepcopy(g_bg), 
                       lambda v: g_bg.update(v),
                       media_types=["color", "image", "gradient"])
 
-        # 2. PANELS with gradients/images
-        section_lbl("🎴 Panel Customization")
+        # 2. WIDGET PANELS STYLING (left, center, right)
+        section_lbl("📌 Widget Panels")
         
-        panels = current_art.setdefault("panels", {})
+        panels = self.art.setdefault("panels", {})
         
-        for p in ["left", "center", "right", "subtitle", "toolbar"]:
+        for p in ["left", "center", "right"]:
             if p not in panels: panels[p] = {"type": "color", "value": "#121212"}
             
             make_media_row(scroll_frame, f"{p.title()} Panel", 
-                          lambda p=p: panels.setdefault(p, {"type": "color", "value": "#121212"}),
+                          lambda p=p: copy.deepcopy(panels.get(p, {"type": "color", "value": "#121212"})),
                           lambda v, p=p: panels[p].update(v),
                           media_types=["color", "gradient", "image"])
 
-        # 3. ACCENT COLOR
-        section_lbl("✨ Accent Color")
-        make_color_row(scroll_frame, "Accent", 
-                      lambda: current_art.get("accent", "#4cc9f0"), 
-                      lambda v: current_art.update({"accent": v}),
+        # 3. TOOLBAR & SUBTITLE STYLING
+        section_lbl("🎴 UI Panel Styling")
+        
+        for p in ["toolbar", "subtitle"]:
+            if p not in panels: panels[p] = {"type": "color", "value": "#121212"}
+            
+            make_media_row(scroll_frame, f"{p.title()} Panel", 
+                          lambda p=p: copy.deepcopy(panels.get(p, {"type": "color", "value": "#121212"})),
+                          lambda v, p=p: panels[p].update(v),
+                          media_types=["color", "gradient", "image"])
+
+        # 4. TEXT & ACCENT COLORS
+        section_lbl("✨ Text & Accent Colors")
+        
+        make_color_row(scroll_frame, "Accent Color", 
+                      lambda: self.art.get("accent", "#4cc9f0"), 
+                      lambda v: self.art.update({"accent": v}),
+                      show_preview=True)
+        
+        make_color_row(scroll_frame, "Text Color", 
+                      lambda: self.art.get("text_color", "#e8e8e8"), 
+                      lambda v: self.art.update({"text_color": v}),
                       show_preview=True)
 
-        # SAVE BUTTON
+        # SAVE + RESET BUTTONS
         btn_frame = tk.Frame(win, bg="#121212", pady=20)
         btn_frame.pack(fill="x", side="bottom")
 
         def save():
-            # Apply to self.art
-            self.art.update(current_art)
-            
-            # Update CFG and save manifest
+            # self.art is already updated live, just save manifest
             CFG["art"] = self.art
             save_station_manifest(CFG)
             
             # Apply immediately
             self.apply_art()
             
-            messagebox.showinfo("Theme Saved", "Theme saved and applied!")
+            log("ui", "Theme saved and applied!")
+            self._theme_editor_open = False
             win.destroy()
+
+        def reset_to_default():
+            if messagebox.askyesno("Reset Theme", "Reset to plain default theme?\n\nThe application will restart to apply changes."):
+                # Restore DEFAULT_ART
+                DEFAULT_ART = {
+                    "global_bg": {"type": "color", "value": "#0e0e0e", "path": ""},
+                    "panels": {
+                        "left": {"bg": "#121212"},
+                        "center": {"bg": "#121212"},
+                        "right": {"bg": "#121212"},
+                        "toolbar": {"bg": "#0e0e0e"},
+                        "subtitle": {"bg": "#0e0e0e"},
+                    },
+                    "accent": "#4cc9f0",
+                    "subtitle_wave": True
+                }
+                self.art.clear()
+                self.art.update(DEFAULT_ART)
+                CFG["art"] = self.art
+                save_station_manifest(CFG)
+                
+                # Close editor and restart app
+                win.destroy()
+                self.root.destroy()
+                
+                # Restart
+                import subprocess
+                import sys
+                subprocess.Popen([sys.executable] + sys.argv)
 
         tk.Button(btn_frame, text="Save & Apply", command=save, 
                   bg="#4cc9f0", fg="#000000", font=("Segoe UI", 10, "bold"), 
-                  padx=20, pady=8).pack()
+                  padx=20, pady=8).pack(side="left", padx=5)
+        
+        tk.Button(btn_frame, text="Reset to Default", command=reset_to_default,
+                  bg="#666666", fg="#ffffff", font=("Segoe UI", 10),
+                  padx=20, pady=8).pack(side="left", padx=5)
 
 
     
@@ -3156,9 +3474,20 @@ class StationUI:
             key = entry_list.get(sel[0])
             current_key = key
             
-            # Get current value (custom or default)
-            cust = mem.get("custom_prompts", {})
-            val = cust.get(key)
+            # Get current value (manifest > memory > default)
+            val = None
+            
+            # 1. Manifest
+            prompts_cfg = CFG.get("prompts", {})
+            if isinstance(prompts_cfg, dict):
+                val = prompts_cfg.get(key)
+
+            # 2. Legacy memory
+            if val is None:
+                cust = mem.get("custom_prompts", {})
+                val = cust.get(key)
+
+            # 3. Default
             if val is None:
                 val = DEFAULT_PROMPTS.get(key, "")
             
@@ -3176,20 +3505,29 @@ class StationUI:
                 return
             new_val = text_area.get("1.0", "end-1c") # strip trailing newline
             
-            cust = mem.setdefault("custom_prompts", {})
+            # Save to manifest
+            cust = CFG.setdefault("prompts", {})
             cust[current_key] = new_val
+            save_station_manifest(CFG)
             
-            save_memory(mem) 
-            tk.messagebox.showinfo("Saved", f"Updated {current_key}")
+            tk.messagebox.showinfo("Saved", f"Updated {current_key} in manifest.yaml")
 
         def reset():
             if not current_key:
                 return
             if tk.messagebox.askyesno("Reset", f"Reset {current_key} to default?"):
-                cust = mem.setdefault("custom_prompts", {})
+                # Remove from manifest
+                cust = CFG.get("prompts", {})
                 if current_key in cust:
                     del cust[current_key]
-                save_memory(mem)
+                    save_station_manifest(CFG)
+                
+                # Remove from legacy memory (cleanup)
+                mem_cust = mem.get("custom_prompts", {})
+                if current_key in mem_cust:
+                    del mem_cust[current_key]
+                    save_memory(mem)
+                
                 load_selected() # Reload default
 
         tk.Button(bar, text="Save Prompt", command=save, bg="#2a2a2a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
@@ -3200,77 +3538,11 @@ class StationUI:
             entry_list.select_set(0)
             load_selected()
 
-        def labeled(parent, text):
-            lbl = tk.Label(parent, text=text, bg="#121212", fg="#e8e8e8", anchor="w")
-            lbl.pack(fill="x", pady=(10,2))
-            return lbl
-
-        def entry(parent, value):
-            var = tk.StringVar(value=value)
-            ent = tk.Entry(parent, textvariable=var, bg="#1e1e1e", fg="#e8e8e8", relief="flat")
-            ent.pack(fill="x", pady=(0,6))
-            return var
-
-        frame = tk.Frame(win, bg="#121212")
-        frame.pack(fill="both", expand=True, padx=14, pady=14)
-
-        labeled(frame, "Global background color")
-        bg_var = entry(frame, art["global_bg"].get("value", "#0e0e0e"))
-
-        labeled(frame, "Left panel bg")
-        left_var = entry(frame, art["panels"]["left"]["bg"])
-
-        labeled(frame, "Center panel bg")
-        center_var = entry(frame, art["panels"]["center"]["bg"])
-
-        labeled(frame, "Right panel bg")
-        right_var = entry(frame, art["panels"]["right"]["bg"])
-
-        labeled(frame, "Subtitle bg")
-        sub_var = entry(frame, art["panels"]["subtitle"]["bg"])
-
-        labeled(frame, "Accent color (wave)")
-        accent_var = entry(frame, art.get("accent", "#4cc9f0"))
-
-        def apply_live():
-            self.art["global_bg"]["type"] = "color"
-            self.art["global_bg"]["value"] = bg_var.get()
-
-            self.art["panels"]["left"]["bg"] = left_var.get()
-            self.art["panels"]["center"]["bg"] = center_var.get()
-            self.art["panels"]["right"]["bg"] = right_var.get()
-            self.art["panels"]["subtitle"]["bg"] = sub_var.get()
-
-            self.art["accent"] = accent_var.get()
-
-            self.apply_art()
-
-        def save_theme():
-            ui_cmd_q.put((
-                "save_station_art",
-                {"art": self.art}
-            ))
-
-        btns = tk.Frame(frame, bg="#121212")
-        btns.pack(fill="x", pady=12)
-
-        tk.Button(
-            btns, text="Apply Live",
-            command=apply_live,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=6)
-
-        tk.Button(
-            btns, text="Save to Manifest",
-            command=save_theme,
-            bg="#2a2a2a", fg="#ffffff", relief="flat", padx=12, pady=6
-        ).pack(side="left", padx=6)
-
     def _panel_obj(self, name: str) -> WidgetPanel:
-        name = (name or "").strip().lower()
-        if name == "center":
+        name = (name or "").strip()
+        if name == "2":
             return self.panel_center
-        if name == "right":
+        if name == "3":
             return self.panel_right
         return self.panel_left
     def _resize_subtitle(self, e):
@@ -3298,6 +3570,58 @@ class StationUI:
     def _ui_remove_widget(self):
         panel = self._panel_obj(self._panel_choice.get())
         panel.remove_current_widget()
+    def _on_window_resize(self, event=None):
+        """Reload background when window resizes (animated GIF or static image)."""
+        # Throttle resize events to avoid excessive redraws
+        if hasattr(self, '_resize_job'):
+            self.root.after_cancel(self._resize_job)
+        
+        def do_resize():
+            # Check if we have a background to resize
+            has_frames = hasattr(self, '_canvas_bg_frames') and self._canvas_bg_frames
+            has_static = hasattr(self, '_canvas_bg_img')
+            
+            if has_frames or has_static:
+                try:
+                    path = getattr(self, '_current_bg_path', None)
+                    if path:
+                        self.apply_art()  # Reload and rescale the background
+                except Exception as e:
+                    log("ui", f"Background resize error: {e}")
+        
+        self._resize_job = self.root.after(300, do_resize)  # Throttle to 300ms
+
+    def _animate_canvas_bg(self):
+        """Animate canvas background if it's an animated GIF."""
+        if not hasattr(self, '_canvas_bg_frames') or not self._canvas_bg_frames:
+            return
+        
+        # Pause animation when window is minimized/hidden
+        if not self.root.winfo_viewable():
+            self.root.after(500, self._animate_canvas_bg)
+            return
+        
+        try:
+            from PIL import ImageTk as PILImageTk
+            
+            frames = self._canvas_bg_frames
+            idx = self._canvas_bg_frame_idx
+            duration = self._canvas_bg_durations[idx]
+            
+            # Convert current frame to PhotoImage (frames already pre-converted to RGB)
+            photo = PILImageTk.PhotoImage(frames[idx])
+            self._canvas_bg_photo = photo  # Keep reference
+            self._canvas_bg_lbl.configure(image=photo)
+            
+            # Move to next frame
+            self._canvas_bg_frame_idx = (idx + 1) % len(frames)
+            
+            # Schedule next frame update
+            delay = max(duration, 16)  # Min 16ms (~60fps)
+            self.root.after(delay, self._animate_canvas_bg)
+        except Exception as e:
+            log("ui", f"GIF animation error: {e}")
+
     def apply_art(self):
         """
         Live-apply CFG['art'] to:
@@ -3319,9 +3643,21 @@ class StationUI:
             cfg_type = cfg.get("type", "color")
             
             if cfg_type == "color":
-                widget.configure(bg=cfg.get("value", fallback_color))
+                try:
+                    value = cfg.get("value", fallback_color)
+                    if value:  # Only apply if value is not empty
+                        widget.configure(bg=value)
+                    else:
+                        widget.configure(bg=fallback_color)
+                except Exception:
+                    widget.configure(bg=fallback_color)
             
             elif cfg_type == "image" and cfg.get("path"):
+                # Images can only be applied to Label widgets
+                if not isinstance(widget, tk.Label):
+                    widget.configure(bg=fallback_color)
+                    return
+                
                 try:
                     path = cfg["path"]
                     if not os.path.exists(path):
@@ -3335,7 +3671,7 @@ class StationUI:
                         widget._img_obj = img  # Keep reference
                         photo = PILImageTk.PhotoImage(img)
                         widget._photo = photo
-                        widget.configure(image=photo, bg="")
+                        widget.configure(image=photo)
                     else:
                         # Fall back to tkinter PhotoImage
                         widget._bg_img = tk.PhotoImage(file=path)
@@ -3345,6 +3681,11 @@ class StationUI:
                     widget.configure(bg=fallback_color)
             
             elif cfg_type == "gradient" and cfg.get("gradient"):
+                # Gradients can only be applied to Label widgets
+                if not isinstance(widget, tk.Label):
+                    widget.configure(bg=fallback_color)
+                    return
+                
                 try:
                     if HAS_PIL:
                         from PIL import Image as PILImage, ImageDraw as PILDraw, ImageTk as PILImageTk
@@ -3359,11 +3700,32 @@ class StationUI:
                         img = PILImage.new("RGB", (w, h))
                         draw = PILDraw.Draw(img)
                         
-                        c1_str = grad.get("color1", "#121212").lstrip('#')
-                        c2_str = grad.get("color2", "#1e1e1e").lstrip('#')
+                        # Validate and extract color values with defaults
+                        c1_val = grad.get("color1", "#121212")
+                        c2_val = grad.get("color2", "#1e1e1e")
                         
-                        c1_rgb = tuple(int(c1_str[i:i+2], 16) for i in (0, 2, 4))
-                        c2_rgb = tuple(int(c2_str[i:i+2], 16) for i in (0, 2, 4))
+                        # Ensure colors are valid hex strings
+                        if not c1_val or not isinstance(c1_val, str):
+                            c1_val = "#121212"
+                        if not c2_val or not isinstance(c2_val, str):
+                            c2_val = "#1e1e1e"
+                        
+                        c1_str = c1_val.lstrip('#') or "121212"
+                        c2_str = c2_val.lstrip('#') or "1e1e1e"
+                        
+                        # Validate hex format (must be 6 chars)
+                        if len(c1_str) != 6:
+                            c1_str = "121212"
+                        if len(c2_str) != 6:
+                            c2_str = "1e1e1e"
+                        
+                        try:
+                            c1_rgb = tuple(int(c1_str[i:i+2], 16) for i in (0, 2, 4))
+                            c2_rgb = tuple(int(c2_str[i:i+2], 16) for i in (0, 2, 4))
+                        except ValueError:
+                            # Invalid hex, use defaults
+                            c1_rgb = (0x12, 0x12, 0x12)
+                            c2_rgb = (0x1e, 0x1e, 0x1e)
                         
                         if grad.get("type") == "radial":
                             # Simple radial: center fades outward
@@ -3388,7 +3750,7 @@ class StationUI:
                         
                         photo = PILImageTk.PhotoImage(img)
                         widget._gradient = photo
-                        widget.configure(image=photo, bg="")
+                        widget.configure(image=photo)
                     else:
                         widget.configure(bg=cfg.get("gradient", {}).get("color1", fallback_color))
                 except Exception as e:
@@ -3399,104 +3761,56 @@ class StationUI:
                 # Fallback to color
                 widget.configure(bg=fallback_color)
 
-        # ---- Root background (color, image, gradient, or video)
+        # ---- Window Canvas background (color, image, gradient) - this is the primary wallpaper area
         bg = art.get("global_bg") or {}
-        if bg.get("type") in ["image", "video"] and bg.get("path"):
-            try:
-                path = bg["path"]
-                if os.path.exists(path):
-                    path_lower = path.lower()
-                    # For image formats (PNG, JPG, GIF), use PIL
-                    if HAS_PIL and path_lower.endswith(('.gif', '.png', '.jpg', '.jpeg')):
-                        from PIL import Image as PILImage, ImageTk as PILImageTk
-                        try:
-                            img = PILImage.open(path)
-                            
-                            # Get window dimensions
-                            w = self.root.winfo_width() or 1920
-                            h = self.root.winfo_height() or 1080
-                            if w <= 1: w = 1920
-                            if h <= 1: h = 1080
-                            
-                            # Don't shrink - expand canvas instead
-                            # Calculate scaling to fill window (preserve aspect ratio)
-                            img_w, img_h = img.size
-                            scale_w = w / img_w if img_w > 0 else 1
-                            scale_h = h / img_h if img_h > 0 else 1
-                            scale = max(scale_w, scale_h)  # Fill the space
-                            
-                            new_w = int(img_w * scale)
-                            new_h = int(img_h * scale)
-                            img = img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
-                            
-                            # Convert to RGB if RGBA (for GIFs)
-                            if img.mode in ('RGBA', 'LA', 'P'):
-                                rgb_img = PILImage.new('RGB', img.size, (14, 14, 14))
-                                if img.mode == 'P':
-                                    img = img.convert('RGBA')
-                                rgb_img.paste(img, (0, 0), img if img.mode == 'RGBA' else None)
-                                img = rgb_img
-                            
-                            self._bg_img = img
-                            photo = PILImageTk.PhotoImage(img)
-                            self._bg_photo = photo
-                            
-                            if not hasattr(self, "_bg_lbl"):
-                                self._bg_lbl = tk.Label(self.root, image=photo, bd=0, bg="#0e0e0e")
-                                self._bg_lbl.place(x=0, y=0, width=w, height=h)
-                                self._bg_lbl.lower()  # Push behind all other widgets
-                            else:
-                                self._bg_lbl.configure(image=photo)
-                                self._bg_lbl.place(x=0, y=0, width=w, height=h)
-                                self._bg_lbl.lower()  # Ensure it stays behind
-                            
-                            log("ui", f"Loaded image background: {path}")
-                        except Exception as pil_e:
-                            log("ui", f"PIL image load failed: {type(pil_e).__name__}: {pil_e}")
-                            self.root.configure(bg=bg.get("value", "#0e0e0e"))
-                    elif path_lower.endswith(('.mp4', '.webm')):
-                        # Video files not supported via PIL - use ffmpeg to extract first frame
-                        # For now, just show color
-                        log("ui", "MP4/WebM backgrounds not yet supported (requires ffmpeg extraction)")
-                        self.root.configure(bg=bg.get("value", "#0e0e0e"))
-                    else:
-                        # Try PhotoImage for other formats
-                        try:
-                            self._bg_img = tk.PhotoImage(file=path)
-                            if not hasattr(self, "_bg_lbl"):
-                                self._bg_lbl = tk.Label(self.root, image=self._bg_img, bd=0)
-                                self._bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
-                                self._bg_lbl.lower()  # Push behind all other widgets
-                            else:
-                                self._bg_lbl.configure(image=self._bg_img)
-                                self._bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
-                                self._bg_lbl.lower()  # Ensure it stays behind
-                        except Exception as tk_e:
-                            log("ui", f"PhotoImage load failed: {type(tk_e).__name__}: {tk_e}")
-                            self.root.configure(bg=bg.get("value", "#0e0e0e"))
-                else:
-                    log("ui", f"Background file not found: {path}")
-                    self.root.configure(bg=bg.get("value", "#0e0e0e"))
-            except Exception as e:
-                log("ui", f"Theme bg media failed: {type(e).__name__}: {e}")
-                self.root.configure(bg=bg.get("value", "#0e0e0e"))
+        
+        # First, apply color/gradient/image to the canvas
+        if bg.get("type") == "color":
+            self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
+        
         elif bg.get("type") == "gradient" and bg.get("gradient"):
             try:
-                grad = bg["gradient"]
-                w = self.root.winfo_width() or 1920
-                h = self.root.winfo_height() or 1080
-                if w <= 1: w = 1920
-                if h <= 1: h = 1080
-                
                 if HAS_PIL:
                     from PIL import Image as PILImage, ImageDraw as PILDraw, ImageTk as PILImageTk
+                    
+                    grad = bg["gradient"]
+                    w = self.window_canvas.winfo_width() or 1400
+                    h = self.window_canvas.winfo_height() or 600
+                    
+                    if w <= 1: w = 1400
+                    if h <= 1: h = 600
+                    
                     img = PILImage.new("RGB", (w, h))
                     draw = PILDraw.Draw(img)
                     
-                    c1_str = grad.get("color1", "#121212").lstrip('#')
-                    c2_str = grad.get("color2", "#1e1e1e").lstrip('#')
-                    c1_rgb = tuple(int(c1_str[i:i+2], 16) for i in (0, 2, 4))
-                    c2_rgb = tuple(int(c2_str[i:i+2], 16) for i in (0, 2, 4))
+                    # Validate gradient colors with proper error reporting
+                    c1_val = grad.get("color1", "#121212")
+                    c2_val = grad.get("color2", "#1e1e1e")
+                    
+                    if not c1_val or not isinstance(c1_val, str):
+                        log("ui", f"Canvas gradient: Invalid color1: {repr(c1_val)}, using default")
+                        c1_val = "#121212"
+                    if not c2_val or not isinstance(c2_val, str):
+                        log("ui", f"Canvas gradient: Invalid color2: {repr(c2_val)}, using default")
+                        c2_val = "#1e1e1e"
+                    
+                    c1_str = c1_val.lstrip('#') or "121212"
+                    c2_str = c2_val.lstrip('#') or "1e1e1e"
+                    
+                    if len(c1_str) != 6:
+                        log("ui", f"Canvas gradient: Invalid hex length for color1: {repr(c1_str)}")
+                        c1_str = "121212"
+                    if len(c2_str) != 6:
+                        log("ui", f"Canvas gradient: Invalid hex length for color2: {repr(c2_str)}")
+                        c2_str = "1e1e1e"
+                    
+                    try:
+                        c1_rgb = tuple(int(c1_str[i:i+2], 16) for i in (0, 2, 4))
+                        c2_rgb = tuple(int(c2_str[i:i+2], 16) for i in (0, 2, 4))
+                    except ValueError as ve:
+                        log("ui", f"Canvas gradient: Invalid hex values: c1={repr(c1_str)}, c2={repr(c2_str)}, error={ve}")
+                        c1_rgb = (0x12, 0x12, 0x12)
+                        c2_rgb = (0x1e, 0x1e, 0x1e)
                     
                     if grad.get("type") == "radial":
                         cx, cy = w // 2, h // 2
@@ -3510,6 +3824,7 @@ class StationUI:
                                 b = int(c1_rgb[2] * (1 - ratio) + c2_rgb[2] * ratio)
                                 draw.point((x, y), fill=(r, g, b))
                     else:
+                        # Linear
                         for x in range(w):
                             ratio = x / max(w, 1)
                             r = int(c1_rgb[0] * (1 - ratio) + c2_rgb[0] * ratio)
@@ -3518,30 +3833,139 @@ class StationUI:
                             draw.line([(x, 0), (x, h)], fill=(r, g, b))
                     
                     photo = PILImageTk.PhotoImage(img)
-                    self._bg_gradient = photo
-                    if not hasattr(self, "_bg_lbl"):
-                        self._bg_lbl = tk.Label(self.root, image=photo, bd=0)
-                        self._bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
-                        self._bg_lbl.lower()
+                    self._canvas_gradient = photo
+                    
+                    if not hasattr(self, "_canvas_bg_lbl"):
+                        self._canvas_bg_lbl = tk.Label(self.window_canvas, image=photo, bd=0)
+                        self._canvas_bg_lbl.place(x=0, y=0, width=w, height=h)
+                        self._canvas_bg_lbl.lower()
                     else:
-                        self._bg_lbl.configure(image=photo)
-                        self._bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
-                        self._bg_lbl.lower()
-                else:
-                    self.root.configure(bg=grad.get("color1", "#0e0e0e"))
+                        self._canvas_bg_lbl.configure(image=photo)
+                        self._canvas_bg_lbl.place(x=0, y=0, width=w, height=h)
+                        self._canvas_bg_lbl.lower()
             except Exception as e:
-                log("ui", f"Apply gradient bg failed: {e}")
-                self.root.configure(bg=bg.get("value", "#0e0e0e"))
+                log("ui", f"Canvas gradient failed: {e}")
+                self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
+        
+        elif bg.get("type") in ["image", "video"] and bg.get("path"):
+            try:
+                path = bg["path"]
+                self._current_bg_path = path  # Store for resize handler
+                if os.path.exists(path):
+                    path_lower = path.lower()
+                    # For image formats (PNG, JPG, GIF), use PIL
+                    if path_lower.endswith(('.gif', '.png', '.jpg', '.jpeg')):
+                        try:
+                            import imageio
+                            from PIL import Image as PILImage, ImageTk as PILImageTk
+                            
+                            # Get canvas dimensions
+                            w = self.window_canvas.winfo_width() or 1400
+                            h = self.window_canvas.winfo_height() or 600
+                            if w <= 1: w = 1400
+                            if h <= 1: h = 600
+                            
+                            # Use imageio for animated GIFs - handles all color modes cleanly
+                            if path_lower.endswith('.gif'):
+                                try:
+                                    reader = imageio.get_reader(path)
+                                    is_animated = reader.get_length() > 1
+                                except:
+                                    is_animated = False
+                                
+                                if is_animated:
+                                    # Animated GIF via imageio
+                                    frames = []
+                                    durations = []
+                                    
+                                    for frame_data in reader:
+                                        # imageio returns numpy arrays; convert to PIL
+                                        frame = PILImage.fromarray(frame_data)
+                                        
+                                        # Resize frame
+                                        img_w, img_h = frame.size
+                                        scale_w = w / img_w if img_w > 0 else 1
+                                        scale_h = h / img_h if img_h > 0 else 1
+                                        scale = max(scale_w, scale_h)
+                                        new_w = int(img_w * scale)
+                                        new_h = int(img_h * scale)
+                                        frame = frame.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                                        
+                                        # Ensure RGB
+                                        if frame.mode != 'RGB':
+                                            frame = frame.convert('RGB')
+                                        
+                                        frames.append(frame)
+                                        durations.append(100)  # imageio doesn't expose frame timing reliably
+                                    
+                                    self._canvas_bg_frames = frames
+                                    self._canvas_bg_durations = durations
+                                    self._canvas_bg_frame_idx = 0
+                                    
+                                    if not hasattr(self, "_canvas_bg_lbl"):
+                                        self._canvas_bg_lbl = tk.Label(self.window_canvas, bd=0)
+                                        self._canvas_bg_lbl.place(x=0, y=0, width=w, height=h)
+                                        self._canvas_bg_lbl.lower()
+                                    
+                                    # Start animation loop
+                                    self._animate_canvas_bg()
+                                    log("ui", f"Loaded animated GIF background: {path} ({len(frames)} frames)")
+                                    reader.close()
+                                else:
+                                    # Static or single-frame image
+                                    img = PILImage.open(path)
+                                    img_w, img_h = img.size
+                                    scale_w = w / img_w if img_w > 0 else 1
+                                    scale_h = h / img_h if img_h > 0 else 1
+                                    scale = max(scale_w, scale_h)
+                                    
+                                    new_w = int(img_w * scale)
+                                    new_h = int(img_h * scale)
+                                    img = img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                                    
+                                    if img.mode != 'RGB':
+                                        img = img.convert('RGB')
+                            else:
+                                # PNG, JPG, JPEG - always static
+                                img = PILImage.open(path)
+                                img_w, img_h = img.size
+                                scale_w = w / img_w if img_w > 0 else 1
+                                scale_h = h / img_h if img_h > 0 else 1
+                                scale = max(scale_w, scale_h)
+                                
+                                new_w = int(img_w * scale)
+                                new_h = int(img_h * scale)
+                                img = img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                                
+                                if img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                            
+                            # Display static image (either from GIF single-frame or PNG/JPG/JPEG)
+                            self._canvas_bg_img = img
+                            photo = PILImageTk.PhotoImage(img)
+                            self._canvas_bg_photo = photo
+                            
+                            if not hasattr(self, "_canvas_bg_lbl"):
+                                self._canvas_bg_lbl = tk.Label(self.window_canvas, image=photo, bd=0)
+                                self._canvas_bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
+                                self._canvas_bg_lbl.lower()
+                            else:
+                                self._canvas_bg_lbl.configure(image=photo)
+                                self._canvas_bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
+                                self._canvas_bg_lbl.lower()
+                            
+                            log("ui", f"Loaded canvas background: {path}")
+                        except Exception as pil_e:
+                            log("ui", f"PIL canvas image load failed: {type(pil_e).__name__}: {pil_e}")
+                            self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
+                    else:
+                        self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
+            except Exception as e:
+                log("ui", f"Canvas background load failed: {e}")
+                self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
         else:
-            # Remove bg label if switching back to color
-            if hasattr(self, "_bg_lbl"):
-                try:
-                    self._bg_lbl.place_forget()
-                except Exception:
-                    pass
-            self.root.configure(bg=bg.get("value", "#0e0e0e"))
-
-        # ---- Main paned + panels
+            # Default fallback
+            self.window_canvas.configure(bg=bg.get("value", "#0e0e0e"))
         try:
             self.main_paned.configure(bg=bg.get("value", "#0e0e0e"))
         except Exception:
@@ -3555,8 +3979,15 @@ class StationUI:
             return "#121212"
 
         # Apply to each panel (supports color, image, gradient)
-        for pname, widget in [("left", self.panel_left), ("center", self.panel_center), 
-                               ("right", self.panel_right)]:
+        panels_to_apply = []
+        if hasattr(self, 'panel_left'):
+            panels_to_apply.append(("left", self.panel_left))
+        if hasattr(self, 'panel_center'):
+            panels_to_apply.append(("center", self.panel_center))
+        if hasattr(self, 'panel_right'):
+            panels_to_apply.append(("right", self.panel_right))
+            
+        for pname, widget in panels_to_apply:
             if widget and pname in panels:
                 try:
                     panel_cfg = panels[pname]
@@ -3565,9 +3996,9 @@ class StationUI:
                     log("ui", f"Failed to apply {pname} panel theme: {e}")
 
         # ---- Toolbar bg
-        if hasattr(self, "_toolbar_frame") and "toolbar" in panels:
+        if hasattr(self, "_toolbar_bg_label") and "toolbar" in panels:
             try:
-                _apply_bg_to_widget(self._toolbar_frame, panels["toolbar"], 
+                _apply_bg_to_widget(self._toolbar_bg_label, panels["toolbar"], 
                                    bg.get("value", "#0e0e0e"))
             except Exception:
                 pass
@@ -3575,14 +4006,96 @@ class StationUI:
         # ---- Subtitle bg
         if "subtitle" in panels:
             try:
+                subtitle_cfg = panels["subtitle"]
+                
+                # Apply to canvas
                 if hasattr(self, "sub_canvas"):
-                    _apply_bg_to_widget(self.sub_canvas, panels["subtitle"], 
+                    _apply_bg_to_widget(self.sub_canvas, subtitle_cfg, 
                                        bg.get("value", "#0e0e0e"))
+                
+                # For subtitle label: only use solid color bg (no images/gradients on text)
+                # This ensures text is always readable and layered properly
                 if hasattr(self, "sub_label"):
-                    _apply_bg_to_widget(self.sub_label, panels["subtitle"], 
-                                       bg.get("value", "#0e0e0e"))
-            except Exception:
-                pass
+                    if subtitle_cfg.get("type") == "color":
+                        bg_color = subtitle_cfg.get("value", "#0e0e0e")
+                        self.sub_label.configure(bg=bg_color)
+                    else:
+                        # For image/gradient on canvas, label should use a semi-transparent approach
+                        # Default to dark background for text readability
+                        self.sub_label.configure(bg=bg.get("value", "#0e0e0e"))
+            except Exception as e:
+                log("ui", f"Subtitle theming error: {e}")
+    
+    def _create_floating_window(self, window_id, title, x, y, width, height):
+        """Create a floating window with a WidgetPanel inside."""
+        # Create the floating window
+        floating_win = FloatingWindow(self.window_canvas, window_id, title, x, y, width, height)
+        self.floating_windows[window_id] = floating_win
+        
+        # Override minimize button to use our callback for dynamic taskbar
+        floating_win.min_btn.configure(command=lambda: self._on_window_minimize(window_id))
+        
+        # Create a WidgetPanel inside the floating window's widget_container
+        bg = self.art["global_bg"]
+        panel_theme = self.art["panels"].get(window_id.replace("window_", ""), {"bg": "#121212"})
+        
+        widget_panel = WidgetPanel(
+            floating_win.widget_container,
+            name=window_id,
+            registry=self.widgets,
+            ui_theme={
+                "bg": bg.get("value", "#0e0e0e"),
+                "panel": panel_theme.get("bg", "#121212")
+            }
+        )
+        
+        # Store reference
+        self.widget_panels[window_id] = widget_panel
+        
+        # Pack the panel into the window (WidgetPanel IS a Frame)
+        widget_panel.pack(fill="both", expand=True)
+        
+        return floating_win, widget_panel
+    
+    def _on_window_minimize(self, window_id):
+        """Handle window minimize - show taskbar tab."""
+        floating_win = self.floating_windows[window_id]
+        floating_win.minimize()
+        
+        # Create taskbar tab for this window if it doesn't exist
+        if window_id not in self.taskbar_tabs:
+            tab = tk.Button(
+                self.taskbar,
+                text=f"◆ {floating_win.title_text}",
+                bg="#2a2a2a",
+                fg="#4cc9f0",
+                activebackground="#3a3a3a",
+                activeforeground="#4cc9f0",
+                font=("Segoe UI", 9),
+                relief="flat",
+                padx=12,
+                pady=6,
+                command=lambda: self._on_window_restore(window_id)
+            )
+            tab.pack(side="left", padx=4, pady=4)
+            self.taskbar_tabs[window_id] = tab
+        
+        # Show taskbar if hidden
+        self.taskbar.pack(side="bottom", fill="x")
+    
+    def _on_window_restore(self, window_id):
+        """Handle window restore - hide taskbar tab."""
+        floating_win = self.floating_windows[window_id]
+        floating_win.restore()
+        
+        # Remove taskbar tab
+        if window_id in self.taskbar_tabs:
+            self.taskbar_tabs[window_id].destroy()
+            del self.taskbar_tabs[window_id]
+        
+        # Hide taskbar if no more tabs
+        if not self.taskbar_tabs:
+            self.taskbar.pack_forget()
 
     def _runtime_for_ui(self) -> Dict[str, Any]:
         return {
@@ -3973,26 +4486,56 @@ class StationUI:
         return os.path.join(STATION_DIR, "ui_layout.json")
 
     def _save_layout_file(self):
-        """Save layout to manifest instead of separate JSON file."""
+        """Save layout to manifest including floating window positions."""
         try:
             layout = {
+                "windows": {},
                 "panes": {
-                    "left": self.panel_left.serialize_layout(),
-                    "center": self.panel_center.serialize_layout(),
-                    "right": self.panel_right.serialize_layout(),
+                    "left": {},
+                    "center": {},
+                    "right": {},
                 }
             }
+            
+            # Save panel layouts if they exist and have serialize_layout method
+            if hasattr(self, 'panel_left') and self.panel_left and hasattr(self.panel_left, 'serialize_layout'):
+                try:
+                    layout["panes"]["left"] = self.panel_left.serialize_layout()
+                except Exception as e:
+                    log("ui", f"Warning: Failed to serialize panel_left: {e}")
+            
+            if hasattr(self, 'panel_center') and self.panel_center and hasattr(self.panel_center, 'serialize_layout'):
+                try:
+                    layout["panes"]["center"] = self.panel_center.serialize_layout()
+                except Exception as e:
+                    log("ui", f"Warning: Failed to serialize panel_center: {e}")
+            
+            if hasattr(self, 'panel_right') and self.panel_right and hasattr(self.panel_right, 'serialize_layout'):
+                try:
+                    layout["panes"]["right"] = self.panel_right.serialize_layout()
+                except Exception as e:
+                    log("ui", f"Warning: Failed to serialize panel_right: {e}")
+            
+            # Save floating window states
+            if hasattr(self, 'floating_windows') and self.floating_windows:
+                for window_id, floating_win in self.floating_windows.items():
+                    try:
+                        if hasattr(floating_win, 'serialize'):
+                            layout["windows"][window_id] = floating_win.serialize()
+                    except Exception as e:
+                        log("ui", f"Warning: Failed to serialize window {window_id}: {e}")
+            
             # Save to manifest
             if "ui_layout" not in CFG:
                 CFG["ui_layout"] = {}
             CFG["ui_layout"].update(layout)
             save_station_manifest(CFG)
-            log("ui", f"Saved UI layout to manifest")
+            log("ui", f"Saved UI layout with window positions to manifest")
         except Exception as e:
             log("ui", f"Save layout failed: {type(e).__name__}: {e}")
 
     def _load_layout_file(self):
-        """Load layout from manifest or fallback to old JSON file."""
+        """Load layout from manifest including floating window positions."""
         try:
             # Try to load from manifest first
             layout = CFG.get("ui_layout")
@@ -4005,14 +4548,69 @@ class StationUI:
                 else:
                     log("ui", "No layout found in manifest or ui_layout.json")
                     return
+            
+            if not isinstance(layout, dict):
+                log("ui", "Invalid layout format in manifest")
+                return
 
-            rt = self._runtime_for_ui()
-            panes = (layout.get("panes") or {})
-            self.panel_left.restore_layout(panes.get("left") or {}, rt)
-            self.panel_center.restore_layout(panes.get("center") or {}, rt)
-            self.panel_right.restore_layout(panes.get("right") or {}, rt)
+            # Restore floating window positions and states
+            windows_data = layout.get("windows", {})
+            if hasattr(self, 'floating_windows') and self.floating_windows and isinstance(windows_data, dict):
+                for window_id, win_data in windows_data.items():
+                    if window_id in self.floating_windows:
+                        try:
+                            floating_win = self.floating_windows[window_id]
+                            geom = win_data.get("geometry", {})
+                            
+                            # Restore position and size
+                            x = geom.get("x", floating_win.x)
+                            y = geom.get("y", floating_win.y)
+                            w = geom.get("width", floating_win.width)
+                            h = geom.get("height", floating_win.height)
+                            
+                            floating_win.x = x
+                            floating_win.y = y
+                            floating_win.width = w
+                            floating_win.height = h
+                            floating_win.frame.place(x=x, y=y, width=w, height=h)
+                            
+                            # Restore minimize state
+                            if win_data.get("is_minimized", False) and hasattr(floating_win, 'minimize'):
+                                floating_win.minimize()
+                            
+                            # Restore active tab
+                            active_tab = win_data.get("active_tab")
+                            if active_tab and hasattr(floating_win, 'tabs') and active_tab in floating_win.tabs:
+                                if hasattr(floating_win, 'show_tab'):
+                                    floating_win.show_tab(active_tab)
+                        except Exception as e:
+                            log("ui", f"Warning: Failed to restore window {window_id}: {e}")
 
-            log("ui", "Loaded UI layout from manifest")
+            # Restore panel widget tabs (backward compatibility)
+            # Only if panels are initialized
+            if hasattr(self, 'panel_left') and hasattr(self, 'panel_center') and hasattr(self, 'panel_right'):
+                rt = self._runtime_for_ui()
+                panes = (layout.get("panes") or {})
+                
+                if self.panel_left and hasattr(self.panel_left, 'restore_layout'):
+                    try:
+                        self.panel_left.restore_layout(panes.get("left") or {}, rt)
+                    except Exception as e:
+                        log("ui", f"Warning: Failed to restore panel_left: {e}")
+                
+                if self.panel_center and hasattr(self.panel_center, 'restore_layout'):
+                    try:
+                        self.panel_center.restore_layout(panes.get("center") or {}, rt)
+                    except Exception as e:
+                        log("ui", f"Warning: Failed to restore panel_center: {e}")
+                
+                if self.panel_right and hasattr(self.panel_right, 'restore_layout'):
+                    try:
+                        self.panel_right.restore_layout(panes.get("right") or {}, rt)
+                    except Exception as e:
+                        log("ui", f"Warning: Failed to restore panel_right: {e}")
+
+            log("ui", "Loaded UI layout with window positions from manifest")
         except Exception as e:
             log("ui", f"Load layout failed: {type(e).__name__}: {e}")
 
@@ -4026,6 +4624,31 @@ class StationUI:
             log("ui", "Reset UI layout to default")
         except Exception as e:
             log("ui", f"Reset layout failed: {type(e).__name__}: {e}")
+
+    def _reset_window_positions(self):
+        """Reset all floating windows to their default 3-column layout."""
+        try:
+            # Calculate default sizes
+            canvas_width = 1400
+            canvas_height = 600
+            window_width = canvas_width // 3
+            
+            # Reset each window to default position and size
+            default_geom = {
+                "window_1": {"x": 0, "y": 0, "width": window_width, "height": canvas_height},
+                "window_2": {"x": window_width, "y": 0, "width": window_width, "height": canvas_height},
+                "window_3": {"x": window_width * 2, "y": 0, "width": window_width, "height": canvas_height},
+            }
+            
+            for window_id, geom in default_geom.items():
+                if window_id in self.floating_windows:
+                    win = self.floating_windows[window_id]
+                    win.geometry.update(geom)
+                    win.frame.place(x=geom["x"], y=geom["y"], width=geom["width"], height=geom["height"])
+            
+            log("ui", "Window positions reset to default")
+        except Exception as e:
+            log("ui", f"Reset window positions failed: {type(e).__name__}: {e}")
 
     # -----------------------
     # Display helpers (existing behavior)
@@ -4506,7 +5129,11 @@ def generate_cold_open_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optio
     # ----------------------------
     # Meta user prompt (context)
     # ----------------------------
-    prm = get_prompt(mem, "cold_open_user", mood=mood, focus=focus, hot_tags=hot_tags, themes=themes).strip()
+    feeds_active = list(CFG.get("feeds", {}).keys())
+    feed_context = ", ".join(feeds_active) if feeds_active else "general news"
+    station_context = f"Station: {SHOW_NAME}\nInput Sources: {feed_context}"
+
+    prm = get_prompt(mem, "cold_open_user", mood=mood, focus=focus, hot_tags=hot_tags, themes=themes, station_context=station_context).strip()
 
     # ----------------------------
     # LLM call + parse
@@ -4876,11 +5503,19 @@ def apply_mix_budget(
 
     # Bucket by source, excluding seen
     buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    
+    # Pre-calculate counts for debug
+    total_in = len(candidates_all)
+    skipped_seen = 0
+    
     for c in candidates_all:
         pid = c.get("post_id") or c.get("id")
         if not pid:
             continue
         if str(pid) in seen:
+            skipped_seen += 1
+            # DEBUG: Uncomment to trace what's being skipped
+            # print(f"[MIX TRACE] Skipped seen: {c.get('source')} | {pid} | {c.get('title')[:30]}")
             continue
         src = (c.get("source") or "feed").strip().lower()
         buckets[src].append(c)
@@ -4895,6 +5530,11 @@ def apply_mix_budget(
     for src in list(buckets.keys()):
         buckets[src].sort(key=cscore, reverse=True)
 
+    # DEBUG: Log candidate distribution
+    debug_counts = {s: len(buckets[s]) for s in buckets}
+    if total_in > 0:
+         print(f"[MIX DEBUG] Total={total_in}, Skipped(Seen)={skipped_seen}, Pool={debug_counts}")
+    
     # Determine which sources participate:
     # - only those that have candidates
     # - if a source isn't in mix.weights, give it a tiny default weight so it can still appear
@@ -4953,10 +5593,26 @@ def apply_mix_budget(
     out: List[Dict[str, Any]] = []
     per_src_used: Dict[str, int] = defaultdict(int)
 
-    # Round-robin across sources to keep the merged list diverse
-    # but stop each source at min(target, per_source_cap * 3) for prompt universe
-    # (prompt universe can be a little broader than enqueue cap, but not infinite)
-    prompt_cap = max(1, per_source_cap * 3)
+    # Prompt Universe Cap:
+    # We allow the prompt pool to be slightly larger than the strict *enqueue* per_source_cap
+    # so the LLM has some choice. 
+    # BUT: We must clamp low-weight sources so they don't flood the context just because
+    # they are the only ones available (the "RSS takeover" fix).
+    
+    def get_prompt_cap_for_source(src: str) -> int:
+        # Base cap from config (e.g. 2)
+        base = max(1, per_source_cap)
+        
+        # Source weight
+        sw = w.get(src, 0.0)
+        
+        # If this is a "filler" source (low weight), restrict expansion.
+        if sw < 0.15: 
+            # For small sources, allow at most +50% or +1 item over base cap
+            return int(base * 1.5) + 1
+            
+        # For main sources, allow 3x expansion (let the LLM see variety)
+        return base * 3
 
     # Prepare iterators
     idx = {s: 0 for s in present}
@@ -4967,7 +5623,11 @@ def apply_mix_budget(
         for s in present:
             if len(out) >= max_prompt:
                 break
-            if per_src_used[s] >= min(targets.get(s, 0), prompt_cap):
+            
+            # Use dynamic cap based on weight
+            pcap = get_prompt_cap_for_source(s)
+            
+            if per_src_used[s] >= min(targets.get(s, 0), pcap):
                 continue
             i = idx[s]
             if i >= len(buckets[s]):
@@ -5055,6 +5715,19 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
     drain_attempts = 0
 
     while not stop_event.is_set():
+        # LIVE CONFIG UPDATE: refresh producer settings from CFG every tick
+        target_depth_cfg = max(_int("producer.target_depth", QUEUE_TARGET_DEPTH), 1)
+        max_depth_cfg    = max(_int("producer.max_depth", QUEUE_MAX_DEPTH), target_depth_cfg)
+        tick_sec         = max(_float("producer.tick_sec", PRODUCER_TICK_SEC), 0.25)
+        prompt_max_candidates  = max(_int("producer.prompt_max_candidates", 36), 12)
+        max_enqueue_per_cycle  = max(_int("producer.max_enqueue_per_cycle", 8), 2)
+        producer_model = (cfg_get("models.producer", "") or "").strip()
+        max_tokens     = max(_int("producer.max_tokens", 220), 80)
+        temperature    = _float("producer.temperature", 0.6)
+        min_db_runway      = max(_int("producer.min_db_runway", target_depth_cfg), 4)
+        audio_low_water    = max(_int("producer.audio_low_water", max(2, AUDIO_TARGET_DEPTH // 2)), 1)
+        audio_runway_boost = max(_int("producer.audio_runway_boost", 8), 2)
+
         try:
             try:
                 queued = db_depth_queued(conn)
@@ -5096,6 +5769,13 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                 )
             except Exception:
                 pass
+
+            # Hard block producer while visual_reader is actively running
+            if mem.get("_visual_reader_active") is True:
+                log_every(mem, "producer_blocked_visual", 2, "producer", "visual_reader active → blocking new segment generation")
+                producer_kick.wait(timeout=tick_sec)
+                producer_kick.clear()
+                continue
 
             # FORCE refill when runway empty or low
             # if total_work < desired_runway:
@@ -5479,6 +6159,14 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
 
             # candidates
             candidates_all = mem.get("feed_candidates", []) or []
+            
+            # Simple list cleaner to prevent corruption
+            if not isinstance(candidates_all, list):
+                candidates_all = []
+            
+            # Filter out malformed candidates to avoid downstream errors
+            candidates_all = [c for c in candidates_all if isinstance(c, dict) and c.get("source")]
+            
             mem["feed_candidates"] = candidates_all[-800:]
             candidates_all = mem["feed_candidates"]
 
@@ -6103,6 +6791,143 @@ def _panel_repair(pkt: Dict[str, Any], seg: Dict[str, Any], mem: Dict[str, Any],
     return repaired
 
 
+# =======================
+# Character Manager (Context Engine Router)
+# =======================
+
+def character_manager_lookup(seg: Dict[str, Any], panel_voices: List[str], mem: Dict[str, Any]) -> Optional[str]:
+    """
+    Character Manager: Decides which characters need context data and queries their engines.
+    
+    Args:
+        seg: Segment being generated
+        panel_voices: Available panel voices for this segment
+        mem: Station memory
+    
+    Returns:
+        Formatted context string to inject into host prompt, or None
+    """
+    if not HAS_CONTEXT_ENGINE:
+        return None
+    
+    # Get character configs
+    chars = CFG.get("characters", {})
+    if not chars:
+        return None
+    
+    # Find characters with context engines enabled
+    context_chars = {}
+    for char_name in panel_voices:
+        char_cfg = chars.get(char_name, {})
+        ctx_engine = char_cfg.get("context_engine", {})
+        if ctx_engine.get("enabled"):
+            context_chars[char_name] = {
+                "config": char_cfg,
+                "engine": ctx_engine
+            }
+    
+    if not context_chars:
+        return None
+    
+    # Use Character Manager model to decide what to query
+    manager_model = cfg_get("models.character_manager") or CFG["models"].get("host")
+    
+    # Build prompt for Character Manager
+    char_summaries = []
+    for char_name, data in context_chars.items():
+        engine = data["engine"]
+        engine_type = engine.get("type", "unknown")
+        engine_desc = engine.get("description", "")
+        focus = data["config"].get("focus", [])
+        
+        char_summaries.append(
+            f"- {char_name}: {engine_type} engine | Focus: {', '.join(focus)} | {engine_desc}"
+        )
+    
+    manager_prompt = f"""You are the Character Manager for a radio station.
+
+AVAILABLE CHARACTERS WITH CONTEXT ENGINES:
+{chr(10).join(char_summaries)}
+
+CURRENT SEGMENT:
+Title: {seg.get('title', '')}
+Angle: {seg.get('angle', '')}
+Why: {seg.get('why', '')}
+Key Points: {', '.join(seg.get('key_points', []))}
+Content: {(seg.get('body', '') or '')[:400]}
+
+Your job: Decide if any characters need context data for this segment.
+
+For each character that needs data:
+1. Determine what query to make
+2. Extract query parameters from the segment
+
+Output JSON array (empty if no context needed):
+[
+  {{
+    "character": "character_name",
+    "query_params": {{"param1": "value1", "param2": "value2"}},
+    "reason": "why this character needs this data"
+  }}
+]
+
+Examples:
+- stats_guru discussing game scores → query team names and date
+- music_expert mentioning streaming numbers → query artist and song name
+- Empty array [] if segment doesn't need specialized data"""
+
+    try:
+        raw = llm_generate(
+            prompt=manager_prompt,
+            system="You are a context router. Output valid JSON only.",
+            model=manager_model,
+            num_predict=200,
+            temperature=0.3,
+            timeout=15,
+            force_json=True
+        )
+        
+        decisions = parse_json_lenient(raw)
+        if not isinstance(decisions, list):
+            return None
+        
+    except Exception as e:
+        log("char_mgr", f"Character Manager decision error: {e}")
+        return None
+    
+    # Execute context queries
+    context_results = []
+    station_dir = STATION_DIR
+    
+    for decision in decisions:
+        char_name = decision.get("character")
+        query_params = decision.get("query_params", {})
+        reason = decision.get("reason", "")
+        
+        if char_name not in context_chars:
+            continue
+        
+        engine_config = context_chars[char_name]["engine"]
+        
+        # Query the context engine
+        try:
+            result = query_context_engine(engine_config, query_params, station_dir)
+            if result:
+                engine_type = engine_config.get("type", "unknown")
+                formatted = format_context_for_prompt(result, engine_type)
+                context_results.append(f"[{char_name} Context - {reason}]\n{formatted}")
+                log("char_mgr", f"Context fetched for {char_name}: {reason}")
+        except Exception as e:
+            log("char_mgr", f"Context query error for {char_name}: {e}")
+            continue
+    
+    if not context_results:
+        return None
+    
+    # Combine all context into one block
+    return "\n\n".join(context_results)
+
+
 def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Manifest-driven structured packet generation.
@@ -6111,8 +6936,20 @@ def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[D
     allowed = ["host"] + _allowed_panel_voices()
     panel_allowed = [v for v in allowed if v != "host"]
 
+    # ============================================
+    # CHARACTER MANAGER: Context Engine Lookup
+    # ============================================
+    context_data = None
+    if HAS_CONTEXT_ENGINE:
+        try:
+            context_data = character_manager_lookup(seg, panel_allowed, mem)
+        except Exception as e:
+            log("tts", f"Character Manager error: {e}")
+            context_data = None
+
     sys = _host_packet_system_manifest(mem, panel_allowed)
 
+    # Build prompt with optional context injection
     prm = get_prompt(
         mem, "host_packet_user",
         title=seg.get("title",""),
@@ -6121,6 +6958,10 @@ def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[D
         key_points=seg.get("key_points", []),
         material=(seg.get("body","") or "")[:900]
     ).strip()
+    
+    # Inject context data if available
+    if context_data:
+        prm = context_data + "\n\n" + prm
 
     try:
         raw = llm_generate(
@@ -6731,19 +7572,21 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
 
         try:
             if db_depth_total(conn) == 0:
-                try:
-                    riff = clean(llm_generate(
-                        evergreen_riff(mem),
-                        "You are a radio host filling a short gap naturally.",
-                        model=CFG["models"]["host"],
-                        num_predict=120,
-                        temperature=0.85,
-                        timeout=40
-                    ))
-                    if riff:
-                        play_audio_bundle([("host", riff)])
-                except Exception as e:
-                    log("host", f"riff error: {type(e).__name__}: {e}")
+                # User Disabled: "hardcoded shitty riff system"
+                # If we want filling, it should come from a plugin (like mix_rebalance or similar)
+                # try:
+                #     riff = clean(llm_generate(
+                #         evergreen_riff(mem),
+                #         "You are a radio host filling a short gap naturally.",
+                #         model=CFG["models"]["host"],
+                #         num_predict=120,
+                #         temperature=0.85,
+                #         timeout=40
+                #     ))
+                #     if riff:
+                #         play_audio_bundle([("host", riff)])
+                # except Exception as e:
+                #     log("host", f"riff error: {type(e).__name__}: {e}")
 
                 time.sleep(0.4)
                 continue
@@ -7346,7 +8189,10 @@ def ui_event_worker(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                 try:
                     v = float(payload)
                     v = max(0.0, min(1.5, v))
+                    # Update mem for host_loop and CFG for speak()
                     mem["audio_volume"] = v
+                    CFG.setdefault("audio", {})["volume"] = v
+                    
                     ui_q.put(("widget_update", {
                         "widget_key": "radio_dial",
                         "data": {"volume": v}
@@ -7358,7 +8204,10 @@ def ui_event_worker(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                 try:
                     s = float(payload)
                     s = max(0.6, min(1.6, s))
+                    # Update mem for host_loop and CFG for speak()
                     mem["audio_speed"] = s
+                    CFG.setdefault("audio", {})["speed"] = s
+                    
                     ui_q.put(("widget_update", {
                         "widget_key": "radio_dial",
                         "data": {"speed": s}
@@ -7619,44 +8468,71 @@ def _normalize_source_alias(src: str) -> str:
     }
     return alias.get(s, s)
 
+def normalize_feed_item(cand: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Central normalization for all incoming feed items.
+    Ensures consistent shape, cleaning, and defaults before storage.
+    """
+    if not isinstance(cand, dict):
+        return {}
+
+    # Copy to avoid side effects
+    item = cand.copy()
+
+    # 1. Source Normalization
+    src = item.get("source", "feed")
+    item["source"] = _normalize_source_alias(src)
+
+    # 2. Basic Text Fields (ensure strings)
+    for k in ["title", "body", "author", "url"]:
+        if k in item and item[k] is None:
+            item[k] = ""
+        elif k in item:
+            item[k] = str(item[k]).strip()
+        else:
+            item[k] = ""
+
+    # 3. Timestamps
+    if "ts" not in item:
+        item["ts"] = now_ts()
+    
+    # 4. Type & Defaults
+    item.setdefault("type", "item")
+    if "event_type" not in item:
+        item["event_type"] = item["type"]
+    
+    item.setdefault("comments", [])
+    item.setdefault("tags", [])
+    item.setdefault("metrics", {})
+    # symbol intentionally optional
+
+    # 5. Priority / Weight
+    # Promote "priority" -> "heur" (0-100)
+    p = item.get("priority")
+    if "heur" not in item or item["heur"] is None:
+        try:
+            item["heur"] = float(p if p is not None else 50.0)
+        except (ValueError, TypeError):
+            item["heur"] = 50.0
+
+    # 6. ID Stability
+    # If no post_id, generate one from content
+    if not item.get("post_id"):
+        base = (item.get("title","") + "|" + (item.get("body","") or "")[:200]).strip()
+        item["post_id"] = sha1(base)
+
+    return item
+
 def _emit_candidate(mem: Dict[str, Any], cand: Dict[str, Any]) -> None:
     if not isinstance(cand, dict):
         return
 
-    # ---- normalize source
-    src = _normalize_source_alias(cand.get("source", "feed"))
-    cand["source"] = src
-
-    # ---- baseline fields (existing behavior)
-    cand.setdefault("event_type", cand.get("type", "item"))
-    cand.setdefault("comments", [])
-    cand.setdefault("title", "")
-    cand.setdefault("body", "")
-
-    # ---- soft extensions (NEW but optional)
-    cand.setdefault("ts", now_ts())
-    cand.setdefault("tags", [])
-    cand.setdefault("metrics", {})
-    # symbol intentionally optional (do NOT set default)
-
-    # ---- promote priority → heur
-    if "heur" not in cand or cand.get("heur") is None:
-        if "priority" in cand and cand.get("priority") is not None:
-            try:
-                cand["heur"] = float(cand.get("priority"))
-            except Exception:
-                cand["heur"] = 50.0
-        else:
-            cand["heur"] = 50.0
-
-    # ---- stable id
-    if not cand.get("post_id"):
-        base = (cand.get("title","") + "|" + (cand.get("body","") or "")[:200]).strip()
-        cand["post_id"] = sha1(base)
+    # Use the central normalizer
+    final_cand = normalize_feed_item(cand)
 
     with _feed_lock:
         mem.setdefault("feed_candidates", [])
-        mem["feed_candidates"].append(cand)
+        mem["feed_candidates"].append(final_cand)
 
         # bounded memory
         mem["feed_candidates"] = mem["feed_candidates"][-800:]
@@ -7703,6 +8579,7 @@ def main():
 
     log("feed", f"manifest feeds: {list(feeds_cfg.keys())}")
     log("feed", f"registered plugins: {list(feed_registry.keys())}")
+    log("ui", f"registered widgets: {list(WIDGETS.keys())}")  # <--- CORRECTED
 
     # ------------------
     # Audio diagnostics
@@ -7874,6 +8751,8 @@ def main():
             log("feed", f"{feed_name} crashed: {type(e).__name__}: {e}")
 
 
+    active_feed_configs = {}
+
     for feed_name, feed_cfg in feeds_cfg.items():
 
         if not isinstance(feed_cfg, dict):
@@ -7901,6 +8780,9 @@ def main():
         payload.setdefault("feed_name", feed_name)
         payload.setdefault("plugin", plugin_key)
 
+        # Track for live config reloading
+        active_feed_configs[feed_name] = payload
+
         threads.append(threading.Thread(
             target=safe_feed_runner,
             args=(feed_name, worker, stop_event, mem, payload),
@@ -7908,6 +8790,9 @@ def main():
         ))
 
         log("feed", f"Started feed: {feed_name} (plugin={plugin_key})")
+
+    # Start config reloader
+    _start_feed_config_reloader(active_feed_configs)
 
     # ------------------
     # Start threads

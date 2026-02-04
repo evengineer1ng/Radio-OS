@@ -15,17 +15,9 @@ venv/
 env/
 ENV/
 
-# Station Runtime Data
-stations/*/station.sqlite
-stations/*/station.sqlite-shm
-stations/*/station.sqlite-wal
-stations/*/station_memory.json
-stations/*/fm_memory.json
-stations/*/fm_station.sqlite*
-stations/*/status.json
-stations/*/ui_layout.json
-stations/*/runtime.log
-stations/*/backups/
+# Stations (Ignore all user stations)
+stations/*
+!stations/.gitkeep
 stations - Copy/
 
 # Temporary files

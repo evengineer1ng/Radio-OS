@@ -3,7 +3,6 @@ IS_FEED = False
 def register_widgets(registry, runtime):
 
     tk = runtime["tk"]
-    mem = runtime["mem"]
 
     BG = "#0e0e0e"
     CARD = "#161616"
@@ -13,6 +12,9 @@ def register_widgets(registry, runtime):
     ACCENT = "#4cc9f0"
 
     def explorer_factory(parent, runtime):
+
+        # Access mem from runtime (passed to factory at creation time)
+        mem = runtime.get("mem", {})
 
         root = tk.Frame(parent, bg=BG)
 

@@ -11,12 +11,31 @@ echo "Radio OS Unix Launcher"
 echo "========================================"
 echo ""
 
+# Check Python availability
+if ! command -v python3 &> /dev/null; then
+    echo ""
+    echo "[!] Python 3 is not installed."
+    echo ""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "[*] Quick fix (if you have Homebrew):"
+        echo "    brew install python"
+        echo ""
+        echo "[*] Or download the installer: https://www.python.org/downloads/macos/"
+    else
+        echo "[*] Install via your package manager:"
+        echo "    Ubuntu/Debian: sudo apt update && sudo apt install python3 python3-venv python3-pip"
+        echo "    Fedora: sudo dnf install python3"
+        echo "    Arch: sudo pacman -S python"
+    fi
+    exit 1
+fi
+
 # Check if venv exists
 if [ ! -d "radioenv" ]; then
     echo "[*] Creating virtual environment..."
     python3 -m venv radioenv
     if [ $? -ne 0 ]; then
-        echo "[!] Failed to create venv. Ensure Python 3.10+ is installed."
+        echo "[!] Failed to create venv. Ensure Python 3.10+ is installed (and python3-venv on Linux)."
         exit 1
     fi
 fi
@@ -28,12 +47,29 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Install/update dependencies
-echo "[*] Installing dependencies..."
-pip install -q -r requirements.txt
+# Upgrade pip and install dependencies
+echo "[*] Checking dependencies..."
+pip install --upgrade pip -q
+pip install -r requirements.txt
 if [ $? -ne 0 ]; then
     echo "[!] Failed to install dependencies."
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "[!] Hint: On Linux, you may need system packages:"
+        echo "    sudo apt-get install python3-tk libsndfile1 ffmpeg portaudio19-dev"
+    fi
     exit 1
+fi
+
+# Check for FFMPEG
+if ! command -v ffmpeg &> /dev/null; then
+    echo "[!] Warning: ffmpeg not found."
+    echo "[!] Some audio plugins may require it."
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "    Install via Homebrew: brew install ffmpeg"
+    else
+        echo "    Install via apt: sudo apt install ffmpeg"
+    fi
+    echo ""
 fi
 
 # Detect platform

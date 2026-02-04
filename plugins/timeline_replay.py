@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, List
 
 PLUGIN_NAME = "timeline_replay"
+IS_FEED = False
 
 def register_widgets(registry, runtime):
     tk = runtime["tk"]

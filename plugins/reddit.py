@@ -27,32 +27,63 @@ def sha1(x):
 def fetch_reddit(subreddits, limit=10):
     out = []
 
+    # We want both FRESH (new) and ESTABLISHED (hot) content
+    modes = ["new", "hot"]
+    
+    # Don't fetch full limit for both to avoid spamming
+    # Split limit between them
+    mode_limit = max(2, int(limit / 2) + 1)
+    
+    # Use browser-like UA and old.reddit.com to avoid strict API limits
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
     for sub in subreddits:
-        try:
-            r = requests.get(
-                f"https://www.reddit.com/r/{sub}/new.json",
-                headers={"User-Agent": "radio-os"},
-                params={"limit": limit},
-                timeout=10
-            )
-            j = r.json()
+        for mode in modes:
+            try:
+                time.sleep(2.0)  # Rate limiting
+                r = requests.get(
+                    f"https://old.reddit.com/r/{sub}/{mode}.json",
+                    headers={"User-Agent": ua},
+                    params={"limit": mode_limit},
+                    timeout=5
+                )
+                
+                if r.status_code == 429:
+                    print(f"[Reddit] Rate limit hit (429) on r/{sub}/{mode}. Aborting fetch cycle.")
+                    return out
 
-            for c in j.get("data", {}).get("children", []):
-                d = c["data"]
+                if r.status_code != 200:
+                    print(f"[Reddit] Error fetching r/{sub}/{mode}: {r.status_code}")
+                    continue
 
-                out.append({
-                    "post_id": d.get("id"),
-                    "subreddit": d.get("subreddit", sub),
-                    "title": d.get("title", ""),
-                    "body": d.get("selftext", ""),
-                    "author": d.get("author", ""),
-                    "score": d.get("score", 0),
-                    "comments": d.get("num_comments", 0),
-                    "created_utc": d.get("created_utc", float(now_ts())),
-                })
+                j = r.json()
+                children = j.get("data", {}).get("children", [])
+                
+                # Debug logging (remove later if too noisy)
+                print(f"[Reddit] r/{sub}/{mode} found {len(children)} items")
 
-        except Exception:
-            continue
+                for c in children:
+                    d = c.get("data", {})
+
+                    # Tag the source internally so we know (optional)
+                    # but for now just append
+                    
+                    # Dedupe happens in the worker loop logic via seen set
+                    
+                    out.append({
+                        "post_id": d.get("id"),
+                        "subreddit": d.get("subreddit", sub),
+                        "title": d.get("title", ""),
+                        "body": d.get("selftext", ""),
+                        "author": d.get("author", ""),
+                        "score": d.get("score", 0),
+                        "comments": d.get("num_comments", 0),
+                        "created_utc": d.get("created_utc", float(now_ts())),
+                        "mode": mode  # Track source mode
+                    })
+
+            except Exception:
+                continue
 
     return out
 

@@ -109,6 +109,8 @@ def feed_worker(stop_event, mem, *args):
 
     urls = list(cfg.get("urls", []))
     poll = float(cfg.get("poll_sec", 180))
+    burst_delay = float(cfg.get("burst_delay", 0.5))
+    feed_delay = float(cfg.get("feed_delay", 1.0))
 
     seen = set()
 
@@ -202,7 +204,13 @@ def feed_worker(stop_event, mem, *args):
                         "heur": 72.0,
                     })
 
+                    if burst_delay > 0:
+                        time.sleep(burst_delay)
+
             except Exception:
                 pass
+            
+            if feed_delay > 0:
+                time.sleep(feed_delay)
 
         time.sleep(poll)

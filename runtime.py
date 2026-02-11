@@ -148,8 +148,8 @@ DEFAULT_PROMPTS = {
         # Visual Reader Prompts
         # -------------------
         "visual_throwaway_comment": "Let's watch this video together. {comment}",
-        "visual_realtime_reaction": "Material: {material}\n\nReact in real time to what you see in the video. Speak ONE natural concise sentence.",
-        "visual_summarize_reaction": "Material: {material}\n\nThe video has ended. Summarize your reaction as if you just finished watching. Speak naturally, as if talking to a friend on air.",
+        "visual_realtime_reaction": "Material: {material}\n\nReact in real time to what you see in the video. Speak ONE clear, opinionated sentence with a distinct angle — short, natural, and suitable for spoken audio.",
+        "visual_summarize_reaction": "Material: {material}\n\nThe video has ended. Summarize your reaction naturally, as if talking to a friend on air. Be concise, avoid lists, and highlight the most surprising or interesting element.",
     # -------------------
     # Producer
     # -------------------
@@ -216,8 +216,27 @@ Recent callbacks:
 Live nudges:
 {live_nudges}""",
 
-    "producer_candidates_prompt": """Choose segments for the upcoming show queue:
+    "producer_candidates_prompt": """You are the station PRODUCER. Review the candidate list below and choose at most 12 segments to schedule for the upcoming show.
 
+For each selected segment return an object with these fields:
+- "post_id": the candidate post_id (must match a candidate)
+- "angle": one short sentence framing the piece
+- "why": one or two sentences explaining why this matters now
+- "key_points": list of 1–5 short phrases (optional)
+- "priority": integer 0–100 (higher means run sooner)
+- "depth": "quick" or "deep"
+- "host_hint": brief note for the host (optional)
+
+Return STRICT JSON only in this exact structure:
+{
+  "segments": [
+    { "post_id": "...", "angle": "...", "why": "...", "key_points": ["..."], "priority": 0-100, "depth": "quick|deep", "host_hint": "..." }
+  ]
+}
+
+Do NOT invent post_id values or add candidates not present in the list. Do NOT include any commentary outside the JSON.
+
+Candidates:
 {candidates_list}""",
 
     "producer_bridge": """Write a very short (1 sentence) radio bridge throwing back to the music. Energy: high. Context: talk break ending.""",
@@ -242,31 +261,26 @@ Callbacks: {callbacks}""",
     # -------------------
     # Cold Open
     # -------------------
-    "cold_open_system": """You are the live host of an ongoing audio program.
+    "cold_open_system": """You are the live host writing the very first spoken moment of a show — a short, human cold open that hooks listeners and sets one clear narrative thread.
 
-Your task is to generate a natural cold open — the first spoken moment of a show.
+Hard rules:
+- Produce 1–3 short sentences (aim for 2). Spoken, not written — it must sound like something a real host would say on air.
+- Anchor the intro in a concrete detail: use the TITLE, a specific fact from the MATERIAL, a HOT_TAG, or an ACTIVE THEME. If none exist, do NOT produce a vague, generic statement — return an honest, concise hook about mood or implication.
+- Forbid clichés and abstract platitudes such as: "the world is changing", "in these uncertain times", "we live in a moment of", "today more than ever". These are disallowed.
+- Do NOT greet the audience, announce the show, or use stage directions. No lists or bullets. No invented facts.
+- The "host_intro" must explicitly reference either the TITLE, a tag, or an active theme (or a short verifiable detail from the material).
 
-Principles:
-- Sound like a human host thinking out loud, not reading a script
-- Do not greet the audience or reference the show starting
-- Flow naturally into the subject matter
-- Connect ideas rather than listing them
-- Favor insight, curiosity, or tension over summary
+Output requirements:
+- Return STRICT JSON only with three keys:
+  - "host_intro": 1–3 short sentences (the hook + connective)
+  - "panel": an empty list []
+  - "host_takeaway": one short sentence that summarizes the single takeaway or action
 
-Constraints:
-- 2 to 4 sentences only
-- Designed for spoken audio
-- No formatting, no bullet points
-- Subtly reflect the provided mood, focus, tags, and themes
-- Avoid clichés and filler phrases
+Bad vs Good (examples):
+BAD: "We live in a time of constant change; tonight we'll talk about it."
+GOOD: "When the album dropped last week, streams spiked 400% in one city — tonight we ask why that one neighborhood is leading the surge."
 
-Return STRICT JSON in this format:
-
-{{
-  "host_intro": "...",
-  "panel": [],
-  "host_takeaway": "..."
-}}""",
+Return only the JSON object above, nothing else.""",
 
     "cold_open_user": """Mood: {mood}
 Focus: {focus}
@@ -276,38 +290,46 @@ Focus: {focus}
 Recent tags: {hot_tags}
 Active themes: {themes}
 
-Create a cold open that naturally reflects this context.
-Use the Station name and implied identity from the sources to ground the show's voice.""",
+Instructions:
+- Use the provided mood, focus, hot_tags, and themes to choose a narrow angle for the hook.
+- If a concrete detail is present in the material, incorporate one concise, verifiable detail to anchor the intro.
+- If there are no clear facts, lean on mood and themes to create an evocative, specific hook (do NOT invent facts).
+- Keep language vivid and conversational; aim for short sentences that sound natural when spoken.
+
+Return STRICT JSON only as specified by the system prompt.""",
 
     # -------------------
     # Host Packet (Manifest)
     # -------------------
     "host_packet_system": """You are the live host of {show_name}.
 
-You are joined by a panel of distinct voices.
-You MUST include a panel with {min_n} to {max_n} entries.
-Each panel voice must contribute a unique angle (no repetition).
+You are joined by a panel of distinct voices. You MUST include a panel with {min_n} to {max_n} entries; each panel voice must contribute a unique angle.
 
-Panel voices available:
-{roster}
+IMPORTANT PANEL REQUIREMENT: The panel is NOT optional. You MUST include at least {min_n} distinct panel voices speaking. Each panel member brings their own perspective and persona to the discussion.
 
-Rules:
-- Spoken words only.
-- Natural radio flow.
-- No bullet points.
-- No stage directions.
-- Do not invent facts not supported by the material.
+Style & rules:
+- Spoken words only; natural radio flow.
+- Each panel voice line MUST sound like that character — follow their role, traits, and focus.
+- Panel voices should jump in naturally with reactions, insights, counterpoints, or analysis.
+- Use distinct vocabulary and sentence openings; do NOT echo the same phrasing across panel lines, host_intro, summary, and takeaway.
+- Do NOT repeat the TITLE verbatim. If the TITLE looks like a short headline, transform it into a concise hook or insight that explains why it matters now.
+- Prefer an analytical or connective "host_intro" (a short, punchy hook). Aim for ONE sharp sentence where possible — a quick-witted, concise line that signals the angle.
+- Keep sentences short and conversational; avoid lists, stage directions, or invented facts.
+- Avoid explanations or background in the intro; that belongs in "summary". If you must include context, keep it to a single short clause.
 
-Output STRICT JSON only:
-
-{{
-  "host_intro": "...",
-  "summary": "...",
-  "panel": [
-    {{ "voice": "{allowed_p_str}", "line": "..." }}
+Output STRICT JSON only with these keys:
+{
+  "host_intro": "...",        # 1 short sentence preferred (<=22 words); a sharp hook
+  "summary": "...",          # short useful summary (not a verbatim title)
+  "panel": [                   # REQUIRED: {min_n} to {max_n} panel voice contributions
+    { "voice": "{allowed_p_str}", "line": "..." }
   ],
-  "host_takeaway": "..."
-}}
+  "host_takeaway": "..."     # 1 short sentence takeaway
+}
+
+Good vs Bad intro examples:
+GOOD: "A surprise Grammy upset — tonight, we ask what it means for culture and streaming."  
+BAD: "The world is changing and this event is an example of larger trends about how cultural institutions evolve over time and affect artists and listeners alike."
 
 Themes: {themes}
 Callbacks: {callbacks}""",
@@ -325,7 +347,17 @@ KEY POINTS:
 {key_points}
 
 MATERIAL:
-{material}""",
+{material}
+
+Panel guidance:
+- Each panel line must be ONE concise sentence (<=18 words) in the named character's persona.
+- Panel voices should react, analyze, challenge, or add insight — they are active participants in the discussion.
+- Provide a clear stance, insight, or counterpoint — avoid restating the host summary or title.
+- Vary sentence openings and vocabulary across panel voices. Avoid echoing language and avoid hedging or filler.
+- Think of this as a real radio discussion where different voices naturally jump in with their takes.
+
+Return the structured JSON described by the system prompt and nothing else.""",
+
 
     "host_packet_repair_user": """We already have this packet JSON (keep host_intro/summary/host_takeaway the same):
 {existing_json}
@@ -341,7 +373,8 @@ Task:
 Return STRICT JSON only.
 Keep existing fields unchanged.
 ONLY modify "panel" by adding entries until panel has at least {min_n} items.
-Use distinct voices. Each line must be ONE concise sentence.""",
+Use distinct voices. Each line must be ONE concise sentence.
+IMPORTANT: Each panel line must be written in the named character's persona (use their role/traits/focus). Avoid repeating language from the host_intro or summary; vary sentence openings and vocabulary to create distinct voices.""",
 
     # -------------------
     # Feature: Music Breaks
@@ -369,7 +402,7 @@ Tone: {tone}
 
 {live_block}
 
-Speak ONE natural concise sentence adding your unique angle.""",
+Speak ONE distinct, concise sentence that adds an editorial angle or reaction. Avoid generic praise or repetition; make a short, on-air line the host can read naturally.""",
 
     # -------------------
     # Feature: Visuals
@@ -387,6 +420,30 @@ Material: {body}
 {live_block}
 
 Return ONE visual prompt.""",
+
+    # -------------------
+    # Character Manager (Context Router) prompts
+    # Manage how the character manager decides which characters need external context
+    "character_manager_system": """You are the Character Manager for a radio station.
+
+ROLE: Decide which characters should fetch external context for the current segment, and why.
+OUTPUT: Return a JSON ARRAY only. Each element must be an object with keys:
+  - "character": character_name
+  - "query_params": {"param":"value", ...}
+  - "reason": short justification string
+Do not output prose or explanation. Output valid JSON only.""",
+
+    "character_manager_user": """Available characters with context engines:
+{char_summaries}
+
+CURRENT SEGMENT:
+Title: {title}
+Angle: {angle}
+Why: {why}
+Key Points: {key_points}
+Content: {content}
+
+Task: For each character that needs external context, return one object with `character`, `query_params`, and `reason`. If no characters need data, return an empty JSON array [].""",
 
     # -------------------
     # Feature: Evergreen Riff
@@ -608,6 +665,7 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None):
         "StationEvent": StationEvent,
         "event_q": event_q,
         "MUSIC_STATE": MUSIC_STATE,  # ✅ add this too (see next section)
+        "STATION_DIR": STATION_DIR,  
     }
 
     for path in glob.glob(os.path.join(plugin_dir, "*.py")):
@@ -787,6 +845,7 @@ ui_q: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
 event_q = queue.Queue()
 ui_cmd_q: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
 music_cmd_q: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+notification_q: "queue.Queue[Any]" = queue.Queue()  # For FTB notifications
 
 
 # =======================
@@ -900,6 +959,12 @@ def normalize_event_type(t: str) -> str:
 class AudioItem:
     bundle: List[Tuple[str, str]]
     seg: Dict[str, Any]
+    # File-based audio (NEW: for music/sfx alongside TTS)
+    music_track: Optional[str] = None      # Path to music file
+    sfx_files: List[str] = field(default_factory=list)  # SFX file paths
+    ambient_loop: Optional[str] = None     # Ambient audio loop
+    world_audio: Optional[str] = None      # World audio (engines, etc.)
+    ui_audio: Optional[str] = None         # UI feedback sounds
 
 @dataclass
 class StationEvent:
@@ -1137,7 +1202,7 @@ def event_to_segment(evt: StationEvent, mem: Dict[str, Any]) -> Dict[str, Any]:
         "body": clamp_text(str(body), 1400),
         "comments": [],
         "angle": evt.payload.get("angle", "React naturally to what just happened."),
-        "why": evt.payload.get("why", "Live update from a feed source."),
+        "why": evt.payload.get("why", ""),
         "key_points": evt.payload.get("key_points", ["what changed", "why it matters"]),
         "priority": pri,
         "host_hint": evt.payload.get("host_hint", "Quick live update."),
@@ -3516,22 +3581,60 @@ class StationUI:
             if not current_key:
                 return
             if tk.messagebox.askyesno("Reset", f"Reset {current_key} to default?"):
-                # Remove from manifest
-                cust = CFG.get("prompts", {})
-                if current_key in cust:
-                    del cust[current_key]
-                    save_station_manifest(CFG)
+                # Remove from manifest (if present)
+                cust = CFG.get("prompts") or {}
+                if isinstance(cust, dict) and current_key in cust:
+                    try:
+                        del cust[current_key]
+                        save_station_manifest(CFG)
+                    except Exception:
+                        pass
                 
                 # Remove from legacy memory (cleanup)
-                mem_cust = mem.get("custom_prompts", {})
-                if current_key in mem_cust:
-                    del mem_cust[current_key]
-                    save_memory(mem)
+                mem_cust = mem.get("custom_prompts")
+                if isinstance(mem_cust, dict) and current_key in mem_cust:
+                    try:
+                        del mem_cust[current_key]
+                        save_memory(mem)
+                    except Exception:
+                        pass
                 
                 load_selected() # Reload default
+                tk.messagebox.showinfo("Reset", f"Reset {current_key} to default.")
+
+        def reset_all():
+            if not tk.messagebox.askyesno("Reset All", "Reset ALL prompts to the default values? This will remove any custom prompts saved in the station manifest and runtime memory."):
+                return
+            # Clear manifest prompts
+            try:
+                if "prompts" in CFG:
+                    del CFG["prompts"]
+                    save_station_manifest(CFG)
+            except Exception:
+                pass
+
+            # Clear runtime custom prompts
+            try:
+                if "custom_prompts" in mem:
+                    del mem["custom_prompts"]
+                    save_memory(mem)
+            except Exception:
+                pass
+
+            # Refresh list and UI
+            entry_list.delete(0, "end")
+            all_keys_local = sorted(DEFAULT_PROMPTS.keys())
+            for k in all_keys_local:
+                entry_list.insert("end", k)
+            if all_keys_local:
+                entry_list.select_set(0)
+                load_selected()
+
+            tk.messagebox.showinfo("Reset", "All prompts have been reset to defaults.")
 
         tk.Button(bar, text="Save Prompt", command=save, bg="#2a2a2a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
         tk.Button(bar, text="Reset to Default", command=reset, bg="#2a2a2a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
+        tk.Button(bar, text="Reset ALL to Defaults", command=reset_all, bg="#b33a3a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=8)
         
         # Load first if exists
         if all_keys:
@@ -4800,7 +4903,9 @@ def db_connect() -> sqlite3.Connection:
         angle TEXT,
         why TEXT,
         key_points_json TEXT,
-        host_hint TEXT
+        host_hint TEXT,
+        lead_voice TEXT,
+        sfx_files_json TEXT
     );
     """)
 
@@ -4826,6 +4931,8 @@ def migrate_segments_table(conn: sqlite3.Connection) -> None:
     ensure("source", "ALTER TABLE segments ADD COLUMN source TEXT;")
     ensure("event_type", "ALTER TABLE segments ADD COLUMN event_type TEXT;")
     ensure("claimed_ts", "ALTER TABLE segments ADD COLUMN claimed_ts INTEGER;")
+    ensure("lead_voice", "ALTER TABLE segments ADD COLUMN lead_voice TEXT;")
+    ensure("sfx_files_json", "ALTER TABLE segments ADD COLUMN sfx_files_json TEXT;")
 
     conn.commit()
 
@@ -4857,8 +4964,9 @@ def db_enqueue_segment(conn: sqlite3.Connection, seg: Dict[str, Any]) -> bool:
         id, created_ts, priority, status,
         post_id, source, event_type,
         title, body,
-        comments_json, angle, why, key_points_json, host_hint
-    ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        comments_json, angle, why, key_points_json, host_hint,
+        lead_voice, sfx_files_json
+    ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         seg["id"],
         now_ts(),
@@ -4873,6 +4981,8 @@ def db_enqueue_segment(conn: sqlite3.Connection, seg: Dict[str, Any]) -> bool:
         seg.get("why",""),
         json.dumps(seg.get("key_points", []), ensure_ascii=False),
         seg.get("host_hint",""),
+        seg.get("lead_voice", ""),
+        json.dumps(seg.get("_sfx_files", []), ensure_ascii=False),
     ))
     conn.commit()
     return int(getattr(cur, "rowcount", 0) or 0) > 0
@@ -4888,7 +4998,8 @@ def db_pop_next_segment(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
             id, created_ts, priority,
             post_id, source, event_type,
             title, body, comments_json,
-            angle, why, key_points_json, host_hint
+            angle, why, key_points_json, host_hint,
+            lead_voice, sfx_files_json
         FROM segments
         WHERE status='queued'
         ORDER BY priority DESC, created_ts ASC
@@ -4973,6 +5084,10 @@ def db_pop_next_segment(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         key_points = json.loads(picked_row[11]) if picked_row[11] else []
     except Exception:
         key_points = []
+    try:
+        sfx_files = json.loads(picked_row[14]) if picked_row[14] else []
+    except Exception:
+        sfx_files = []
 
     return {
         "id": picked_row[0],
@@ -4988,6 +5103,8 @@ def db_pop_next_segment(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         "why": picked_row[10],
         "key_points": key_points,
         "host_hint": picked_row[12],
+        "lead_voice": picked_row[13],
+        "_sfx_files": sfx_files,
     }
 
 
@@ -5142,7 +5259,7 @@ def generate_cold_open_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optio
         raw = llm_generate(
             prompt=prm,
             system=sys,
-            model=CFG["models"]["host"],
+            model=CFG.get("models", {}).get("host"),
             num_predict=180,
             temperature=0.85,
             timeout=35,
@@ -5156,7 +5273,76 @@ def generate_cold_open_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optio
         host_intro = clean(str(pkt.get("host_intro", "")))[:700]
         takeaway   = clean(str(pkt.get("host_takeaway", "")))[:500]
 
-        if not host_intro:
+        # Validation: avoid generic platitudes and ensure anchoring
+        def _is_generic(text: str) -> bool:
+            if not text:
+                return True
+            t = text.lower()
+            banned = [
+                "the world is changing", "in these uncertain times", "we live in a moment",
+                "now more than ever", "in today's world", "more than ever"
+            ]
+            for b in banned:
+                if b in t:
+                    return True
+            # too short or vague
+            if len(t.split()) < 6:
+                return True
+            return False
+
+        def _anchors_present(text: str, title: str, hot_tags: List[str], themes: List[str]) -> bool:
+            t = (text or "").lower()
+            if not t:
+                return False
+            # Direct substring match of title (best case)
+            if title and title.lower() in t:
+                return True
+            # Token-based title matching (partial match, e.g., artist name)
+            title_tokens = [w for w in re.findall(r"\w+", (title or "").lower()) if len(w) >= 3]
+            for tok in title_tokens:
+                if tok and tok in t:
+                    return True
+            for tag in (hot_tags or []):
+                if str(tag).lower() in t:
+                    return True
+            for th in (themes or []):
+                if str(th).lower() in t:
+                    return True
+            # allow if contains a short specific phrase like a number or named entity
+            if re.search(r"\b\d{2,}\b", t):
+                return True
+            return False
+
+        title = (seg.get("title") or "").strip()
+        hot_tags = seg.get("hot_tags") or mem.get("recent_riff_tags", []) or []
+        themes = mem.get("themes", [])[-6:]
+
+        # If host_intro is generic or unanchored, attempt a repair pass
+        if _is_generic(host_intro) or not _anchors_present(host_intro, title, hot_tags, themes):
+            try:
+                repair_sys = "You are an editor. Rewrite the host_intro to be specific and anchored to the TITLE, a tag, or a concrete detail from the material. Do NOT use vague platitudes or clichés. Return STRICT JSON with keys host_intro and host_takeaway."
+                repair_user = (
+                    f"Existing intro: {host_intro}\nTitle: {title}\nTags: {','.join(hot_tags)}\nThemes: {','.join(themes)}\n\n"
+                    "Rewrite a concise, anchored intro (1-2 short sentences) and a single-sentence takeaway. Return STRICT JSON only."
+                )
+                raw2 = llm_generate(
+                    repair_user,
+                    repair_sys,
+                    model=CFG.get("models", {}).get("host"),
+                    num_predict=140,
+                    temperature=0.6,
+                    timeout=12,
+                    force_json=True,
+                )
+                rep = parse_json_lenient(raw2) if raw2 else {}
+                if isinstance(rep, dict):
+                    host_intro = clean(str(rep.get("host_intro") or host_intro))[:700]
+                    takeaway = clean(str(rep.get("host_takeaway") or takeaway))[:500]
+            except Exception:
+                pass
+
+        if not host_intro or _is_generic(host_intro) or not _anchors_present(host_intro, title, hot_tags, themes):
+            # Give up if still generic
             return None
 
         return {
@@ -5350,6 +5536,7 @@ def pick_diverse_candidates(
     need: int,
     per_source_cap: int = 4,
     max_prompt: int = 36,
+    mem: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     # filter seen + require stable id
     filt: List[Dict[str, Any]] = []
@@ -5364,13 +5551,38 @@ def pick_diverse_candidates(
     if not filt:
         return []
 
-    # sort by heur desc, then recency
-    def score(c: Dict[str, Any]):
-        h = float(c.get("heur", 50.0) or 50.0)
-        ts = int(c.get("ts", 0) or 0)
-        return (h, ts)
+    now = now_ts()
+    tag_last = (mem or {}).get("tag_last_spoken", {}) if isinstance((mem or {}).get("tag_last_spoken", {}), dict) else {}
+    recent_cooldown = int(cfg_get("producer.recent_cooldown_sec", 1800))
+    max_penalty = float(cfg_get("producer.recent_deprioritize_penalty", 20.0))
 
-    filt.sort(key=score, reverse=True)
+    # compute a score that reduces weight for recently-spoken tags/key_points
+    def score_val(c: Dict[str, Any]) -> float:
+        try:
+            h = float(c.get("heur", 50.0) or 50.0)
+        except Exception:
+            h = 50.0
+        try:
+            ts = int(c.get("ts", 0) or 0)
+        except Exception:
+            ts = 0
+
+        penalty = 0.0
+        for t in (c.get("tags") or []) + (c.get("key_points") or []):
+            tt = str(t).strip().lower()
+            if not tt:
+                continue
+            last = int(tag_last.get(tt, 0) or 0)
+            if last and recent_cooldown > 0 and (now - last) < recent_cooldown:
+                frac = 1.0 - float(now - last) / float(recent_cooldown)
+                penalty += max_penalty * max(0.0, frac)
+
+        # small recency boost
+        recency_boost = min(10.0, max(0.0, (now - ts) / 3600.0)) if ts else 0.0
+
+        return h - penalty + recency_boost
+
+    filt.sort(key=score_val, reverse=True)
 
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     for c in filt:
@@ -6034,7 +6246,7 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                                             bridge_txt = clean(llm_generate(
                                                 "Write a very short (1 sentence) radio bridge throwing back to the music. Energy: high. Context: talk break ending.",
                                                 "You are a radio host. Return ONE sentence only.",
-                                                model=CFG["models"]["host"],
+                                                model=CFG.get("models", {}).get("host"),
                                                 num_predict=80,
                                                 temperature=0.8,
                                                 timeout=20
@@ -6186,7 +6398,8 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                 budgeted_universe, seen,
                 need=need,
                 per_source_cap=per_src_cap,
-                max_prompt=prompt_max_candidates
+                max_prompt=prompt_max_candidates,
+                mem=mem
             )
 
             if not prompt_cands:
@@ -6665,24 +6878,88 @@ def _normalize_packet(pkt: Dict[str, Any], allowed: List[str]) -> Dict[str, Any]
     seen = set()
     panel_out: List[Dict[str, str]] = []
 
+    # Prepare a tolerant voice matching map so LLM voice labels like
+    # "Hype Analyst", "hype_analyst", or "hype-analyst" still match our
+    # configured character keys (which may contain spaces).
+    allowed_norm_map = {}
+    allowed_compact_map = {}
+    for a in (allowed or []):
+        an = re.sub(r"[^a-z0-9]+", " ", (a or "").lower()).strip()
+        ac = re.sub(r"[^a-z0-9]", "", (a or "").lower())
+        allowed_norm_map[an] = a
+        allowed_compact_map[ac] = a
+
     for p in panel_in:
         if not isinstance(p, dict):
             continue
 
-        v = (p.get("voice") or "").strip().lower()
+        v_raw = (p.get("voice") or "").strip()
         line = clean(str(p.get("line", "")))[:320]
 
-        if not v or not line:
-            continue
-        if v not in allowed:
-            continue
-        if v in seen:
+        if not v_raw or not line:
             continue
 
-        seen.add(v)
-        panel_out.append({"voice": v, "line": line})
+        v = v_raw.lower()
+        v_norm = re.sub(r"[^a-z0-9]+", " ", v).strip()
+        v_compact = re.sub(r"[^a-z0-9]", "", v)
 
-    # clamp only (do not fill)
+        match = None
+        # exact normalized match
+        if v_norm in allowed_norm_map:
+            match = allowed_norm_map[v_norm]
+        elif v_compact in allowed_compact_map:
+            match = allowed_compact_map[v_compact]
+        else:
+            # substring heuristic (be conservative)
+            for an, can in allowed_norm_map.items():
+                if an and (an in v_norm or v_norm in an):
+                    match = can
+                    break
+
+        if not match:
+            # Unknown voice label from LLM — skip but log for debugging
+            # (do not spam logs in production; log_every could be used)
+            # print(f"[PROMPT DEBUG] Unknown panel voice label: {v_raw}")
+            continue
+
+        if match in seen:
+            continue
+
+        seen.add(match)
+        panel_out.append({"voice": match, "line": line})
+
+    # Ensure we meet minimum panel count, falling back to extractive short lines
+    # (use only existing packet fields; do not invent facts).
+    try:
+        min_n = max(2, _panel_min_count())  # Force minimum of 2 panel members
+        if min_n > 0 and len(panel_out) < min_n:
+            # pick candidates from allowed in order
+            to_add = min_n - len(panel_out)
+            for a in (allowed or []):
+                if to_add <= 0:
+                    break
+                if a in seen:
+                    continue
+                # Build a safe extractive line from summary/host_intro
+                src_text = summary or host_intro or ""
+                # Try to extract a meaningful phrase, not just the first sentence
+                sentences = [s.strip() for s in src_text.split(".") if s.strip()]
+                if len(sentences) > 1:
+                    # Use a different sentence for variety
+                    line_text = sentences[min(len(panel_out), len(sentences)-1)][:160].strip()
+                else:
+                    line_text = (src_text.split(".")[0] or src_text)[:160].strip()
+                if not line_text:
+                    line_text = (host_intro or summary or "")[:120]
+                if not line_text:
+                    continue
+                panel_out.append({"voice": a, "line": line_text})
+                seen.add(a)
+                to_add -= 1
+    except Exception:
+        pass
+
+    # clamp only (do not fill beyond max)
     mx = max(0, _panel_max_count())
     if mx > 0:
         panel_out = panel_out[:mx]
@@ -6715,6 +6992,16 @@ def _host_packet_system_manifest(mem: Dict[str, Any], allowed: List[str]) -> str
             parts.append("traits=" + ", ".join([str(x) for x in traits]))
         if focus:
             parts.append("focus=" + ", ".join([str(x) for x in focus]))
+
+        # Include a short persona excerpt to help the model match voice and style.
+        try:
+            compiled = compile_character_prompt(cfg) if callable(globals().get('compile_character_prompt')) else ''
+            excerpt = compiled.splitlines()[0].strip()[:140] if compiled else ''
+            if excerpt:
+                parts.append("voice_example: " + excerpt)
+        except Exception:
+            pass
+
         if parts:
             roster_lines.append(f"- {v}: " + " | ".join(parts))
 
@@ -6770,11 +7057,8 @@ def _panel_repair(pkt: Dict[str, Any], seg: Dict[str, Any], mem: Dict[str, Any],
     raw = llm_generate(
         prompt=prm,
         system=sys,
-        model=CFG["models"]["host"],
-        num_predict=int(cfg_get("host.max_tokens", 180)),
-        temperature=float(cfg_get("host.temperature", 0.6)),
-        timeout=35,
-        force_json=True,
+            model=CFG.get("models", {}).get("host"),
+            num_predict=host_max_tokens,
     )
 
     repaired = parse_json_lenient(raw)
@@ -6844,42 +7128,22 @@ def character_manager_lookup(seg: Dict[str, Any], panel_voices: List[str], mem: 
             f"- {char_name}: {engine_type} engine | Focus: {', '.join(focus)} | {engine_desc}"
         )
     
-    manager_prompt = f"""You are the Character Manager for a radio station.
+    sys = get_prompt(mem, "character_manager_system").strip()
 
-AVAILABLE CHARACTERS WITH CONTEXT ENGINES:
-{chr(10).join(char_summaries)}
-
-CURRENT SEGMENT:
-Title: {seg.get('title', '')}
-Angle: {seg.get('angle', '')}
-Why: {seg.get('why', '')}
-Key Points: {', '.join(seg.get('key_points', []))}
-Content: {(seg.get('body', '') or '')[:400]}
-
-Your job: Decide if any characters need context data for this segment.
-
-For each character that needs data:
-1. Determine what query to make
-2. Extract query parameters from the segment
-
-Output JSON array (empty if no context needed):
-[
-  {{
-    "character": "character_name",
-    "query_params": {{"param1": "value1", "param2": "value2"}},
-    "reason": "why this character needs this data"
-  }}
-]
-
-Examples:
-- stats_guru discussing game scores → query team names and date
-- music_expert mentioning streaming numbers → query artist and song name
-- Empty array [] if segment doesn't need specialized data"""
+    prm = get_prompt(
+        mem, "character_manager_user",
+        char_summaries="\n".join(char_summaries),
+        title=seg.get('title', ''),
+        angle=seg.get('angle', ''),
+        why=seg.get('why', ''),
+        key_points=', '.join(seg.get('key_points', [])),
+        content=(seg.get('body', '') or '')[:400]
+    ).strip()
 
     try:
         raw = llm_generate(
-            prompt=manager_prompt,
-            system="You are a context router. Output valid JSON only.",
+            prompt=prm,
+            system=sys,
             model=manager_model,
             num_predict=200,
             temperature=0.3,
@@ -6958,6 +7222,9 @@ def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[D
         key_points=seg.get("key_points", []),
         material=(seg.get("body","") or "")[:900]
     ).strip()
+
+    # Prefer concise output: cap tokens for host generation to avoid verbosity
+    host_max_tokens = min(int(cfg_get("host.max_tokens", 300)), 220)
     
     # Inject context data if available
     if context_data:
@@ -6968,7 +7235,7 @@ def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[D
             prompt=prm,
             system=sys,
             model=CFG["models"]["host"],
-            num_predict=int(cfg_get("host.max_tokens", 180)),
+            num_predict=host_max_tokens,
             temperature=float(cfg_get("host.temperature", 0.6)),
             timeout=35,
             force_json=True,
@@ -6982,6 +7249,192 @@ def generate_host_packet(seg: Dict[str, Any], mem: Dict[str, Any]) -> Optional[D
 
     # If panel missing/short, do ONE repair call
     pkt = _panel_repair(pkt, seg, mem, panel_allowed)
+
+    # Lightweight guard: avoid verbatim title reads and avoid internal repetition
+    try:
+        host_intro = (pkt.get("host_intro") or "").strip()
+        summary = (pkt.get("summary") or "").strip()
+        host_takeaway = (pkt.get("host_takeaway") or "").strip()
+        title = str(seg.get("title") or "").strip()
+
+        def _is_verbatim(a: str, b: str) -> bool:
+            if not a or not b:
+                return False
+            la = a.lower().strip()
+            lb = b.lower().strip()
+            if la == lb:
+                return True
+            # short-string containment likely indicates a headline read
+            if len(la.split()) <= 8 or len(lb.split()) <= 8:
+                if la in lb or lb in la:
+                    return True
+            return False
+
+        def _jaccard_sim(a: str, b: str) -> float:
+            # simple overlap metric on normalized word sets
+            wa = set(re.findall(r"\w+", (a or "").lower()))
+            wb = set(re.findall(r"\w+", (b or "").lower()))
+            if not wa or not wb:
+                return 0.0
+            return float(len(wa & wb)) / float(len(wa | wb))
+
+        # Check for verbatim title duplication first
+        if _is_verbatim(host_intro, title):
+            try:
+                sys_prompt = _host_packet_system_manifest(mem, panel_allowed)
+                repair_user = (
+                    "Rewrite the \"host_intro\" to avoid repeating the TITLE verbatim. "
+                    "Make it a single short, spoken-suitable sentence that hooks and explains why the story matters. "
+                    "Return STRICT JSON object with optional \"host_intro\" and \"host_takeaway\" keys only."
+                )
+                raw_repair = llm_generate(
+                    repair_user,
+                    sys_prompt,
+                    model=CFG.get("models", {}).get("host"),
+                    num_predict=120,
+                    temperature=0.6,
+                    timeout=12,
+                    force_json=True,
+                )
+                repair_j = parse_json_lenient(raw_repair) if raw_repair else {}
+                if isinstance(repair_j, dict):
+                    new_intro = clean(str(repair_j.get("host_intro") or "").strip())
+                    new_takeaway = clean(str(repair_j.get("host_takeaway") or "").strip())
+                    if new_intro:
+                        pkt["host_intro"] = new_intro
+                    if new_takeaway:
+                        pkt["host_takeaway"] = new_takeaway
+            except Exception as e:
+                log("tts", f"host packet repair failed: {e}")
+
+        # Now check for internal repetition across intro/summary/takeaway/panel
+        try:
+            # compute similarity matrix
+            # lower the similarity threshold to be stricter about diversity
+            sim_threshold = float(cfg_get("host.panel_similarity_threshold", 0.35))
+            issues = []
+
+            if pkt.get("host_intro") and pkt.get("summary"):
+                s = _jaccard_sim(pkt.get("host_intro"), pkt.get("summary"))
+                if s >= sim_threshold:
+                    issues.append(("intro_summary", s))
+
+            if pkt.get("host_intro") and pkt.get("host_takeaway"):
+                s = _jaccard_sim(pkt.get("host_intro"), pkt.get("host_takeaway"))
+                if s >= sim_threshold:
+                    issues.append(("intro_takeaway", s))
+
+            # check panel uniqueness
+            panel = pkt.get("panel") or []
+            panel_texts = [p.get("line", "") for p in panel if isinstance(p, dict)]
+            for i, t1 in enumerate(panel_texts):
+                for j, t2 in enumerate(panel_texts):
+                    if j <= i:
+                        continue
+                    s = _jaccard_sim(t1, t2)
+                    if s >= sim_threshold:
+                        issues.append((f"panel_dup_{i}_{j}", s))
+
+            # check panel vs intro/summary
+            for i, t in enumerate(panel_texts):
+                for ref_name, ref_text in (("host_intro", pkt.get("host_intro")), ("summary", pkt.get("summary"))):
+                    if not ref_text:
+                        continue
+                    s = _jaccard_sim(t, ref_text)
+                    if s >= sim_threshold:
+                        issues.append((f"panel_{i}_vs_{ref_name}", s))
+
+            if issues:
+                # single repair pass to enforce novelty across fields
+                try:
+                    sys_prompt = _host_packet_system_manifest(mem, panel_allowed)
+                    repair_user = (
+                        "The current packet repeats the same language across fields. "
+                        "Rewrite the packet so that: 1) host_intro is a concise hook (prefer 1 short witty sentence, max ~22 words) not restating the title or summary; "
+                        "2) summary provides a distinct short summary (not word-for-word); "
+                        "3) host_takeaway is a single distinct sentence; "
+                        "4) panel lines are distinct persona-driven angles that do not duplicate host_intro or summary. "
+                        "Return the full packet JSON with keys: host_intro, summary, panel, host_takeaway."
+                    )
+                    # Provide the current packet and title to the repair call
+                    repair_context = {
+                        "existing_packet": pkt,
+                        "title": title,
+                    }
+                    raw_repair = llm_generate(
+                        json.dumps(repair_context, ensure_ascii=False),
+                        sys_prompt,
+                        model=CFG.get("models", {}).get("host"),
+                        num_predict=min(240, int(cfg_get("host.max_tokens", 300))),
+                        temperature=0.7,
+                        timeout=18,
+                        force_json=True,
+                    )
+                    repair_j = parse_json_lenient(raw_repair) if raw_repair else {}
+                    if isinstance(repair_j, dict):
+                        # replace fields conservatively
+                        for fkey in ("host_intro", "summary", "host_takeaway"):
+                            v = clean(str(repair_j.get(fkey) or "").strip())
+                            # enforce brevity on host_intro
+                            if fkey == "host_intro" and v:
+                                # if still verbose, truncate and mark for later brevity pass
+                                v = " ".join(v.split())
+                                if len(v.split()) > 28:
+                                    v = " ".join(v.split()[:28]) + "..."
+                            if v:
+                                pkt[fkey] = v
+                        # replace panel if provided, and normalize
+                        if isinstance(repair_j.get("panel"), list) and repair_j.get("panel"):
+                            pkt["panel"] = repair_j.get("panel")
+                except Exception as e:
+                    log("tts", f"host packet uniqueness repair failed: {e}")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Final brevity pass: prefer a single snappy sentence for host_intro if verbose
+    try:
+        hi = (pkt.get("host_intro") or "").strip()
+        def _is_verbose_text(s: str) -> bool:
+            if not s:
+                return False
+            if len(s.split()) > 28:
+                return True
+            verbose_phrases = ["in order to", "what this means", "it appears that", "it seems that", "the reason is", "in a way"]
+            ls = s.lower()
+            for p in verbose_phrases:
+                if p in ls:
+                    return True
+            # more than 2 sentences
+            if len(re.split(r"[\.\?!]\\s+", s.strip())) > 2:
+                return True
+            return False
+
+        if _is_verbose_text(hi):
+            try:
+                sys_prompt = _host_packet_system_manifest(mem, panel_allowed)
+                repair_user = (
+                    "Shorten the following host intro to ONE quick, witty sentence (<=22 words). "
+                    "Keep the original meaning and urgency, but remove explanatory clauses. Return JSON: {\"host_intro\": \"...\"}."
+                    f"\nExisting: {hi}"
+                )
+                raw_brief = llm_generate(
+                    repair_user,
+                    sys_prompt,
+                    model=CFG.get("models", {}).get("host"),
+                    num_predict=120,
+                    temperature=0.65,
+                    timeout=10,
+                    force_json=True,
+                )
+                brief_j = parse_json_lenient(raw_brief) if raw_brief else {}
+                if isinstance(brief_j, dict) and brief_j.get("host_intro"):
+                    pkt["host_intro"] = clean(str(brief_j.get("host_intro") or "").strip())
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Fail only if we truly got nothing useful
     if not pkt.get("host_intro") and not pkt.get("summary"):
@@ -7005,6 +7458,10 @@ def select_voice_intents(seg: Dict[str, Any], mem: Dict[str, Any]) -> List[Tuple
         return []
 
     scored = []
+    
+    # Get character weights from memory (set by character_mix sliders)
+    weights = mem.get("character_mix_weights", {})
+    
     for name, cfg in chars.items():
         if name == "host":
             continue
@@ -7020,7 +7477,11 @@ def select_voice_intents(seg: Dict[str, Any], mem: Dict[str, Any]) -> List[Tuple
             if any(tok == s for tok in text.split()):
                 score += 1
 
-        scored.append((name, score, cfg))
+        # Apply character weight from slider (default 1.0 if not set)
+        weight = weights.get(name, 1.0)
+        weighted_score = score * weight
+        
+        scored.append((name, weighted_score, cfg))
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -7471,7 +7932,14 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                     # Optional: 1-line pre-tease (before the song)
                     pre = _narrative_line_for_music(mem, "pre")
                     if pre:
-                        play_audio_bundle([("host", pre)])
+                        try:
+                            mem["_tts_active"] = True
+                            play_audio_bundle([("host", pre)])
+                        finally:
+                            try:
+                                mem.pop("_tts_active", None)
+                            except Exception:
+                                pass
                         time.sleep(0.15)
 
                     # Block until track ends (only if music is actually playing)
@@ -7483,7 +7951,14 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                     # Optional: 1-line post-bridge (after the song)
                     post = _narrative_line_for_music(mem, "post")
                     if post:
-                        play_audio_bundle([("host", post)])
+                        try:
+                            mem["_tts_active"] = True
+                            play_audio_bundle([("host", post)])
+                        finally:
+                            try:
+                                mem.pop("_tts_active", None)
+                            except Exception:
+                                pass
                         time.sleep(0.15)
 
                     # NOW PLAYING OFF
@@ -7511,8 +7986,15 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                         ok = duck_external_audio(app_hint, max(level, x * 1.0), log_fn=log) or ok
                         time.sleep(0.03)
 
-                    # Speak bundle normally
-                    play_audio_bundle(bundle)
+                    # Speak bundle normally (mark TTS active to prevent mid-sentence resumes)
+                    try:
+                        mem["_tts_active"] = True
+                        play_audio_bundle(bundle)
+                    finally:
+                        try:
+                            mem.pop("_tts_active", None)
+                        except Exception:
+                            pass
 
                     # restore to full after
                     for i in range(steps):
@@ -7533,7 +8015,14 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
             # Normal segment playback
             # ====================================================
 
-            play_audio_bundle(bundle)
+            try:
+                mem["_tts_active"] = True
+                play_audio_bundle(bundle)
+            finally:
+                try:
+                    mem.pop("_tts_active", None)
+                except Exception:
+                    pass
 
             # NOW PLAYING OFF
             try:
@@ -8698,6 +9187,8 @@ def main():
             "now_ts": now_ts,
             "sha1": sha1,
             "producer_kick": producer_kick,
+            "db_connect": db_connect,
+            "DB_PATH": DB_PATH,
 
             # helper: emit StationEvent safely (normalize source for scheduler cohesion)
             "emit_event": lambda evt: event_q.put(

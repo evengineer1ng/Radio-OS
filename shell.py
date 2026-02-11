@@ -4784,196 +4784,59 @@ class StationWizard:
         self._result = None
         self.win.destroy()
 
-def _validate_step(self, idx: int) -> bool:
-    # 0 basics
-    if idx == 0:
-        sid = (self.var_station_id.get() or "").strip()
-        if not sid:
-            messagebox.showerror("Station", "Station ID is required.")
-            return False
-        # folder safe-ish
-        bad = any(c in sid for c in r'\/:*?"<>|')
-        if bad:
-            messagebox.showerror("Station", "Station ID contains invalid filename characters.")
-            return False
+    def _validate_step(self, idx: int) -> bool:
+        # 0 basics
+        if idx == 0:
+            sid = (self.var_station_id.get() or "").strip()
+            if not sid:
+                messagebox.showerror("Station", "Station ID is required.")
+                return False
+            # folder safe-ish
+            bad = any(c in sid for c in r'\/:*?"<>|')
+            if bad:
+                messagebox.showerror("Station", "Station ID contains invalid filename characters.")
+                return False
 
-        self.station_id = sid
-        self.station_name = (self.var_station_name.get() or sid).strip()
-        self.station_host = (self.var_station_host.get() or "Kai").strip()
-        self.station_category = (self.var_station_cat.get() or "Custom").strip()
-        self.station_logo = (self.var_station_logo.get() or "").strip()
+            self.station_id = sid
+            self.station_name = (self.var_station_name.get() or sid).strip()
+            self.station_host = (self.var_station_host.get() or "Kai").strip()
+            self.station_category = (self.var_station_cat.get() or "Custom").strip()
+            self.station_logo = (self.var_station_logo.get() or "").strip()
 
-        self.llm_endpoint = (self.var_llm_endpoint.get() or "").strip()
-        self.model_producer = (self.var_model_producer.get() or "").strip()
-        self.model_host = (self.var_model_host.get() or "").strip()
+            self.llm_endpoint = (self.var_llm_endpoint.get() or "").strip()
+            self.model_producer = (self.var_model_producer.get() or "").strip()
+            self.model_host = (self.var_model_host.get() or "").strip()
+            return True
+
+        # Characters step: ensure host exists (no hard max)
+        if idx == 2:
+            if "host" not in self.characters:
+                messagebox.showerror("Characters", "Host character is required.")
+                return False
+            return True
+
+        # 3 voices: store piper + voices
+        if idx == 3:
+            # capture piper bin
+            self.piper_bin = (self.var_piper_bin.get() or "").strip()
+
+            # capture per-character voices (ALL of them)
+            if hasattr(self, "voice_vars") and isinstance(self.voice_vars, dict):
+                for k, var in self.voice_vars.items():
+                    try:
+                        self.voices[k] = (var.get() or "").strip()
+                    except Exception:
+                        self.voices[k] = ""
+
+            # optional: if characters changed since voices tab was built, keep map stable
+            # remove stale keys (characters removed)
+            for k in list(self.voices.keys()):
+                if k not in self.characters:
+                    self.voices.pop(k, None)
+
+            return True
+
         return True
-
-    # Characters step: ensure host exists (no hard max)
-    if idx == 2:
-        if "host" not in self.characters:
-            messagebox.showerror("Characters", "Host character is required.")
-            return False
-        return True
-
-    # 3 voices: store piper + voices
-    if idx == 3:
-        # capture piper bin
-        self.piper_bin = (self.var_piper_bin.get() or "").strip()
-
-        # capture per-character voices (ALL of them)
-        if hasattr(self, "voice_vars") and isinstance(self.voice_vars, dict):
-            for k, var in self.voice_vars.items():
-                try:
-                    self.voices[k] = (var.get() or "").strip()
-                except Exception:
-                    self.voices[k] = ""
-
-        # optional: if characters changed since voices tab was built, keep map stable
-        # remove stale keys (characters removed)
-        for k in list(self.voices.keys()):
-            if k not in self.characters:
-                self.voices.pop(k, None)
-
-        return True
-
-    return True
-
-    # -------------
-    # Manifest builder (Gold Standard)
-    # -------------
-    def _build_manifest(self) -> Dict[str, Any]:
-        # Determine enabled feeds; if user never touched feeds, default to your gold set
-        if not self.feed_cfg:
-            self.feed_cfg = {k: _deepcopy_jsonable(v) for k, v in FEED_TEMPLATES.items() if k in DEFAULT_SCHED_QUOTAS}
-
-        # Ensure every feed has enabled boolean
-        for k, v in list(self.feed_cfg.items()):
-            if not isinstance(v, dict):
-                self.feed_cfg[k] = {"enabled": True}
-            self.feed_cfg[k].setdefault("enabled", True)
-
-        enabled_feeds = [k for k, v in self.feed_cfg.items() if isinstance(v, dict) and v.get("enabled", False)]
-        if not enabled_feeds:
-            # require at least one feed (fallback to reddit)
-            self.feed_cfg["reddit"] = _deepcopy_jsonable(FEED_TEMPLATES["reddit"])
-            enabled_feeds = ["reddit"]
-
-        # Scheduler quotas: include enabled feeds only, with default values if missing
-        quotas = {}
-        for k in enabled_feeds:
-            quotas[k] = int(self.scheduler_quotas.get(k, DEFAULT_SCHED_QUOTAS.get(k, 1)))
-
-        # Mix weights: include enabled feeds only (normalize)
-        mw = {k: float(self.mix_weights.get(k, DEFAULT_MIX_WEIGHTS.get(k, 0.0))) for k in enabled_feeds}
-        mw = _normalize_weights(mw)
-
-        # Voices: keep the keys your runtime expects; keep as-is even if empty
-        voices = dict(self.voices)
-
-        # Build gold-standard manifest structure
-        station_block: Dict[str, Any] = {
-            "name": self.station_name,
-            "host": self.station_host,
-            "category": self.station_category,
-        }
-        
-        # Add logo if set
-        if self.station_logo and self.station_logo.strip():
-            station_block["logo"] = self.station_logo
-        
-        manifest: Dict[str, Any] = {
-            "station": station_block,
-            "llm": {
-                "endpoint": self.llm_endpoint,
-            },
-            "models": {
-                "producer": self.model_producer,
-                "host": self.model_host,
-            },
-            "scheduler": {
-                "source_quotas": quotas,
-                "reclaim_every_sec": 10,
-                "reaper_every_sec": 3,
-                "claim_timeout_sec": 45,
-            },
-            "riff": {
-                "tag_catalog": [
-                    "execution",
-                    "risk",
-                    "performance",
-                    "psychology",
-                    "trends",
-                    "strategy",
-                    "news",
-                ],
-                "shapes": [
-                    "connect_two",
-                    "myth_bust",
-                    "failure_mode",
-                    "tradeoff",
-                    "tease_next",
-                ],
-            },
-            "pacing": {
-                "idle_riff_sec": 20,
-                "between_segments_sec": 2,
-                "queue_target_depth": 16,
-                "queue_max_depth": 40,
-                "producer_tick_sec": 30,
-                "audio_target_depth": 8,
-                "audio_max_depth": 10,
-                "audio_tick_sleep": 0.05,
-            },
-            "producer": {
-                "target_depth": 8,
-                "max_depth": 20,
-                "tick_sec": 12,
-                "max_tokens": 320,
-                "temperature": 0.35,
-                "per_source_cap": 2,
-                "source_limits": {
-                    "rss": {"max_share": 0.20, "max_abs": 4},
-                    "reddit": {"max_share": 0.45, "max_abs": 10},
-                    "markets": {"max_share": 0.40, "max_abs": 8},
-                    "portfolio_event": {"max_share": 0.35, "max_abs": 6},
-                    "bluesky": {"max_share": 0.30, "max_abs": 6},
-                    "document": {"max_share": 0.25, "max_abs": 4},
-                },
-            },
-            "host": {
-                "max_comments": 4,
-                "between_segments_sec": 2,
-                "idle_riff_sec": 23,
-                "station_id_sec": 240,
-                "max_tokens": 420,
-                "temperature": 0.6,
-            },
-            "tts": {
-                "spam_break_priority": 96,
-                "min_gap_sec": 6,
-                "deprioritize_penalty": 15,
-            },
-            "audio": {
-                "piper_bin": self.piper_bin,
-            },
-            "voices": voices,
-            "feeds": _deepcopy_jsonable(self.feed_cfg),
-            "characters": _deepcopy_jsonable(self.characters),
-            "mix": {
-                "weights": mw
-            },
-        }
-
-        # A couple of gold-standard cleanup rules:
-        # - Ensure portfolio_event user_address is quoted-like string (yaml handles it)
-        # - Ensure document.files is list of dicts
-        if "document" in manifest["feeds"]:
-            d = manifest["feeds"]["document"]
-            if isinstance(d, dict) and "files" in d and not isinstance(d["files"], list):
-                d["files"] = []
-
-        return manifest
-
 
     # -------------
     # Utility

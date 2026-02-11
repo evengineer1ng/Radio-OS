@@ -560,7 +560,7 @@ def feed_worker(*args, **kwargs) -> None:
         except Exception:
             pass
     # Log config dict id for debugging live reload
-    rt.log("visual", f"[DEBUG] visual_reader config dict id: {id(config)}")
+    # rt.log("visual", f"[DEBUG] visual_reader config dict id: {id(config)}")
     _state.source_type = config.get("source_type", "screen")
     _state.source_path = config.get("source_path", "")
     _state.source_window = config.get("source_window", "")
@@ -587,18 +587,18 @@ def feed_worker(*args, **kwargs) -> None:
     last_active = _state.active
     while not _state.stop_requested and (stop_event is None or not stop_event.is_set()):
         # Debug: print config dict id and enabled/active value every loop
-        try:
-            import your_runtime as rt
-            rt.log("visual", f"[DEBUG] visual_reader loop config id: {id(config)} enabled={config.get('enabled')} active={_state.active} contents={config}")
-        except Exception:
-            pass
+        # try:
+        #     import your_runtime as rt
+        #     rt.log("visual", f"[DEBUG] visual_reader loop config id: {id(config)} enabled={config.get('enabled')} active={_state.active} contents={config}")
+        # except Exception:
+        #     pass
         try:
             # Always read enabled live from config dict (for live reload)
             if hasattr(config, 'get'):
                 if 'enabled' in config:
                     new_enabled = bool(config.get('enabled', _state.enabled))
                     if new_enabled != _state.enabled:
-                        rt.log("visual", f"[DEBUG] visual_reader enabled changed via config: {_state.enabled} -> {new_enabled}")
+                        rt.log("visual", f"visual_reader enabled changed: {_state.enabled} -> {new_enabled}")
                     _state.enabled = new_enabled
                 if 'active' in config:
                     _state.active = bool(config.get('active', _state.active))

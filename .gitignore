@@ -15,10 +15,13 @@ venv/
 env/
 ENV/
 
-# Stations (Ignore all user stations)
-stations/*
-!stations/.gitkeep
+# Stations - Ship most stations, exclude algotradingfm and runtime logs
+stations/algotradingfm/
 stations - Copy/
+stations/**/runtime.log
+
+# First-run setup marker (user-specific)
+.radio_os_setup_complete
 
 # Temporary files
 *.tmp

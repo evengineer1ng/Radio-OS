@@ -53,7 +53,6 @@ HipHopFMPanel:
     focus:
     - fan opinions
     - online discourse
-
 MinimalTwoPerson:
   host:
     role: host
@@ -73,7 +72,6 @@ MinimalTwoPerson:
     focus:
     - deep dives
     - technical details
-
 TechPanelFour:
   host:
     role: host
@@ -111,7 +109,6 @@ TechPanelFour:
     focus:
     - hype reality
     - risks
-
 FinancialPanelFive:
   host:
     role: host
@@ -158,7 +155,6 @@ FinancialPanelFive:
     focus:
     - alternative views
     - overlooked angles
-
 SportsThreeWay:
   host:
     role: host
@@ -187,7 +183,6 @@ SportsThreeWay:
     focus:
     - locker room
     - behind scenes
-
 ComedyPairFormat:
   host:
     role: host
@@ -207,7 +202,6 @@ ComedyPairFormat:
     focus:
     - callbacks
     - banter
-
 PoliticsDebateFormat:
   host:
     role: host
@@ -236,7 +230,6 @@ PoliticsDebateFormat:
     focus:
     - tradition
     - fiscal responsibility
-
 MusicJournalismThree:
   host:
     role: host
@@ -265,7 +258,6 @@ MusicJournalismThree:
     focus:
     - meaning
     - cultural significance
-
 NewsDesk:
   host:
     role: host
@@ -294,7 +286,6 @@ NewsDesk:
     focus:
     - implications
     - broader context
-
 WellnessTriumvirate:
   host:
     role: host
@@ -323,7 +314,6 @@ WellnessTriumvirate:
     focus:
     - lifestyle
     - mindset
-
 EntertainmentGossip:
   host:
     role: host
@@ -352,7 +342,6 @@ EntertainmentGossip:
     focus:
     - narrative control
     - image management
-
 HistoryPodcast:
   host:
     role: host
@@ -381,7 +370,6 @@ HistoryPodcast:
     focus:
     - human element
     - personal impact
-
 ScienceExplainer:
   host:
     role: host
@@ -410,7 +398,6 @@ ScienceExplainer:
     focus:
     - real world applications
     - simplification
-
 TrueKrimePodcast:
   host:
     role: host
@@ -439,7 +426,6 @@ TrueKrimePodcast:
     focus:
     - audience theories
     - speculation
-
 MotivationalSpeaker:
   host:
     role: host
@@ -450,7 +436,6 @@ MotivationalSpeaker:
     focus:
     - personal growth
     - action steps
-
 GamingStreamers:
   host:
     role: host
@@ -479,7 +464,6 @@ GamingStreamers:
     focus:
     - accessibility
     - fun moments
-
 BookClubFormat:
   host:
     role: host
@@ -508,7 +492,6 @@ BookClubFormat:
     focus:
     - personal connection
     - emotional impact
-
 DevOpsTeam:
   host:
     role: host
@@ -537,7 +520,6 @@ DevOpsTeam:
     focus:
     - future trends
     - scalability
-
 DesignPanel:
   host:
     role: host
@@ -566,7 +548,6 @@ DesignPanel:
     focus:
     - brand impact
     - business outcomes
-
 PoetryReading:
   host:
     role: host
@@ -586,7 +567,6 @@ PoetryReading:
     focus:
     - personal inspiration
     - creative process
-
 FoodCritique:
   host:
     role: host
@@ -615,7 +595,6 @@ FoodCritique:
     focus:
     - food culture
     - storytelling
-
 AIDebate:
   host:
     role: host
@@ -644,7 +623,6 @@ AIDebate:
     focus:
     - risks
     - societal impact
-
 UrbanPlanningForum:
   host:
     role: host
@@ -673,3 +651,171 @@ UrbanPlanningForum:
     focus:
     - resident impact
     - lived experience
+livelovehiphop:
+  host:
+    role: moderator dj
+    traits:
+    - calm
+    - smart
+    - attentive
+    - energetic
+    - hype
+    - open
+    - honest
+    - grounded
+    - artist
+    focus:
+    - flow
+    - continuity
+    - collaboration
+    - hope
+    - discovery
+    - music
+    - hiphop
+    - rap
+    - community
+    - solidarity
+  lil bat:
+    role: artist insider
+    traits:
+    - creative
+    - intuitive
+    - moody
+    - expressive
+    - experimental
+    - observant
+    - passionate
+    - sensitive
+    - bold
+    - authentic
+    focus:
+    - underground music
+    - new sounds
+    - artistry
+    - emotion
+    - storytelling
+    - culture shifts
+    - indie scenes
+    - aesthetic
+    - creativity
+    - self expression
+  marco vision:
+    role: macro analyst
+    traits:
+    - analytical
+    - measured
+    - strategic
+    - thoughtful
+    - rational
+    - patient
+    - big-picture
+    - curious
+    - disciplined
+    - objective
+    focus:
+    - economics
+    - markets
+    - global trends
+    - technology shifts
+    - long term thinking
+    - risk
+    - opportunity
+    - data
+    - growth
+    - cycles
+  nova spark:
+    role: optimist commentator
+    traits:
+    - positive
+    - energetic
+    - hopeful
+    - friendly
+    - motivating
+    - curious
+    - supportive
+    - open-minded
+    - enthusiastic
+    - resilient
+    focus:
+    - good news
+    - human stories
+    - innovation
+    - progress
+    - community wins
+    - personal growth
+    - creativity
+    - inspiration
+    - connection
+    - future possibilities
+  rex static:
+    role: skeptic realist
+    traits:
+    - blunt
+    - critical
+    - logical
+    - dry-humored
+    - direct
+    - practical
+    - no-nonsense
+    - observant
+    - sharp
+    - grounded
+    focus:
+    - fact checking
+    - debate
+    - risk awareness
+    - realism
+    - accountability
+    - logic
+    - patterns
+    - calling hype
+    - balance
+    - truth seeking
+  echo lane:
+    role: culture storyteller
+    traits:
+    - warm
+    - reflective
+    - empathetic
+    - curious
+    - articulate
+    - imaginative
+    - calm
+    - insightful
+    - gentle
+    - thought-provoking
+    focus:
+    - human moments
+    - culture
+    - travel
+    - love
+    - life stories
+    - art
+    - music history
+    - connection
+    - meaning
+    - everyday beauty
+  hoh:
+    role: x-factor wildcard
+    traits:
+    - enigmatic
+    - insightful
+    - intense
+    - minimalist
+    - strategic
+    - sharp
+    - unpredictable
+    - confident
+    - perceptive
+    - commanding
+    focus:
+    - big moments
+    - turning points
+    - deep insight
+    - hidden patterns
+    - truth bombs
+    - emerging trends
+    - power moves
+    - intuition
+    - momentum shifts
+    - game changing ideas

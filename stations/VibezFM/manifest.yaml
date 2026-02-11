@@ -1,0 +1,507 @@
+station:
+  name: VibezFM
+  host: Host
+  category: All day vibes and good tunes
+  logo: logos/vibezfm.png
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: llama3.1:8b
+  host: qwen3:8b
+  navigator: deepseek-r1:8b
+  embedding: nomic-embed-text:v1.5
+embedding:
+  enabled: false
+scheduler:
+  source_quotas:
+    bluesky: 2
+    document: 4
+    flows: 3
+    futuresight: 3
+    markets: 4
+    portfolio: 3
+    reddit: 6
+    rss: 1
+    visual_reader: 3
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+riff:
+  tag_catalog:
+  - execution
+  - risk
+  - performance
+  - psychology
+  - trends
+  - strategy
+  - news
+  shapes:
+  - connect_two
+  - myth_bust
+  - failure_mode
+  - tradeoff
+  - tease_next
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+producer:
+  target_depth: 8
+  max_depth: 20
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.35
+  per_source_cap: 2
+  source_limits:
+    rss:
+      max_share: 0.2
+      max_abs: 4
+    reddit:
+      max_share: 0.45
+      max_abs: 10
+    markets:
+      max_share: 0.4
+      max_abs: 8
+    portfolio_event:
+      max_share: 0.35
+      max_abs: 6
+    bluesky:
+      max_share: 0.3
+      max_abs: 6
+    document:
+      max_share: 0.25
+      max_abs: 4
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 23
+  station_id_sec: 240
+  max_tokens: 420
+  temperature: 0.6
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+audio:
+  piper_bin: "{PIPER_BIN_PATH}"
+voices:
+  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
+  lil bat: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
+  marco vision: "{VOICES_DIR}/en_GB-alan-medium.onnx"
+  nova spark: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
+  rex static: "{VOICES_DIR}/en_US-danny-low.onnx"
+  echo lane: "{VOICES_DIR}/en_GB-alba-medium.onnx"
+  hoh: "{VOICES_DIR}/en_US-eminem-medium.onnx"
+feeds:
+  bluesky:
+    enabled: true
+    identifier: easporks99.bsky.social
+    password: dind-65zw-56ik-zuu5
+    hashtags:
+      - rap
+      - hiphop
+      - worldnews
+      - Hockey
+      - Sports
+      - Music
+      - Literature
+      - Books
+      - Reading
+      - Culture
+      - Art
+      - Film
+      - Movies
+      - Writing
+      - Poetry
+      - LiveMusic
+      - Vinyl
+      - ConcertLife
+      - SportsCulture
+      - GameDay
+      - Fans
+      - Athletics
+      - Creativity
+      - Storytelling
+      - PopCulture
+      - History
+      - Philosophy
+      - Photography
+      - Design
+      - VisualArt
+      - IndieMusic
+      - Classics
+      - ModernCulture
+      - UrbanCulture
+      - CreativeLife
+      - Inspiration
+      - CultureTalk
+      - SportsLife
+      - MusicLovers
+      - BookLovers
+      - ArtCommunity
+      - CultureCommunity
+      - EverydayLife
+      - Passions
+      - Hobbies
+      - Lifestyle
+      - CultureMatters
+      - SportsFans
+      - MusicCulture
+      - LiteraryLife
+      - CreativeCommunity
+      - HumanStories
+
+    poll_sec: 60
+    limit: 20
+    priority: 70.0
+    burst_delay: 0.25
+  document:
+    enabled: true
+    files:
+    - name: strategy
+      path: ./strategy_reference.txt
+      max_chars: 5000
+      announce: true
+      announce_priority: 86
+      candidate: false
+    - name: playbook
+      path: ./coach_playbook.txt
+      max_chars: 7000
+      announce: false
+      candidate: true
+      candidate_priority: 80
+    poll_sec: 2.5
+    announce_cooldown_sec: 600
+  facebook:
+    enabled: false
+    access_token: ''
+    page_id: ''
+    keywords: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  flows:
+    enabled: true
+  futuresight:
+    enabled: true
+    poll_sec: 0.25
+    vision_provider: ollama
+    vision_model: llava:latest
+    vision_endpoint: http://localhost:11434
+    vision_api_key: ''
+    vision_prompt: Describe what is happening in this video frame as if you are a
+      commentator watching a live feed. Focus on the action, the people, and the atmosphere.
+      Keep it immediate and descriptive.
+  google_alerts:
+    enabled: false
+  instagram:
+    enabled: false
+    access_token: ''
+    hashtags: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  markets:
+    enabled: true
+    symbols: []
+    poll_sec: 15
+    breakout_pct: 0.2
+    priority: 90
+  portfolio:
+    enabled: true
+  reddit:
+    enabled: true
+    subreddits:
+      - hockey
+      - nhl
+      - sports
+      - sportsdiscussion
+      - sportsbook
+      - baseball
+      - nba
+      - soccer
+      - collegebasketball
+      - literature
+      - books
+      - reading
+      - writing
+      - poetry
+      - classicbooks
+      - bookclub
+      - suggestmeabook
+      - music
+      - listentothis
+      - hiphopheads
+      - indieheads
+      - jazz
+      - classicalmusic
+      - vinyl
+      - concerts
+      - movies
+      - film
+      - truefilm
+      - television
+      - popculturechat
+      - culture
+      - art
+      - design
+      - photography
+      - documentaries
+      - history
+      - philosophy
+      - todayilearned
+      - longreads
+      - essays
+      - culturetalk
+      - futurology
+      - news
+      - worldnews
+      - upliftingnews
+      - humansbeingbros
+      - mademesmile
+
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.2
+    seen_ttl_sec: 3600
+  rss:
+    enabled: true
+    urls:
+      - https://www.npr.org/rss/rss.php?id=1039
+      - https://www.npr.org/rss/rss.php?id=1045
+      - https://www.theguardian.com/culture/rss
+      - https://www.theguardian.com/music/rss
+      - https://www.theguardian.com/travel/rss
+      - https://www.atlasobscura.com/feeds/latest
+      - https://www.goodnewsnetwork.org/feed/
+      - https://www.positive.news/feed/
+      - https://www.brainpickings.org/feed/
+      - https://longreads.com/feed/
+      - https://www.newyorker.com/feed/culture
+      - https://www.newyorker.com/feed/sporting-scene
+      - https://www.rollingstone.com/music/music-news/feed/
+      - https://pitchfork.com/rss/news/
+      - https://www.vice.com/en/rss
+      - https://www.nationalgeographic.com/content/natgeo/en_us/index.rss
+      - https://www.nationalgeographic.com/travel/rss
+      - https://www.si.com/rss/si_topstories.rss
+      - https://www.espn.com/espn/rss/news
+      - https://www.documentary.org/rss.xml
+      - https://aeon.co/feed
+      - https://www.themarginalian.org/feed/
+      - https://www.happiness.com/en/rss.xml
+      - https://www.lifehack.org/feed
+      - https://www.lonelyplanet.com/news/rss
+
+    poll_sec: 180
+    priority: 72
+  tiktok:
+    enabled: false
+    api_key: ''
+    api_secret: ''
+    hashtags: []
+    poll_sec: 180
+    limit: 10
+    priority: 72.0
+  twitter:
+    enabled: false
+    bearer_token: ''
+    hashtags: []
+    poll_sec: 90
+    limit: 20
+    priority: 75.0
+  visual_reader:
+    enabled: true
+    source_type: screen
+    source_path: ''
+    source_window: ''
+    capture_interval: 5
+    talk_over_video: false
+    reaction_frequency: 30
+    max_interpretation_length: 500
+    interpretation_temperature: 0.7
+characters:
+  host:
+    role: moderator dj
+    traits:
+    - calm
+    - smart
+    - attentive
+    - energetic
+    - hype
+    - open
+    - honest
+    - grounded
+    - artist
+    focus:
+    - flow
+    - continuity
+    - collaboration
+    - hope
+    - discovery
+    - music
+    - hiphop
+    - rap
+    - community
+    - solidarity
+  lil bat:
+    role: artist insider
+    traits:
+    - creative
+    - intuitive
+    - moody
+    - expressive
+    - experimental
+    - observant
+    - passionate
+    - sensitive
+    - bold
+    - authentic
+    focus:
+    - underground music
+    - new sounds
+    - artistry
+    - emotion
+    - storytelling
+    - culture shifts
+    - indie scenes
+    - aesthetic
+    - creativity
+    - self expression
+  marco vision:
+    role: macro analyst
+    traits:
+    - analytical
+    - measured
+    - strategic
+    - thoughtful
+    - rational
+    - patient
+    - big-picture
+    - curious
+    - disciplined
+    - objective
+    focus:
+    - economics
+    - markets
+    - global trends
+    - technology shifts
+    - long term thinking
+    - risk
+    - opportunity
+    - data
+    - growth
+    - cycles
+  nova spark:
+    role: optimist commentator
+    traits:
+    - positive
+    - energetic
+    - hopeful
+    - friendly
+    - motivating
+    - curious
+    - supportive
+    - open-minded
+    - enthusiastic
+    - resilient
+    focus:
+    - good news
+    - human stories
+    - innovation
+    - progress
+    - community wins
+    - personal growth
+    - creativity
+    - inspiration
+    - connection
+    - future possibilities
+  rex static:
+    role: skeptic realist
+    traits:
+    - blunt
+    - critical
+    - logical
+    - dry-humored
+    - direct
+    - practical
+    - no-nonsense
+    - observant
+    - sharp
+    - grounded
+    focus:
+    - fact checking
+    - debate
+    - risk awareness
+    - realism
+    - accountability
+    - logic
+    - patterns
+    - calling hype
+    - balance
+    - truth seeking
+  echo lane:
+    role: culture storyteller
+    traits:
+    - warm
+    - reflective
+    - empathetic
+    - curious
+    - articulate
+    - imaginative
+    - calm
+    - insightful
+    - gentle
+    - thought-provoking
+    focus:
+    - human moments
+    - culture
+    - travel
+    - love
+    - life stories
+    - art
+    - music history
+    - connection
+    - meaning
+    - everyday beauty
+  hoh:
+    role: x-factor wildcard
+    traits:
+    - enigmatic
+    - insightful
+    - intense
+    - minimalist
+    - strategic
+    - sharp
+    - unpredictable
+    - confident
+    - perceptive
+    - commanding
+    focus:
+    - big moments
+    - turning points
+    - deep insight
+    - hidden patterns
+    - truth bombs
+    - emerging trends
+    - power moves
+    - intuition
+    - momentum shifts
+    - game changing ideas
+mix:
+  weights:
+    bluesky: 0.13414634146341461
+    document: 0.1097560975609756
+    flows: 0.1097560975609756
+    futuresight: 0.06097560975609756
+    markets: 0.12195121951219512
+    portfolio: 0.06097560975609756
+    reddit: 0.12195121951219512
+    rss: 0.15853658536585366
+    visual_reader: 0.12195121951219512

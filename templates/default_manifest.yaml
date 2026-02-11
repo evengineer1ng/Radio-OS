@@ -3,6 +3,10 @@ station:
   host: ""
   category: "Custom"
 
+# Meta Plugin: Controls core AI behavior
+# Options: "radio_station" (default) | "from_the_backmarker" (game mode)
+meta_plugin: "radio_station"
+
 break_duration_min: 20
 break_duration_max: 120
 break_duration_random: true
@@ -22,6 +26,7 @@ scheduler:
   reclaim_every_sec: 10
   reaper_every_sec: 3
   claim_timeout_sec: 45
+  flush_on_startup: false  # Set to true to clear queued segments at station launch
 
 riff:
   tag_catalog: []

@@ -337,3 +337,67 @@ def log_provider_info(provider_type: str, model: str) -> str:
         "google": "Gemini (Google)",
     }
     return f"{provider_display.get(provider_type, provider_type)} [{model}]"
+
+
+def _load_station_cfg() -> Dict[str, Any]:
+    station_dir = (os.environ.get("STATION_DIR") or "").strip()
+    if not station_dir:
+        return {}
+
+    manifest_path = os.path.join(station_dir, "manifest.yaml")
+    if not os.path.exists(manifest_path):
+        return {}
+
+    try:
+        import yaml
+    except Exception:
+        return {}
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+
+
+def _resolve_default_model(cfg: Dict[str, Any]) -> str:
+    models_cfg = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
+    model = (models_cfg.get("host") or models_cfg.get("host_model") or "").strip()
+    if model:
+        return model
+    return (
+        (os.environ.get("HOST_MODEL") or "").strip()
+        or (os.environ.get("CONTEXT_MODEL") or "").strip()
+        or "rnj-1:8b"
+    )
+
+
+class LegacyModelProvider:
+    """Compatibility wrapper exposing a .complete() API for older callers."""
+
+    def __init__(self, cfg: Optional[Dict[str, Any]] = None):
+        self._cfg = cfg or {}
+
+    def complete(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 300,
+        system: str = "",
+        model: Optional[str] = None,
+    ) -> str:
+        cfg = self._cfg or _load_station_cfg()
+        provider = get_llm_provider(cfg)
+        model_name = (model or "").strip() or _resolve_default_model(cfg)
+
+        return provider.generate(
+            model=model_name,
+            prompt=prompt,
+            system=system or "",
+            num_predict=int(max_tokens),
+            temperature=float(temperature),
+        )
+
+
+# Backward-compatible default provider for legacy imports.
+model_provider = LegacyModelProvider()

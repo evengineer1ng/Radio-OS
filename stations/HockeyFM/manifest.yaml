@@ -1,0 +1,143 @@
+station:
+  name: HockeyFM
+  host: Gabs
+  category: Stick and Puck
+  logo: logos/hockeyfm.jpg
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: rnj-1:8b
+  host: rnj-1:8b
+audio:
+  piper_bin: "{PIPER_BIN_PATH}"
+voices:
+  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
+  analyst: "{VOICES_DIR}/en_GB-alba-medium.onnx"
+  stats_guru: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
+  hype: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
+  coach: "{VOICES_DIR}/en_US-danny-low.onnx"
+scheduler:
+  source_quotas:
+    feed: 5
+    event: 5
+    narrative: 2
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+producer:
+  target_depth: 16
+  max_depth: 40
+  tick_sec: 30
+  temperature: 0.65
+  max_tokens: 650
+host:
+  max_comments: 8
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  station_id_sec: 360
+  temperature: 0.85
+  max_tokens: 850
+tts:
+  min_gap_sec: 8
+  deprioritize_penalty: 3.5
+  spam_break_priority: 96
+riff:
+  tag_catalog:
+  - hockey
+  - sports
+  - recent results
+  - who's up
+  - power rankings
+  - momentum
+  - sentiment
+  - flow
+  shapes:
+  - debate
+  - explain
+  - connect
+  - forecast
+  - tease_next
+characters:
+  host:
+    role: play_by_play_host
+    traits:
+    - smooth
+    - engaging
+    focus:
+    - flow
+    - pacing
+  analyst:
+    role: tactical_breakdown
+    traits:
+    - smart
+    - precise
+    focus:
+    - systems
+    - matchups
+  stats_guru:
+    role: analytics_voice
+    traits:
+    - data_driven
+    - calm
+    focus:
+    - metrics
+    - trends
+  hype:
+    role: energy_driver
+    traits:
+    - excited
+    - passionate
+    focus:
+    - big_plays
+    - emotion
+  coach:
+    role: leadership_voice
+    traits:
+    - motivational
+    - firm
+    focus:
+    - habits
+    - discipline
+feeds:
+  flows:
+    enabled: true
+    poll_sec: 1.0
+  futuresight:
+    enabled: true
+    vision_provider: "ollama"
+    vision_model: "llava:latest"
+  visual_reader:
+    enabled: true
+  reddit:
+    enabled: true
+    subreddits:
+    - hockey
+    - NHL
+    - OttawaSenators
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.25
+    seen_ttl_sec: 3600
+  rss:
+    enabled: true
+    urls:
+    - https://www.espn.com/espn/rss/nhl/news
+    - https://www.sportsnet.ca/hockey/nhl/feed/
+    poll_sec: 180
+    priority: 72
+  bluesky:
+    enabled: false
+  google_alerts:
+    enabled: false
+  markets:
+    enabled: false

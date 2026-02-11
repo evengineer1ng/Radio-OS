@@ -8,12 +8,13 @@ sys.path.append(".")
 
 # Try to import from runtime (production), fallback to local definitions
 try:
-    from runtime import log, now_ts, event_q, StationEvent
+    from runtime import log, now_ts, event_q, StationEvent, notification_q
 except ImportError:
     # Fallback: define locally
     import time
     
     event_q = None
+    notification_q = None
     StationEvent = None
     
     def now_ts() -> int:

@@ -70,16 +70,34 @@ def fetch_reddit(subreddits, limit=10):
                     
                     # Dedupe happens in the worker loop logic via seen set
                     
+                    # Format for radio: provide context about engagement, not raw JSON
+                    score = d.get("score", 0)
+                    comments = d.get("num_comments", 0)
+                    selftext = d.get("selftext", "")
+                    
+                    # Build radio-friendly body with context
+                    body_parts = []
+                    
+                    # Add engagement context naturally
+                    if score > 1000 or comments > 100:
+                        body_parts.append(f"This post from r/{sub} is getting significant traction with {score} upvotes and {comments} comments.")
+                    elif score > 100:
+                        body_parts.append(f"From r/{sub}, scoring {score} karma with {comments} discussion threads.")
+                    
+                    # Add the actual content
+                    if selftext:
+                        body_parts.append(selftext)
+                    
                     out.append({
                         "post_id": d.get("id"),
                         "subreddit": d.get("subreddit", sub),
                         "title": d.get("title", ""),
-                        "body": d.get("selftext", ""),
+                        "body": " ".join(body_parts) if body_parts else "",
                         "author": d.get("author", ""),
-                        "score": d.get("score", 0),
-                        "comments": d.get("num_comments", 0),
+                        "score": score,
+                        "comments": comments,
                         "created_utc": d.get("created_utc", float(now_ts())),
-                        "mode": mode  # Track source mode
+                        "mode": mode
                     })
 
             except Exception:

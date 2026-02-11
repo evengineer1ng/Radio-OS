@@ -1,0 +1,357 @@
+station:
+  name: From the Backmarker
+  host: Kai
+  category: Racing Management Simulation
+  logo: logos/fromthebackmarker.jpg
+  meta_plugin: ftb_narrator
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: rnj-1:8b
+  host: llama3.1:8b
+  navigator: deepseek-r1:8b
+  narrator: llama3.1:8b
+  embedding: ''
+embedding:
+  enabled: false
+scheduler:
+  source_quotas:
+    document: 4
+    markets: 4
+    reddit: 6
+    rss: 1
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+  flush_on_startup: true
+riff:
+  tag_catalog:
+  - execution
+  - risk
+  - performance
+  - psychology
+  - trends
+  - strategy
+  - news
+  shapes:
+  - connect_two
+  - myth_bust
+  - failure_mode
+  - tradeoff
+  - tease_next
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+producer:
+  target_depth: 8
+  max_depth: 20
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.35
+  per_source_cap: 2
+  source_limits:
+    rss:
+      max_share: 0.2
+      max_abs: 4
+    reddit:
+      max_share: 0.45
+      max_abs: 10
+    markets:
+      max_share: 0.4
+      max_abs: 8
+    portfolio_event:
+      max_share: 0.35
+      max_abs: 6
+    bluesky:
+      max_share: 0.3
+      max_abs: 6
+    document:
+      max_share: 0.25
+      max_abs: 4
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 23
+  station_id_sec: 240
+  max_tokens: 420
+  temperature: 0.6
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+audio:
+  piper_bin: "{PIPER_BIN_PATH}"
+  # Multi-channel audio engine configuration
+  music_enabled: true
+  world_audio_enabled: true
+  ui_audio_enabled: true
+  master_volume: 0.8
+  channel_volumes:
+    music: 0.3
+    world: 0.5
+    ui: 0.15
+    narrator: 1.0
+  state_music:
+    update_interval: 5.0  # seconds between performance recalculation
+    smoothing_alpha: 0.15  # EMA smoothing for morale inertia (lower = smoother)
+    crossfade_duration: 6.0  # seconds to crossfade between music variants
+  performance_weights:
+    morale: 0.25
+    reputation: 0.20
+    legitimacy: 0.15
+    position: 0.25
+    budget: 0.15
+voices:
+  narrator: "{VOICES_DIR}/en_GB-alan-medium.onnx"
+  host: "{VOICES_DIR}/en_US-danny-low.onnx"
+  formula_z_news: "{VOICES_DIR}/en_US-lessac-high.onnx"
+ftb:
+  narrator:
+    enabled: true
+    cadence_seconds:
+    - 2
+    - 5
+    max_segments_per_hour: 180
+    burst_on_tick:
+    - 2
+    - 4
+    maintenance_segments:
+    - 1
+    - 3
+    cooldown_seconds: 40
+    news_broadcast_interval: 3600
+    validation_level: moderate
+    default_tone: sensible
+    state_check_cadence: 15
+    waiting_room_enabled: true
+    callback_persistence: true
+feeds:
+  bluesky:
+    enabled: false
+    identifier: ''
+    password: ''
+    hashtags: []
+    poll_sec: 60
+    limit: 20
+    priority: 70.0
+    burst_delay: 0.25
+  document:
+    enabled: true
+    files:
+    - name: strategy
+      path: C:\Users\evana\Documents\radio_os\stations\FromTheBackmarkerTemplate\reference.txt
+      max_chars: 5000
+      announce: true
+      announce_priority: 86
+      candidate: true
+    poll_sec: 2.5
+    announce_cooldown_sec: 600
+  facebook:
+    enabled: false
+    access_token: ''
+    page_id: ''
+    keywords: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  flows:
+    enabled: false
+  ftb_components:
+    enabled: false
+  ftb_names:
+    enabled: false
+  ftb_state_db:
+    enabled: true
+  ftb_audio_engine:
+    enabled: true
+  futuresight:
+    enabled: false
+    poll_sec: 0.25
+    vision_provider: ollama
+    vision_model: llava:latest
+    vision_endpoint: http://localhost:11434
+    vision_api_key: ''
+    vision_prompt: Describe what is happening in this video frame as if you are a
+      commentator watching a live feed. Focus on the action, the people, and the atmosphere.
+      Keep it immediate and descriptive.
+  google_alerts:
+    enabled: false
+  instagram:
+    enabled: false
+    access_token: ''
+    hashtags: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  markets:
+    enabled: true
+    symbols: []
+    poll_sec: 15
+    breakout_pct: 0.2
+    priority: 90
+  portfolio:
+    enabled: false
+  reddit:
+    enabled: true
+    subreddits: []
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.2
+    seen_ttl_sec: 3600
+  rss:
+    enabled: true
+    urls: []
+    poll_sec: 180
+    priority: 72
+  tiktok:
+    enabled: false
+    api_key: ''
+    api_secret: ''
+    hashtags: []
+    poll_sec: 180
+    limit: 10
+    priority: 72.0
+  twitter:
+    enabled: false
+    bearer_token: ''
+    hashtags: []
+    poll_sec: 90
+    limit: 20
+    priority: 75.0
+  visual_reader:
+    enabled: false
+    source_type: screen
+    source_path: ''
+    source_window: ''
+    capture_interval: 5
+    talk_over_video: false
+    reaction_frequency: 30
+    max_interpretation_length: 500
+    interpretation_temperature: 0.7
+characters:
+  host:
+    role: moderator
+    traits:
+    - calm
+    - smart
+    focus:
+    - flow
+    - continuity
+mix:
+  weights:
+    document: 0.030769230769230767
+    markets: 0.15384615384615385
+    reddit: 0.7692307692307692
+    rss: 0.04615384615384615
+ui_layout:
+  windows:
+    window_1:
+      window_id: window_1
+      geometry:
+        x: 0
+        y: 0
+        width: 1921
+        height: 867
+      is_minimized: false
+      active_tab: null
+      tabs: []
+    window_2:
+      window_id: window_2
+      geometry:
+        x: 466
+        y: 0
+        width: 466
+        height: 600
+      is_minimized: true
+      active_tab: null
+      tabs: []
+    window_3:
+      window_id: window_3
+      geometry:
+        x: 932
+        y: 0
+        width: 466
+        height: 600
+      is_minimized: true
+      active_tab: null
+      tabs: []
+  panes:
+    left:
+      tabs:
+      - widget_key: ftb_game
+        title: From the Backmarker
+      - widget_key: transcript
+        title: Transcript
+      - widget_key: ftb_pbp
+        title: ftb_pbp
+      - widget_key: ftb_calendar
+        title: 📅 Calendar
+    center:
+      tabs:
+      - widget_key: segment_body
+        title: Segment • Body
+    right:
+      tabs:
+      - widget_key: segment_comments
+        title: Segment • Comments
+
+# Team Mortality & Tier Movement Configuration
+team_mortality:
+  enabled: true
+  
+  # Fold thresholds by tier (ticks of negative cash before fold)
+  fold_thresholds:
+    tier_1: 14  # 2 weeks for grassroots
+    tier_2: 14
+    tier_3: 15
+    tier_4: 15
+    tier_5: 21  # 3 weeks for top tier (more grace period)
+  
+  # Tier movement configuration
+  tier_movement:
+    # Promotion thresholds (must finish in top X% of tier)
+    promotion_percentile:
+      tier_1: 0.10  # Top 10%
+      tier_2: 0.10
+      tier_3: 0.10
+      tier_4: 0.10
+    
+    # Relegation thresholds (bottom X% and cash_runway < Y weeks)
+    relegation_percentile:
+      tier_1: 0.20  # Bottom 20%
+      tier_2: 0.20
+      tier_3: 0.20
+      tier_4: 0.20
+      tier_5: 0.15
+    
+    relegation_runway_weeks:
+      tier_1: 20
+      tier_2: 20
+      tier_3: 20
+      tier_4: 20
+      tier_5: 20
+    
+    # Can tier relegate? (false = fold instead of relegate)
+    can_relegate:
+      tier_1: true
+      tier_2: true
+      tier_3: true
+      tier_4: true
+      tier_5: false  # Top tier can't relegate, only fold
+  
+  # Economic downturn parameters
+  economic_downturn:
+    enabled: true
+    min_seasons_between: 3  # Minimum seasons between downturns
+    annual_chance: 0.036  # ~3.6% chance per year
+    duration_seasons_min: 2
+    duration_seasons_max: 4
+    sponsor_reduction_min: 0.15  # 15% reduction
+    sponsor_reduction_max: 0.25  # 25% reduction

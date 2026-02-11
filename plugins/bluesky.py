@@ -134,14 +134,45 @@ def fetch_bluesky_tags(tags: List[str], identifier: str = "", password: str = ""
                         continue
 
                     text = (p.get("record") or {}).get("text", "")
+                    author = (p.get("author") or {}).get("displayName") or (p.get("author") or {}).get("handle") or "Unknown"
+                    like_count = p.get("likeCount", 0)
+                    reply_count = p.get("replyCount", 0)
+                    repost_count = p.get("repostCount", 0)
                     
-                    # Bluesky "Top" posts might be old, so check date if needed
-                    # But for "existing" content per user request, we allow older hits.
-
+                    # Format for radio: synthesize context that invites analysis and discussion
+                    # Don't just restate - provide angles for commentary
+                    angle_parts = []
+                    
+                    # Provide engagement as context for discussion, not as narration
+                    if like_count > 100 or repost_count > 20:
+                        angle_parts.append(f"{author} is getting viral attention on Bluesky.")
+                    elif like_count > 10:
+                        angle_parts.append(f"{author} weighs in on #{tag}.")
+                    
+                    # Add the content as material to discuss, not to repeat verbatim
+                    angle_parts.append(f"Their take: {text}")
+                    
+                    # Frame engagement as a discussion angle
+                    engagement_context = ""
+                    if reply_count > 10:
+                        engagement_context = f"The community is actively debating this with {reply_count} replies."
+                    elif like_count > 50:
+                        engagement_context = f"Resonating with {like_count} people so far."
+                    
+                    if engagement_context:
+                        angle_parts.append(engagement_context)
+                    
+                    # Provide explicit angle guidance for synthesis
+                    synthesis_angle = "Discuss the perspective and what it means for the conversation around this topic."
+                    if repost_count > 20:
+                        synthesis_angle = "Analyze why this take is spreading and what it reveals about the current discourse."
+                    
                     out.append({
                         "post_id": pid,
-                        "title": text[:120],
-                        "body": text,
+                        "title": f"Bluesky discussion: {author} on #{tag}",
+                        "body": " ".join(angle_parts),
+                        "angle": synthesis_angle,
+                        "key_points": ["author's main argument", "community reaction", "broader implications"],
                     })
 
             except Exception:

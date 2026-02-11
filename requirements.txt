@@ -5,10 +5,12 @@
 sounddevice>=0.4.6
 soundfile>=0.12.1
 numpy>=1.24.0
+pygame>=2.5.0                       # Multi-channel audio mixing (music/sfx)
 
 # UI
 # tk is usually included in standard Python. On Linux: sudo apt-get install python3-tk
 Pillow>=9.0.0
+customtkinter>=5.2.0                # Modern themed UI components
 
 # Data
 pyyaml>=6.0
@@ -43,3 +45,7 @@ google-generativeai>=0.3.0          # For Google Gemini
 # Windows-only (optional, for window capture):
 pywin32>=305; sys_platform == 'win32'
 
+# Optional: ML features for From the Backmarker station (~2GB download)
+# Gracefully degrades to simpler AI if not installed
+# Install if prompted during setup, or manually: pip install torch>=2.0.0
+# torch>=2.0.0

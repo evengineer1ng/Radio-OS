@@ -3,11 +3,11 @@ station:
   host: Kai
   category: Racing Management Simulation
   logo: logos/fromthebackmarker.jpg
-  meta_plugin: ftb_narrator
+meta_plugin: ftb_narrator_plugin
 llm:
   endpoint: http://127.0.0.1:11434/api/generate
 models:
-  producer: rnj-1:8b
+  producer: qwen2.5:14b
   host: llama3.1:8b
   navigator: deepseek-r1:8b
   narrator: llama3.1:8b
@@ -17,13 +17,15 @@ embedding:
 scheduler:
   source_quotas:
     document: 4
+    ftb_state_db: 3
+    ftb_audio_engine: 3
     markets: 4
     reddit: 6
     rss: 1
+    env_example: 3
   reclaim_every_sec: 10
   reaper_every_sec: 3
   claim_timeout_sec: 45
-  flush_on_startup: true
 riff:
   tag_catalog:
   - execution
@@ -86,51 +88,36 @@ tts:
   min_gap_sec: 6
   deprioritize_penalty: 15
 audio:
-  piper_bin: "{PIPER_BIN_PATH}"
-  # Multi-channel audio engine configuration
+  voices_provider: kokoro
+  piper_bin: ''
   music_enabled: true
   world_audio_enabled: true
   ui_audio_enabled: true
   master_volume: 0.8
   channel_volumes:
-    music: 0.3
+    music: 0.15
     world: 0.5
-    ui: 0.15
-    narrator: 1.0
+    ui: 0.1
+    narrator: 1.2
+    voice: 1.1
   state_music:
-    update_interval: 5.0  # seconds between performance recalculation
-    smoothing_alpha: 0.15  # EMA smoothing for morale inertia (lower = smoother)
-    crossfade_duration: 6.0  # seconds to crossfade between music variants
+    update_interval: 5.0
+    smoothing_alpha: 0.15
+    crossfade_duration: 6.0
   performance_weights:
     morale: 0.25
-    reputation: 0.20
+    reputation: 0.2
     legitimacy: 0.15
     position: 0.25
     budget: 0.15
+  voices:
+    host: am_adam
+    narrator: bm_fable
+    formula_z_news_anchor: bf_alice
 voices:
-  narrator: "{VOICES_DIR}/en_GB-alan-medium.onnx"
-  host: "{VOICES_DIR}/en_US-danny-low.onnx"
-  formula_z_news: "{VOICES_DIR}/en_US-lessac-high.onnx"
-ftb:
-  narrator:
-    enabled: true
-    cadence_seconds:
-    - 2
-    - 5
-    max_segments_per_hour: 180
-    burst_on_tick:
-    - 2
-    - 4
-    maintenance_segments:
-    - 1
-    - 3
-    cooldown_seconds: 40
-    news_broadcast_interval: 3600
-    validation_level: moderate
-    default_tone: sensible
-    state_check_cadence: 15
-    waiting_room_enabled: true
-    callback_persistence: true
+  host: am_adam
+  narrator: bm_lewis
+  formula_z_news_anchor: bf_alice
 feeds:
   bluesky:
     enabled: false
@@ -169,6 +156,8 @@ feeds:
   ftb_state_db:
     enabled: true
   ftb_audio_engine:
+    enabled: true
+  ftb_web_server:
     enabled: true
   futuresight:
     enabled: false
@@ -235,6 +224,15 @@ feeds:
     reaction_frequency: 30
     max_interpretation_length: 500
     interpretation_temperature: 0.7
+  env_example:
+    enabled: true
+    message: Hello from environment example!
+  ftb_heritage_templates:
+    enabled: false
+  ftb_narrative_prompts:
+    enabled: false
+  ftb_sponsors:
+    enabled: false
 characters:
   host:
     role: moderator
@@ -266,10 +264,44 @@ characters:
     - world_context
 mix:
   weights:
-    document: 0.030769230769230767
-    markets: 0.15384615384615385
-    reddit: 0.7692307692307692
-    rss: 0.04615384615384615
+    document: 0.03
+    ftb_state_db: 0.0
+    ftb_audio_engine: 0.0
+    markets: 0.15
+    reddit: 0.77
+    rss: 0.05
+    env_example: 0.0
+art:
+  global_bg:
+    type: gradient
+    value: '#0e0e0e'
+    path: ''
+    gradient:
+      type: radial
+      color1: '#932092'
+      color2: '#0432ff'
+  panels:
+    left:
+      type: color
+      value: '#121212'
+    center:
+      type: color
+      value: '#121212'
+    right:
+      type: color
+      value: '#121212'
+    toolbar:
+      type: gradient
+      value: '#0e0e0e'
+      gradient:
+        type: linear
+        color1: '#121212'
+        color2: '#aa7941'
+    subtitle:
+      type: color
+      value: '#0e0e0e'
+  accent: '#4cc9f0'
+  subtitle_wave: true
 ui_layout:
   windows:
     window_1:
@@ -277,8 +309,8 @@ ui_layout:
       geometry:
         x: 0
         y: 0
-        width: 1921
-        height: 867
+        width: 1491
+        height: 695
       is_minimized: false
       active_tab: null
       tabs: []
@@ -306,13 +338,11 @@ ui_layout:
     left:
       tabs:
       - widget_key: ftb_game
-        title: From the Backmarker
-      - widget_key: transcript
-        title: Transcript
-      - widget_key: ftb_pbp
-        title: ftb_pbp
+        title: ftb_game
       - widget_key: ftb_calendar
         title: 📅 Calendar
+      - widget_key: transcript
+        title: Transcript
     center:
       tabs:
       - widget_key: segment_body
@@ -321,57 +351,3 @@ ui_layout:
       tabs:
       - widget_key: segment_comments
         title: Segment • Comments
-
-# Team Mortality & Tier Movement Configuration
-team_mortality:
-  enabled: true
-  
-  # Fold thresholds by tier (ticks of negative cash before fold)
-  fold_thresholds:
-    tier_1: 14  # 2 weeks for grassroots
-    tier_2: 14
-    tier_3: 15
-    tier_4: 15
-    tier_5: 21  # 3 weeks for top tier (more grace period)
-  
-  # Tier movement configuration
-  tier_movement:
-    # Promotion thresholds (must finish in top X% of tier)
-    promotion_percentile:
-      tier_1: 0.10  # Top 10%
-      tier_2: 0.10
-      tier_3: 0.10
-      tier_4: 0.10
-    
-    # Relegation thresholds (bottom X% and cash_runway < Y weeks)
-    relegation_percentile:
-      tier_1: 0.20  # Bottom 20%
-      tier_2: 0.20
-      tier_3: 0.20
-      tier_4: 0.20
-      tier_5: 0.15
-    
-    relegation_runway_weeks:
-      tier_1: 20
-      tier_2: 20
-      tier_3: 20
-      tier_4: 20
-      tier_5: 20
-    
-    # Can tier relegate? (false = fold instead of relegate)
-    can_relegate:
-      tier_1: true
-      tier_2: true
-      tier_3: true
-      tier_4: true
-      tier_5: false  # Top tier can't relegate, only fold
-  
-  # Economic downturn parameters
-  economic_downturn:
-    enabled: true
-    min_seasons_between: 3  # Minimum seasons between downturns
-    annual_chance: 0.036  # ~3.6% chance per year
-    duration_seasons_min: 2
-    duration_seasons_max: 4
-    sponsor_reduction_min: 0.15  # 15% reduction
-    sponsor_reduction_max: 0.25  # 25% reduction

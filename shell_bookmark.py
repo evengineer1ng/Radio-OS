@@ -445,6 +445,7 @@ class StationProcess:
         self.proc: Optional[subprocess.Popen] = None
         self.station: Optional[StationInfo] = None
         self._log_file = None  # keep handle alive on Windows
+        self._log_thread = None  # background thread for log capture
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -509,7 +510,8 @@ class StationProcess:
 
         cmd = [sys.executable, "-u", RUNTIME_PATH]
 
-        kwargs = {"cwd": BASE, "env": env, "stdout": lf if lf else None, "stderr": lf if lf else None}
+        # Fix: Use subprocess.PIPE for stdout/stderr to avoid file descriptor issues
+        kwargs = {"cwd": BASE, "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
         if sys.platform == "win32":
             # hide console window for runtime (Windows only)
             # NOTE: CREATE_NO_WINDOW can prevent win32gui.EnumWindows() from working correctly.
@@ -523,6 +525,31 @@ class StationProcess:
         self._log_file = lf
         self.proc = subprocess.Popen(cmd, **kwargs)
         self.station = station
+        
+        # Start a thread to capture and log output
+        if self.proc and lf:
+            import threading
+            
+            def log_output():
+                try:
+                    while self.proc and self.proc.poll() is None:
+                        line = self.proc.stdout.readline()
+                        if line:
+                            lf.write(line)
+                            lf.flush()
+                        else:
+                            break
+                    # Get any remaining output
+                    if self.proc and self.proc.stdout:
+                        remaining = self.proc.stdout.read()
+                        if remaining:
+                            lf.write(remaining)
+                            lf.flush()
+                except Exception as e:
+                    print(f"Log capture error: {e}")
+            
+            self._log_thread = threading.Thread(target=log_output, daemon=True)
+            self._log_thread.start()
 
     def stop(self) -> None:
         if self.proc:
@@ -530,8 +557,18 @@ class StationProcess:
                 self.proc.terminate()
             except Exception:
                 pass
+        
+        # Wait for log thread to finish
+        if hasattr(self, '_log_thread') and self._log_thread and self._log_thread.is_alive():
+            try:
+                self._log_thread.join(timeout=2)
+            except Exception:
+                pass
+        
         self.proc = None
         self.station = None
+        self._log_thread = None
+        
         try:
             if self._log_file:
                 self._log_file.flush()

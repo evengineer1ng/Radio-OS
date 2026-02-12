@@ -221,6 +221,69 @@ class GoogleCloudTTSProvider(VoiceProvider):
         return samples, audio.frame_rate
 
 
+class KokoroProvider(VoiceProvider):
+    """Kokoro TTS (local ONNX-based multilingual TTS)."""
+
+    def __init__(self, model_path: str, voices_path: str):
+        """
+        Args:
+            model_path: Path to kokoro ONNX model file
+            voices_path: Path to kokoro voices bin file
+        """
+        self.model_path = model_path
+        self.voices_path = voices_path
+        self._kokoro = None
+
+    def _get_kokoro(self):
+        """Lazy initialization of Kokoro instance."""
+        if self._kokoro is None:
+            try:
+                from kokoro_onnx import Kokoro
+                self._kokoro = Kokoro(self.model_path, self.voices_path)
+            except ImportError:
+                raise RuntimeError("kokoro-onnx not installed. Install with: pip install kokoro-onnx")
+            except Exception as e:
+                raise RuntimeError(f"Failed to initialize Kokoro: {e}")
+        return self._kokoro
+
+    def synthesize(
+        self, voice_key: str, text: str, voice_map: Dict[str, str]
+    ) -> Tuple[np.ndarray, int]:
+        """
+        Use Kokoro to generate audio from text.
+        voice_map should contain voice_key -> kokoro voice name (e.g. "af_sarah")
+        """
+        # Get kokoro voice name from mapping
+        kokoro_voice = voice_map.get(voice_key) or voice_map.get("host")
+        if not kokoro_voice:
+            # Default to a good English female voice if none specified
+            kokoro_voice = "af_sarah"
+
+        try:
+            kokoro = self._get_kokoro()
+            
+            # Check if voice exists
+            available_voices = kokoro.get_voices()
+            if kokoro_voice not in available_voices:
+                raise RuntimeError(f"Kokoro voice '{kokoro_voice}' not found. Available: {', '.join(available_voices[:10])}...")
+
+            # Generate audio
+            audio, sr = kokoro.create(text, voice=kokoro_voice, speed=1.0)
+            
+            # Convert to numpy array if needed
+            if not isinstance(audio, np.ndarray):
+                audio = np.array(audio, dtype=np.float32)
+            
+            # Ensure float32 dtype
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
+
+            return audio, int(sr)
+
+        except Exception as e:
+            raise RuntimeError(f"Kokoro synthesis failed: {e}")
+
+
 class AzureSpeechProvider(VoiceProvider):
     """Azure Cognitive Services Speech synthesis provider."""
 
@@ -304,7 +367,7 @@ def get_voice_provider(cfg: Dict[str, Any], audio_cfg: Optional[Dict[str, Any]] 
 
     provider_type = (audio_cfg.get("voices_provider") or "piper").strip().lower()
 
-    # Local provider
+    # Local providers
     if provider_type == "piper":
         piper_bin = (audio_cfg.get("piper_bin") or "").strip()
         if not piper_bin:
@@ -314,6 +377,46 @@ def get_voice_provider(cfg: Dict[str, Any], audio_cfg: Optional[Dict[str, Any]] 
         if not piper_bin:
             raise RuntimeError("Piper binary not found and could not auto-detect")
         return PiperProvider(piper_bin)
+
+    elif provider_type == "kokoro":
+        model_path = (audio_cfg.get("kokoro_model") or "").strip()
+        voices_path = (audio_cfg.get("kokoro_voices") or "").strip()
+        
+        # Auto-detect if not specified
+        if not model_path or not voices_path:
+            import os
+            voices_dir = os.environ.get("RADIO_OS_VOICES", "voices")
+            kokoro_dir = os.path.join(voices_dir, "kokoro")
+            
+            if not model_path:
+                # Try to find model file
+                model_candidates = [
+                    os.path.join(kokoro_dir, "kokoro-v1.0.fp16.onnx"),
+                    os.path.join(kokoro_dir, "kokoro-v1.0.onnx"),
+                    os.path.join(kokoro_dir, "kokoro.onnx"),
+                ]
+                for candidate in model_candidates:
+                    if os.path.exists(candidate):
+                        model_path = candidate
+                        break
+                        
+            if not voices_path:
+                # Try to find voices file
+                voices_candidates = [
+                    os.path.join(kokoro_dir, "voices-v1.0.bin"),
+                    os.path.join(kokoro_dir, "voices.bin"),
+                ]
+                for candidate in voices_candidates:
+                    if os.path.exists(candidate):
+                        voices_path = candidate
+                        break
+        
+        if not model_path or not os.path.exists(model_path):
+            raise RuntimeError(f"Kokoro model not found. Please download models to voices/kokoro/")
+        if not voices_path or not os.path.exists(voices_path):
+            raise RuntimeError(f"Kokoro voices file not found. Please download voices to voices/kokoro/")
+            
+        return KokoroProvider(model_path, voices_path)
 
     # API-based providers
     elif provider_type == "elevenlabs":
@@ -348,6 +451,7 @@ def log_voice_provider_info(provider_type: str, voice_key: str) -> str:
     """Generate a log-friendly string about the voice provider."""
     provider_display = {
         "piper": "Piper (local)",
+        "kokoro": "Kokoro (local)",
         "elevenlabs": "ElevenLabs",
         "google": "Google Cloud TTS",
         "azure": "Azure Speech",

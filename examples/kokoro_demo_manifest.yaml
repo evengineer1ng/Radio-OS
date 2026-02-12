@@ -1,0 +1,54 @@
+station_id: kokoro_demo
+title: "Kokoro TTS Demo Station"
+description: "Demonstration station showcasing Kokoro multilingual TTS"
+
+# Kokoro TTS Configuration
+audio:
+  voices_provider: kokoro
+  voices:
+    host: af_sarah           # Warm American female for main host
+    announcer: am_adam       # Clear American male for announcements
+    narrator: bf_alice       # British female for stories/narratives
+    guest: am_echo          # Distinctive male for interviews
+    news: af_bella          # Professional female for news
+    weather: am_liam        # Friendly male for weather
+    traffic: af_nova        # Energetic female for traffic
+    sports: am_michael      # Enthusiastic male for sports
+
+# Station personality and content
+personality:
+  energy_level: 0.7
+  humor_style: witty
+  music_focus: eclectic
+  target_demo: "tech-savvy adults"
+
+# Content configuration  
+content:
+  news_enabled: true
+  weather_enabled: true
+  traffic_enabled: false
+  social_enabled: true
+  
+# Example voice usage in segments
+segments:
+  - type: intro
+    voice: host
+    content: "Welcome to Radio OS with Kokoro TTS!"
+    
+  - type: news
+    voice: news 
+    content: "Here are today's headlines..."
+    
+  - type: weather
+    voice: weather
+    content: "Looking at today's forecast..."
+    
+  - type: story
+    voice: narrator
+    content: "And now for our feature story..."
+
+# Pacing and timing
+pacing:
+  segment_gap_sec: 2.0
+  voice_speed: 1.0
+  pause_between_items: 1.0

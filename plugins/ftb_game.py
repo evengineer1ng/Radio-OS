@@ -3343,6 +3343,14 @@ class SimState:
             'contracts': False,
             'finance': False
         }
+        self.audio_settings: Dict[str, float] = {
+            'master_volume': 0.8,
+            'music_volume': 0.15,
+            'voice_volume': 1.1,
+            'narrator_volume': 1.2,
+            'world_volume': 0.5,
+            'ui_volume': 0.1
+        }
         self.delegation_focus: Optional[DelegationFocus] = None  # Active delegation focus with modifiers
         self.save_mode: str = "replayable"  # "replayable" or "permanent"
         self.seed: int = 42  # RNG seed for deterministic replay
@@ -3402,6 +3410,8 @@ class SimState:
         self._development_dirty: bool = True
         self._sponsors_dirty: bool = True
         self._car_dirty: bool = True
+        self._manager_career_dirty: bool = True
+        self._audio_settings_dirty: bool = True
         
         # State database path for narrator/delegate interface
         self.state_db_path: Optional[str] = None
@@ -3432,6 +3442,10 @@ class SimState:
             self._sponsors_dirty = True
         elif domain == 'car':
             self._car_dirty = True
+        elif domain == 'manager_career':
+            self._manager_career_dirty = True
+        elif domain == 'audio_settings':
+            self._audio_settings_dirty = True
         elif domain == 'all':
             self._contracts_dirty = True
             self._stats_dirty = True
@@ -3440,12 +3454,14 @@ class SimState:
             self._development_dirty = True
             self._sponsors_dirty = True
             self._car_dirty = True
+            self._manager_career_dirty = True
+            self._audio_settings_dirty = True
     
     def is_dirty(self) -> bool:
         """Check if any domain is marked as dirty"""
         return (self._contracts_dirty or self._stats_dirty or self._team_dirty or 
                 self._finance_dirty or self._development_dirty or self._sponsors_dirty or 
-                self._car_dirty)
+                self._car_dirty or self._manager_career_dirty or self._audio_settings_dirty)
     
     def clear_dirty_flags(self):
         """Clear all dirty flags after UI refresh"""
@@ -3456,6 +3472,8 @@ class SimState:
         self._development_dirty = False
         self._sponsors_dirty = False
         self._car_dirty = False
+        self._manager_career_dirty = False
+        self._audio_settings_dirty = False
     
     def log_transaction(self, type: str, category: str, amount: float, description: str, 
                        balance_after: float, related_entity: str = None, metadata: Dict = None):
@@ -4886,6 +4904,7 @@ class SimState:
             'time_mode': self.time_mode,
             'control_mode': self.control_mode,
             'delegation_settings': self.delegation_settings,
+            'audio_settings': self.audio_settings,
             'delegation_focus': {
                 'focus_text': self.delegation_focus.focus_text,
                 'active_modifiers': self.delegation_focus.active_modifiers,
@@ -5083,6 +5102,14 @@ class SimState:
             'development': False,
             'contracts': False,
             'finance': False
+        })
+        state.audio_settings = data.get('audio_settings', {
+            'master_volume': 0.8,
+            'music_volume': 0.15,
+            'voice_volume': 1.1,
+            'narrator_volume': 1.2,
+            'world_volume': 0.5,
+            'ui_volume': 0.1
         })
         
         # Load delegation focus if present
@@ -8673,6 +8700,9 @@ class FTBSimulation:
                 # Check for pole position (from qualifying)
                 if qualifying_scores and qualifying_scores[0][0] == state.player_team:
                     state.manager_career_stats.poles += 1
+                
+                # Mark manager career as dirty to trigger UI refresh
+                state.mark_dirty('manager_career')
         
         # Apply part degradation to all participating teams (Phase 2.4)
         track_intensity = 1.0
@@ -9903,6 +9933,9 @@ class FTBSimulation:
                             })
                             break
                     break
+            
+            # Mark manager career as dirty to trigger UI refresh
+            state.mark_dirty('manager_career')
         
         # Reset global season counter
         state.races_completed_this_season = 0
@@ -15537,13 +15570,22 @@ class FTBSimulation:
         """
         events = []
         
-        # PRIMARY SAFETY CHECK: Only execute if explicitly in delegated mode
+        # CRITICAL SAFETY CHECK: Only execute if explicitly in delegated mode
+        # Check both control_mode AND time_mode to ensure delegation is truly active
         if state.control_mode != "delegated":
             return events  # Player has NOT enabled delegation - do nothing
+            
+        if state.time_mode != "auto":
+            return events  # Not in auto mode - delegation should not act
         
         # Additional safety checks
         if not state.player_team or not state.player_team.principal:
             return events  # No delegation possible without player principal
+            
+        # Ensure this is actually the PLAYER team (verify by checking if it matches the tracked player team)
+        # This prevents AI teams from accidentally acting through delegation logic
+        if state.player_team is None:
+            return events  # Safety check: no player team exists
         
         # Probabilistic decision (15% chance per tick to prevent spam)
         rng = state.get_rng("player_delegation", state.tick)
@@ -16944,6 +16986,7 @@ Start game with these settings?"""
             self.tab_analytics = self.tabview.add("Analytics")
             self.tab_sponsors = self.tabview.add("Sponsors")
             self.tab_penalties = self.tabview.add("Penalties")
+            self.tab_audio_settings = self.tabview.add("Audio Settings")  # New audio settings tab
             self.tab_history = self.tabview.add("History")  # New history tab
             
             # Build each tab
@@ -16959,6 +17002,7 @@ Start game with these settings?"""
             self._build_analytics_tab()
             self._build_sponsors_tab()
             self._build_penalties_tab()
+            self._build_audio_settings_tab()  # New audio settings tab builder
             self._build_history_tab()  # New history tab builder
         
         def _build_dashboard_tab(self):
@@ -23176,6 +23220,173 @@ Teams Managed: {len(stats.teams_managed)}"""
             self.pending_offers_container = ctk.CTkFrame(right_col, fg_color="transparent")
             self.pending_offers_container.pack(fill=tk.BOTH, expand=True)
         
+        def _build_audio_settings_tab(self):
+            """Build Audio Settings tab - Control volume levels for different audio channels"""
+            tab = self.tab_audio_settings
+            
+            # Title and description
+            header = ctk.CTkFrame(tab, fg_color=FTBTheme.CARD, corner_radius=6)
+            header.pack(fill=tk.X, padx=10, pady=(10, 5))
+            
+            ctk.CTkLabel(
+                header,
+                text="🔊 Audio Settings",
+                font=("Arial", 16, "bold"),
+                text_color=FTBTheme.TEXT
+            ).pack(padx=15, pady=(10, 5), anchor="w")
+            
+            ctk.CTkLabel(
+                header,
+                text="Adjust volume levels for different audio channels in the station",
+                font=("Arial", 11),
+                text_color=FTBTheme.TEXT_MUTED
+            ).pack(padx=15, pady=(0, 10), anchor="w")
+            
+            # Main container with scrollable frame
+            main_container = ctk.CTkScrollableFrame(
+                tab,
+                fg_color=FTBTheme.CARD,
+                corner_radius=6,
+                scrollbar_fg_color=FTBTheme.BG,
+                scrollbar_button_color=FTBTheme.ACCENT,
+                scrollbar_button_hover_color=FTBTheme.ACCENT_HOVER
+            )
+            main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            
+            # Volume sliders storage
+            self.audio_sliders = {}
+            
+            # Helper function to create a volume slider
+            def create_volume_slider(parent, label, setting_key, min_val=0.0, max_val=2.0):
+                slider_frame = ctk.CTkFrame(parent, fg_color="transparent")
+                slider_frame.pack(fill=tk.X, padx=15, pady=8)
+                
+                # Label and value display frame
+                label_frame = ctk.CTkFrame(slider_frame, fg_color="transparent")
+                label_frame.pack(fill=tk.X, pady=(0, 5))
+                label_frame.grid_columnconfigure(1, weight=1)
+                
+                # Slider label
+                ctk.CTkLabel(
+                    label_frame,
+                    text=label,
+                    font=("Arial", 12, "bold"),
+                    text_color=FTBTheme.TEXT
+                ).grid(row=0, column=0, sticky="w")
+                
+                # Value label
+                value_label = ctk.CTkLabel(
+                    label_frame,
+                    text="",
+                    font=("Arial", 10),
+                    text_color=FTBTheme.TEXT_MUTED
+                )
+                value_label.grid(row=0, column=1, sticky="e")
+                
+                # Get current value from sim state
+                current_value = 0.8
+                if self.sim_state and hasattr(self.sim_state, 'audio_settings'):
+                    current_value = self.sim_state.audio_settings.get(setting_key, 0.8)
+                
+                # Volume slider
+                def on_slider_change(value):
+                    value_label.configure(text=f"{int(value * 100)}%")
+                    if self.sim_state and hasattr(self.sim_state, 'audio_settings'):
+                        self.sim_state.audio_settings[setting_key] = value
+                        self._save_audio_settings_to_manifest()
+                        
+                slider = ctk.CTkSlider(
+                    slider_frame,
+                    from_=min_val,
+                    to=max_val,
+                    number_of_steps=200,
+                    command=on_slider_change,
+                    progress_color=FTBTheme.ACCENT,
+                    button_color=FTBTheme.ACCENT,
+                    button_hover_color=FTBTheme.ACCENT_HOVER
+                )
+                slider.set(current_value)
+                slider.pack(fill=tk.X, pady=(0, 5))
+                
+                # Update value label initially
+                on_slider_change(current_value)
+                
+                # Store slider for updates
+                self.audio_sliders[setting_key] = {
+                    'slider': slider,
+                    'label': value_label,
+                    'callback': on_slider_change
+                }
+                
+                return slider
+            
+            # Create volume sliders
+            create_volume_slider(main_container, "🎵 Master Volume", "master_volume", 0.0, 1.0)
+            create_volume_slider(main_container, "🎼 Theme Music", "music_volume", 0.0, 1.0)
+            create_volume_slider(main_container, "🎤 Voice/Narrator", "voice_volume", 0.0, 2.0)
+            create_volume_slider(main_container, "🗣️ Narrator TTS", "narrator_volume", 0.0, 2.0)
+            create_volume_slider(main_container, "🏎️ World Audio", "world_volume", 0.0, 1.0)
+            create_volume_slider(main_container, "🔔 UI Sounds", "ui_volume", 0.0, 1.0)
+            
+            # Separator
+            separator = ctk.CTkFrame(main_container, fg_color=FTBTheme.BORDER, height=1)
+            separator.pack(fill=tk.X, padx=15, pady=15)
+            
+            # Voice provider info
+            voice_info_frame = ctk.CTkFrame(main_container, fg_color="transparent")
+            voice_info_frame.pack(fill=tk.X, padx=15, pady=8)
+            
+            ctk.CTkLabel(
+                voice_info_frame,
+                text="🎙️ Voice Provider: Kokoro TTS",
+                font=("Arial", 12, "bold"),
+                text_color=FTBTheme.TEXT
+            ).pack(anchor="w")
+            
+            ctk.CTkLabel(
+                voice_info_frame,
+                text="Current voices: am_adam (host), bf_alice (Formula Z news), bm_fable (narrator)",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_MUTED
+            ).pack(anchor="w", pady=(2, 0))
+            
+            # Reset button
+            reset_frame = ctk.CTkFrame(main_container, fg_color="transparent")
+            reset_frame.pack(fill=tk.X, padx=15, pady=(10, 15))
+            
+            def reset_to_defaults():
+                """Reset all volume settings to defaults"""
+                defaults = {
+                    'master_volume': 0.8,
+                    'music_volume': 0.15,
+                    'voice_volume': 1.1,
+                    'narrator_volume': 1.2,
+                    'world_volume': 0.5,
+                    'ui_volume': 0.1
+                }
+                
+                if self.sim_state and hasattr(self.sim_state, 'audio_settings'):
+                    self.sim_state.audio_settings.update(defaults)
+                    
+                    # Update all sliders
+                    for key, components in self.audio_sliders.items():
+                        if key in defaults:
+                            components['slider'].set(defaults[key])
+                            components['callback'](defaults[key])
+                    
+                    self._save_audio_settings_to_manifest()
+            
+            ctk.CTkButton(
+                reset_frame,
+                text="🔄 Reset to Defaults",
+                command=reset_to_defaults,
+                fg_color=FTBTheme.ACCENT,
+                hover_color=FTBTheme.ACCENT_HOVER,
+                text_color="white",
+                font=("Arial", 11, "bold"),
+                height=32
+            ).pack(anchor="w")
+        
         def _build_penalties_tab(self):
             """Build Penalties tab - View penalty history and disciplinary records"""
             tab = self.tab_penalties
@@ -23364,7 +23575,14 @@ Teams Managed: {len(stats.teams_managed)}"""
         def _enable_delegation(self):
             """Enable AI delegation mode"""
             print("[FTB UI] Enabling delegation")
+            
+            # Update UI state
             self.control_mode = "delegated"
+            
+            # Sync with sim state immediately 
+            if self.sim_state:
+                self.sim_state.control_mode = "delegated"
+                self.sim_state.time_mode = "auto"
             
             # Update UI
             if hasattr(self, 'ai_mode_label'):
@@ -23389,7 +23607,21 @@ Teams Managed: {len(stats.teams_managed)}"""
         def _disable_delegation(self):
             """Disable AI delegation mode"""
             print("[FTB UI] Disabling delegation")
+            
+            # Update UI state
             self.control_mode = "human"
+            
+            # Sync with sim state immediately
+            if self.sim_state:
+                self.sim_state.control_mode = "human"
+                self.sim_state.time_mode = "paused"  # Force back to manual control
+            
+            # Update local time mode to match
+            self.time_mode = "paused"
+            
+            # Update time mode UI if it exists
+            if hasattr(self, 'time_mode_selector'):
+                self.time_mode_selector.set("Manual")
             
             # Update UI
             if hasattr(self, 'ai_mode_label'):
@@ -25125,11 +25357,12 @@ Teams Managed: {len(stats.teams_managed)}"""
                             self._refresh_team_browser()
                     except Exception as e:
                         print(f"[FTB WIDGET] Team tab refresh error: {e}")
-                elif current_tab == "Manager Career" and (tab_changed or getattr(state, '_team_dirty', False)):
-                    print(f"[FTB WIDGET] Refreshing Manager Career tab: tab_changed={tab_changed}, dirty={getattr(state, '_team_dirty', False)}")
+                elif current_tab == "Manager Career" and (tab_changed or getattr(state, '_team_dirty', False) or getattr(state, '_manager_career_dirty', False)):
+                    print(f"[FTB WIDGET] Refreshing Manager Career tab: tab_changed={tab_changed}, team_dirty={getattr(state, '_team_dirty', False)}, career_dirty={getattr(state, '_manager_career_dirty', False)}")
                     try:
                         if hasattr(self, 'manager_career_container'):
                             self._refresh_manager_career()
+                            state._manager_career_dirty = False
                     except Exception as e:
                         print(f"[FTB WIDGET] Manager Career tab refresh error: {e}")
                 elif current_tab == "Car" and (tab_changed or getattr(state, '_car_dirty', False)):
@@ -25791,6 +26024,77 @@ class FTBNarrationHelpers:
             "top3": [team for team, _ in standings],
             "leader_gap": leader_points - second_points
         }
+        
+        def _save_audio_settings_to_manifest(self):
+            """Save audio settings to the station manifest file"""
+            try:
+                import os
+                import yaml
+                from pathlib import Path
+                
+                if not self.sim_state or not hasattr(self.sim_state, 'audio_settings'):
+                    return
+                
+                # Get manifest path from runtime
+                manifest_path = None
+                if hasattr(self.runtime, 'get') and 'STATION_DIR' in self.runtime:
+                    station_dir = self.runtime.get('STATION_DIR', '')
+                    if station_dir:
+                        manifest_path = os.path.join(station_dir, 'manifest.yaml')
+                
+                if not manifest_path or not os.path.exists(manifest_path):
+                    print(f"[AUDIO] ⚠️ Cannot find manifest at {manifest_path}")
+                    return
+                
+                # Read current manifest
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    manifest = yaml.safe_load(f) or {}
+                
+                # Update audio settings
+                if 'audio' not in manifest:
+                    manifest['audio'] = {}
+                
+                if 'channel_volumes' not in manifest['audio']:
+                    manifest['audio']['channel_volumes'] = {}
+                
+                # Map our settings to manifest structure
+                settings_map = {
+                    'master_volume': ('audio', 'master_volume'),
+                    'music_volume': ('audio', 'channel_volumes', 'music'),
+                    'voice_volume': ('audio', 'channel_volumes', 'voice'),
+                    'narrator_volume': ('audio', 'channel_volumes', 'narrator'),
+                    'world_volume': ('audio', 'channel_volumes', 'world'),
+                    'ui_volume': ('audio', 'channel_volumes', 'ui')
+                }
+                
+                for key, value in self.sim_state.audio_settings.items():
+                    if key in settings_map:
+                        path = settings_map[key]
+                        if len(path) == 2:
+                            manifest[path[0]][path[1]] = value
+                        elif len(path) == 3:
+                            manifest[path[0]][path[1]][path[2]] = value
+                
+                # Write back to manifest
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+                
+                print(f"[AUDIO] ✅ Audio settings saved to manifest: {manifest_path}")
+                
+                # Emit audio settings update event to runtime
+                if hasattr(self.runtime, 'get') and 'event_q' in self.runtime:
+                    event_q = self.runtime.get('event_q')
+                    if event_q:
+                        import your_runtime
+                        event_q.put(your_runtime.StationEvent(
+                            event_type="audio_settings_update",
+                            content={
+                                'audio_settings': dict(self.sim_state.audio_settings)
+                            }
+                        ))
+                
+            except Exception as e:
+                print(f"[AUDIO] ❌ Error saving audio settings: {e}")
 
 
 # ============================================================
@@ -27134,6 +27438,11 @@ class FTBController:
                         if mode == "manual":
                             target_mode = "manual"
                             self.tick_rate = 2.0
+                            # SAFETY: If switching to manual while in delegated mode, disable delegation
+                            if self.state.control_mode == "delegated":
+                                self.state.control_mode = "human"
+                                self.delegate_next_tick_ts = None
+                                self.log("ftb", "Time mode set to manual - delegation automatically disabled")
                         elif mode == "auto_slow":
                             target_mode = "auto"
                             self.tick_rate = 2.0  # 2 seconds per tick
@@ -27164,8 +27473,9 @@ class FTBController:
                     if self.state:
                         with self.state_lock:
                             self.state.control_mode = "human"
-                        self.delegate_next_tick_ts = None
-                        self.log("ftb", "Human control restored")
+                            self.state.time_mode = "paused"  # Explicitly stop auto-ticking
+                        self.delegate_next_tick_ts = None  # Cancel any pending delegation ticks
+                        self.log("ftb", "Human control restored - delegation stopped, auto-tick disabled")
                 
                 elif cmd == "ftb_apply_focus":
                     """Apply delegation focus (focus modifiers currently disabled)"""

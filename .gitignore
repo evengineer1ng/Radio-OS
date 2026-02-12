@@ -56,6 +56,9 @@ voices/piper/
 voices/*.onnx
 voices/*.onnx.json
 
+# Kokoro TTS models (too large for git, download separately)
+voices/kokoro/
+
 # Autosave files (user-specific save data)
 **/ftb_autosave.db
 **/ftb_autosave.json

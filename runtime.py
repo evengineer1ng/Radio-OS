@@ -1870,7 +1870,7 @@ def voice_is_playable(voice_key: str) -> bool:
         audio_cfg = CFG.get("audio", {}) if isinstance(CFG.get("audio"), dict) else {}
         voice_provider_type = (audio_cfg.get("voices_provider") or "piper").strip().lower()
 
-        # For local Piper, verify file exists
+        # For local providers, verify files/setup exists
         if voice_provider_type == "piper":
             piper_bin = resolve_cfg_path((audio_cfg.get("piper_bin", "") or "").strip())
             if not piper_bin or not os.path.exists(piper_bin):
@@ -1880,14 +1880,28 @@ def voice_is_playable(voice_key: str) -> bool:
             vp = vm.get(voice_key) or vm.get("host")
             return bool(vp and os.path.exists(vp))
 
-        # For API providers, just check that the provider can be instantiated
-        # (which validates API key presence)
-        else:
-            from voice_provider import get_voice_provider
-            try:
-                _provider = get_voice_provider(CFG, audio_cfg)
-                return True
-            except Exception:
+        elif voice_provider_type == "kokoro":
+            # For Kokoro, check that models exist and provider can be instantiated
+            import os
+            voices_dir = os.environ.get("RADIO_OS_VOICES", "voices")
+            kokoro_dir = os.path.join(voices_dir, "kokoro")
+            
+            # Check for required files
+            model_exists = any(os.path.exists(os.path.join(kokoro_dir, f)) 
+                             for f in ["kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro.onnx"])
+            voices_exists = any(os.path.exists(os.path.join(kokoro_dir, f)) 
+                              for f in ["voices-v1.0.bin", "voices.bin"])
+            
+            if not (model_exists and voices_exists):
+                return False
+
+        # For API providers and Kokoro, check that the provider can be instantiated
+        # (which validates API keys or model loading)
+        from voice_provider import get_voice_provider
+        try:
+            _provider = get_voice_provider(CFG, audio_cfg)
+            return True
+        except Exception:
                 return False
 
     except Exception:
@@ -1997,10 +2011,11 @@ def speak(text: str, voice_key: str = "host"):
     merged_voice_map = dict(voice_map)
     merged_voice_map.update(audio_voices)
 
-    # For Piper (local), resolve paths; for APIs, keep IDs as-is
+    # For Piper (local), resolve paths; for APIs and Kokoro, keep IDs/names as-is
     if voice_provider_type == "piper":
         for k in merged_voice_map:
             merged_voice_map[k] = resolve_voice_path(str(merged_voice_map[k]))
+    # Kokoro uses voice names like "af_sarah", no path resolution needed
 
     with audio_lock:
 

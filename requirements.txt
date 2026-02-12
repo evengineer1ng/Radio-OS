@@ -1,0 +1,51 @@
+# Core dependencies for Radio OS
+# Install with: pip install -r requirements.txt
+
+# Audio
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0
+pygame>=2.5.0                       # Multi-channel audio mixing (music/sfx)
+
+# UI
+# tk is usually included in standard Python. On Linux: sudo apt-get install python3-tk
+Pillow>=9.0.0
+customtkinter>=5.2.0                # Modern themed UI components
+
+# Data
+pyyaml>=6.0
+requests>=2.31.0
+feedparser>=6.0.10
+
+# Mac Media Control (optional, Mac only)
+pyobjc-framework-MediaPlayer>=9.0; sys_platform == 'darwin'
+pyobjc-framework-Cocoa>=9.0; sys_platform == 'darwin'       # provides AppKit, Foundation, etc.
+
+# Windows Media Control (optional, Windows only)
+winsdk>=1.0.0b10; sys_platform == 'win32'
+
+# Visual Reader Plugin (optional, for visual content analysis)
+# Install required for ANY visual_reader use:
+mss>=1.8.0                          # Fast screen capture
+pyautogui>=0.9.53                   # Fallback screen/window capture
+opencv-python-headless>=4.8.0          # Video frame extraction (headless avoids SDL2 conflict with pygame)
+pygetwindow>=0.0.9; sys_platform == 'win32'  # Robust window enumeration (Windows)
+
+# Optional plugin dependencies (install as needed)
+pydub>=0.25.1                       # Audio manipulation/editing (requires ffmpeg)
+imageio>=2.31.0                     # Image/video I/O (video_timeline, etc.)
+SpeechRecognition>=3.10.0           # Speech-to-text (if using audio input plugins)
+matplotlib>=3.7.0                   # Visualization/plotting (analysis widgets)
+
+# Vision providers (optional, install ONE):
+openai>=1.3.0                       # For OpenAI GPT-4-Vision / GPT-4o
+anthropic>=0.7.0                    # For Anthropic Claude
+google-generativeai>=0.3.0          # For Google Gemini
+
+# Windows-only (optional, for window capture):
+pywin32>=305; sys_platform == 'win32'
+
+# Optional: ML features for From the Backmarker station (~2GB download)
+# Gracefully degrades to simpler AI if not installed
+# Install if prompted during setup, or manually: pip install torch>=2.0.0
+# torch>=2.0.0

@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+radioenv/
+venv/
+env/
+ENV/
+
+# Stations - Ship most stations, exclude algotradingfm and runtime logs
+stations/algotradingfm/
+stations - Copy/
+stations/**/runtime.log
+
+# First-run setup marker (user-specific)
+.radio_os_setup_complete
+
+# Temporary files
+*.tmp
+*.temp
+# *.wav - now committed for audio assets
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# User-specific
+test_*.py
+fix_*.py
+ollamatest.py
+
+# Large binary distributions (keep in releases, not repo)
+voices/ffmpeg-*/
+voices/piper_windows_*/
+voices/piper_macos_*/
+voices/piper_linux_*/
+# Voice models - download separately from https://huggingface.co/rhasspy/piper-voices/
+voices/*.onnx
+voices/*.onnx.json

@@ -1,0 +1,47 @@
+Radio OS - GNU General Public License v3.0
+
+Copyright (c) 2026 Evan Pena
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+SUMMARY:
+
+Radio OS and all derivatives must remain open source under GPL-3.0.
+
+You are free to:
+• Use Radio OS for any purpose (commercial, personal, research)
+• Modify Radio OS for your needs
+• Distribute modified versions
+• Run Radio OS as a hosted service
+
+With the condition that:
+• You share the source code of your modifications under GPL-3.0
+• If you distribute it, you include this license
+• If you run a modified version as a service, you must make source available
+
+This ensures Radio OS stays free and hackable forever, while respecting
+the original author's IP through copyleft.
+
+---
+
+ATTRIBUTION:
+
+Radio OS includes or depends on:
+- Piper TTS (MIT License) - https://github.com/rhasspy/piper
+- Piper Voice Models (Various CC-BY-NC) - https://huggingface.co/rhasspy/piper-voices/
+- FFmpeg (LGPL) - https://ffmpeg.org/
+
+See README.md for full attribution.

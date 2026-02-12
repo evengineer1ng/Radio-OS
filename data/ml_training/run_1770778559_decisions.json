@@ -1,0 +1,131 @@
+[
+  {
+    "decision_id": 1,
+    "tick": 1,
+    "season": 1,
+    "team_id": "ml_training_ml_training_run_177077855910",
+    "team_name": "T1_Team_000",
+    "state_vector": {
+      "budget": 125770.22683379335,
+      "budget_ratio": 1.2577022683379335,
+      "num_drivers": 0,
+      "num_engineers": 0,
+      "num_mechanics": 0,
+      "has_strategist": 0,
+      "tier": 1,
+      "championship_position": 99,
+      "morale": 50.0,
+      "reputation": 50.0
+    },
+    "action_chosen": {
+      "name": "hire_engineer",
+      "cost": 30000.0,
+      "target": null
+    },
+    "action_scores": {
+      "hire_driver": 62.17354949454123,
+      "hire_engineer": 93.04011033128397,
+      "develop_car": 20.305234190615916
+    },
+    "principal_stats": {
+      "financial_discipline": 47.736149210526314,
+      "budget_forecasting_accuracy": 70.7352138368421,
+      "talent_evaluation_accuracy": 47.736149210526314,
+      "risk_tolerance": 47.736149210526314,
+      "patience": 47.736149210526314,
+      "ruthlessness": 47.736149210526314,
+      "aggression": 47.736149210526314,
+      "long_term_orientation": 47.736149210526314
+    },
+    "budget_before": 125770.22683379335,
+    "budget_after": 125770.22683379335,
+    "championship_position": 99,
+    "created_ts": 1770778559.5420866
+  },
+  {
+    "decision_id": 2,
+    "tick": 1,
+    "season": 1,
+    "team_id": "ml_training_ml_training_run_1770778559133",
+    "team_name": "T1_Team_033",
+    "state_vector": {
+      "budget": 181122.1665151512,
+      "budget_ratio": 1.811221665151512,
+      "num_drivers": 0,
+      "num_engineers": 0,
+      "num_mechanics": 0,
+      "has_strategist": 0,
+      "tier": 1,
+      "championship_position": 99,
+      "morale": 50.0,
+      "reputation": 50.0
+    },
+    "action_chosen": {
+      "name": "hire_engineer",
+      "cost": 30000.0,
+      "target": null
+    },
+    "action_scores": {
+      "hire_driver": 70.08798964130784,
+      "hire_engineer": 91.38513138842868,
+      "develop_car": 38.42778245799633
+    },
+    "principal_stats": {
+      "financial_discipline": 85.73877298947369,
+      "budget_forecasting_accuracy": 47.740320789473685,
+      "talent_evaluation_accuracy": 47.740320789473685,
+      "risk_tolerance": 24.741257615789475,
+      "patience": 72.7393025,
+      "ruthlessness": 47.740320789473685,
+      "aggression": 47.740320789473685,
+      "long_term_orientation": 47.740320789473685
+    },
+    "budget_before": 181122.1665151512,
+    "budget_after": 181122.1665151512,
+    "championship_position": 99,
+    "created_ts": 1770778559.5508676
+  },
+  {
+    "decision_id": 3,
+    "tick": 1,
+    "season": 1,
+    "team_id": "ml_training_ml_training_run_177077855932",
+    "team_name": "T3_Team_002",
+    "state_vector": {
+      "budget": 402235.8020249086,
+      "budget_ratio": 4.022358020249086,
+      "num_drivers": 0,
+      "num_engineers": 0,
+      "num_mechanics": 0,
+      "has_strategist": 0,
+      "tier": 3,
+      "championship_position": 99,
+      "morale": 50.0,
+      "reputation": 50.0
+    },
+    "action_chosen": {
+      "name": "hire_engineer",
+      "cost": 30000.0,
+      "target": null
+    },
+    "action_scores": {
+      "hire_driver": 81.78631339473684,
+      "hire_engineer": 96.74722438157895,
+      "develop_car": 53.402918817981224
+    },
+    "principal_stats": {
+      "financial_discipline": 85.69552855263157,
+      "budget_forecasting_accuracy": 48.69703289473684,
+      "talent_evaluation_accuracy": 48.69703289473684,
+      "risk_tolerance": 25.697968026315788,
+      "patience": 68.6962197368421,
+      "ruthlessness": 48.69703289473684,
+      "aggression": 48.69703289473684,
+      "long_term_orientation": 48.69703289473684
+    },
+    "budget_before": 402235.8020249086,
+    "budget_after": 402235.8020249086,
+    "championship_position": 99,
+    "created_ts": 1770778559.5571856
+  }
+]

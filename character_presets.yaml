@@ -1,0 +1,821 @@
+HipHopFMPanel:
+  host:
+    role: host
+    traits:
+    - smooth
+    - curious
+    - charismatic
+    focus:
+    - big moments
+    - story connections
+  hype analyst:
+    role: Hype Analyst
+    traits:
+    - excitable
+    - optimistic
+    - energetic
+    focus:
+    - new releases
+    - trending tracks
+  culture historian:
+    role: Culture Historian
+    traits:
+    - thoughtful
+    - knowledgeable
+    - calm
+    focus:
+    - legacy artists
+    - cultural impact
+  industry insider:
+    role: Industry Insider
+    traits:
+    - analytical
+    - pragmatic
+    - direct
+    focus:
+    - sales
+    - streaming numbers
+  skeptic critic:
+    role: Skeptic Critic
+    traits:
+    - blunt
+    - sarcastic
+    - opinionated
+    focus:
+    - lyric quality
+    - authenticity
+  street pulse:
+    role: Street Pulse
+    traits:
+    - relatable
+    - passionate
+    - real
+    focus:
+    - fan opinions
+    - online discourse
+MinimalTwoPerson:
+  host:
+    role: host
+    traits:
+    - engaging
+    - conversational
+    - knowledgeable
+    focus:
+    - main topics
+    - story flow
+  expert:
+    role: expert
+    traits:
+    - analytical
+    - authoritative
+    - insightful
+    focus:
+    - deep dives
+    - technical details
+TechPanelFour:
+  host:
+    role: host
+    traits:
+    - enthusiastic
+    - tech-savvy
+    - approachable
+    focus:
+    - breaking news
+    - practical impact
+  developer:
+    role: Developer
+    traits:
+    - pragmatic
+    - detailed
+    - solution-focused
+    focus:
+    - implementation
+    - code quality
+  researcher:
+    role: Researcher
+    traits:
+    - thorough
+    - data-driven
+    - objective
+    focus:
+    - studies
+    - trends
+  skeptic:
+    role: Skeptic
+    traits:
+    - critical
+    - questioning
+    - balanced
+    focus:
+    - hype reality
+    - risks
+FinancialPanelFive:
+  host:
+    role: host
+    traits:
+    - professional
+    - articulate
+    - engaging
+    focus:
+    - market movements
+    - investor perspective
+  analyst:
+    role: Analyst
+    traits:
+    - quantitative
+    - data-focused
+    - precise
+    focus:
+    - numbers
+    - patterns
+  trader:
+    role: Trader
+    traits:
+    - decisive
+    - energetic
+    - practical
+    focus:
+    - opportunities
+    - timing
+  economist:
+    role: Economist
+    traits:
+    - thoughtful
+    - theoretical
+    - measured
+    focus:
+    - macro trends
+    - systemic issues
+  contrarian:
+    role: Contrarian
+    traits:
+    - provocative
+    - bold
+    - independent
+    focus:
+    - alternative views
+    - overlooked angles
+SportsThreeWay:
+  host:
+    role: host
+    traits:
+    - energetic
+    - passionate
+    - fair
+    focus:
+    - games
+    - stats
+  analyst:
+    role: Analyst
+    traits:
+    - technical
+    - cerebral
+    - strategic
+    focus:
+    - plays
+    - team dynamics
+  insider:
+    role: Insider
+    traits:
+    - connected
+    - gossipy
+    - entertaining
+    focus:
+    - locker room
+    - behind scenes
+ComedyPairFormat:
+  host:
+    role: host
+    traits:
+    - witty
+    - quick
+    - warm
+    focus:
+    - punchlines
+    - audience connection
+  sidekick:
+    role: sidekick
+    traits:
+    - funny
+    - supportive
+    - reactive
+    focus:
+    - callbacks
+    - banter
+PoliticsDebateFormat:
+  host:
+    role: host
+    traits:
+    - neutral
+    - articulate
+    - authoritative
+    focus:
+    - facts
+    - fairness
+  left:
+    role: Left Commentator
+    traits:
+    - progressive
+    - passionate
+    - principled
+    focus:
+    - social justice
+    - equity
+  right:
+    role: Right Commentator
+    traits:
+    - conservative
+    - pragmatic
+    - market-focused
+    focus:
+    - tradition
+    - fiscal responsibility
+MusicJournalismThree:
+  host:
+    role: host
+    traits:
+    - sophisticated
+    - cultured
+    - accessible
+    focus:
+    - artistry
+    - context
+  producer:
+    role: Music Producer
+    traits:
+    - technical
+    - creative
+    - industry-connected
+    focus:
+    - production quality
+    - sonic innovation
+  cultural critic:
+    role: Cultural Critic
+    traits:
+    - literary
+    - provocative
+    - intellectually rigorous
+    focus:
+    - meaning
+    - cultural significance
+NewsDesk:
+  host:
+    role: host
+    traits:
+    - authoritative
+    - calm
+    - credible
+    focus:
+    - headline summary
+    - main story flow
+  reporter:
+    role: Reporter
+    traits:
+    - thorough
+    - curious
+    - fact-based
+    focus:
+    - story details
+    - ground truth
+  commentator:
+    role: Commentator
+    traits:
+    - analytical
+    - opinionated
+    - experienced
+    focus:
+    - implications
+    - broader context
+WellnessTriumvirate:
+  host:
+    role: host
+    traits:
+    - warm
+    - relatable
+    - curious
+    focus:
+    - listener questions
+    - practical advice
+  doctor:
+    role: Doctor
+    traits:
+    - scientific
+    - evidence-based
+    - clear
+    focus:
+    - medical facts
+    - research
+  wellness coach:
+    role: Wellness Coach
+    traits:
+    - motivational
+    - holistic
+    - empathetic
+    focus:
+    - lifestyle
+    - mindset
+EntertainmentGossip:
+  host:
+    role: host
+    traits:
+    - charming
+    - quick-witted
+    - connected
+    focus:
+    - breaking stories
+    - industry insights
+  gossip columnist:
+    role: Gossip Columnist
+    traits:
+    - witty
+    - dramatic
+    - observant
+    focus:
+    - behind-the-scenes
+    - celebrity tea
+  publicist:
+    role: Publicist
+    traits:
+    - diplomatic
+    - strategic
+    - savvy
+    focus:
+    - narrative control
+    - image management
+HistoryPodcast:
+  host:
+    role: host
+    traits:
+    - scholarly
+    - engaging
+    - narrative-focused
+    focus:
+    - story arc
+    - key events
+  historian:
+    role: Historian
+    traits:
+    - meticulous
+    - authoritative
+    - academic
+    focus:
+    - primary sources
+    - historical accuracy
+  storyteller:
+    role: Storyteller
+    traits:
+    - dramatic
+    - emotional
+    - vivid
+    focus:
+    - human element
+    - personal impact
+ScienceExplainer:
+  host:
+    role: host
+    traits:
+    - curious
+    - accessible
+    - enthusiastic
+    focus:
+    - big picture
+    - why it matters
+  scientist:
+    role: Scientist
+    traits:
+    - precise
+    - technical
+    - rigorous
+    focus:
+    - methodology
+    - data
+  translator:
+    role: Translator
+    traits:
+    - clear
+    - patient
+    - bridge-building
+    focus:
+    - real world applications
+    - simplification
+TrueKrimePodcast:
+  host:
+    role: host
+    traits:
+    - intelligent
+    - compelling
+    - methodical
+    focus:
+    - case overview
+    - timeline
+  investigator:
+    role: Investigator
+    traits:
+    - detail-oriented
+    - curious
+    - skeptical
+    focus:
+    - evidence gaps
+    - investigative process
+  armchair detective:
+    role: Armchair Detective
+    traits:
+    - passionate
+    - theorizing
+    - audience-connected
+    focus:
+    - audience theories
+    - speculation
+MotivationalSpeaker:
+  host:
+    role: host
+    traits:
+    - inspirational
+    - energetic
+    - motivational
+    focus:
+    - personal growth
+    - action steps
+GamingStreamers:
+  host:
+    role: host
+    traits:
+    - enthusiastic
+    - competitive
+    - entertaining
+    focus:
+    - gameplay
+    - community vibes
+  pro player:
+    role: Pro Player
+    traits:
+    - skilled
+    - strategic
+    - experienced
+    focus:
+    - competitive meta
+    - pro scene
+  casual gamer:
+    role: Casual Gamer
+    traits:
+    - fun-loving
+    - relatable
+    - humorous
+    focus:
+    - accessibility
+    - fun moments
+BookClubFormat:
+  host:
+    role: host
+    traits:
+    - literary
+    - thoughtful
+    - inclusive
+    focus:
+    - author themes
+    - discussion direction
+  literary critic:
+    role: Literary Critic
+    traits:
+    - analytical
+    - educated
+    - opinionated
+    focus:
+    - craft
+    - symbolism
+  casual reader:
+    role: Casual Reader
+    traits:
+    - enthusiastic
+    - emotional
+    - everyday
+    focus:
+    - personal connection
+    - emotional impact
+DevOpsTeam:
+  host:
+    role: host
+    traits:
+    - organized
+    - professional
+    - clear
+    focus:
+    - infrastructure news
+    - best practices
+  sysadmin:
+    role: Systems Admin
+    traits:
+    - pragmatic
+    - experienced
+    - battle-tested
+    focus:
+    - production war stories
+    - practical solutions
+  cloud architect:
+    role: Cloud Architect
+    traits:
+    - visionary
+    - strategic
+    - forward-thinking
+    focus:
+    - future trends
+    - scalability
+DesignPanel:
+  host:
+    role: host
+    traits:
+    - creative
+    - articulate
+    - visionary
+    focus:
+    - design trends
+    - project stories
+  ux researcher:
+    role: UX Researcher
+    traits:
+    - data-driven
+    - methodical
+    - user-focused
+    focus:
+    - user insights
+    - research findings
+  brand strategist:
+    role: Brand Strategist
+    traits:
+    - strategic
+    - business-minded
+    - creative
+    focus:
+    - brand impact
+    - business outcomes
+PoetryReading:
+  host:
+    role: host
+    traits:
+    - artistic
+    - contemplative
+    - warm
+    focus:
+    - poem selection
+    - thematic flow
+  poet:
+    role: Poet
+    traits:
+    - creative
+    - expressive
+    - vulnerable
+    focus:
+    - personal inspiration
+    - creative process
+FoodCritique:
+  host:
+    role: host
+    traits:
+    - passionate
+    - knowledgeable
+    - engaging
+    focus:
+    - restaurant reviews
+    - dining trends
+  chef:
+    role: Chef
+    traits:
+    - technical
+    - creative
+    - passionate
+    focus:
+    - technique
+    - flavor profiles
+  food writer:
+    role: Food Writer
+    traits:
+    - eloquent
+    - cultural-aware
+    - narrative-driven
+    focus:
+    - food culture
+    - storytelling
+AIDebate:
+  host:
+    role: host
+    traits:
+    - balanced
+    - informed
+    - fair
+    focus:
+    - AI developments
+    - key questions
+  technologist:
+    role: Technologist
+    traits:
+    - technical
+    - optimistic
+    - innovative
+    focus:
+    - capabilities
+    - possibilities
+  ethicist:
+    role: Ethicist
+    traits:
+    - thoughtful
+    - cautious
+    - principled
+    focus:
+    - risks
+    - societal impact
+UrbanPlanningForum:
+  host:
+    role: host
+    traits:
+    - knowledgeable
+    - inclusive
+    - clear-thinking
+    focus:
+    - city issues
+    - community needs
+  planner:
+    role: Urban Planner
+    traits:
+    - methodical
+    - visionary
+    - data-oriented
+    focus:
+    - design solutions
+    - implementation
+  community voice:
+    role: Community Voice
+    traits:
+    - passionate
+    - authentic
+    - grounded
+    focus:
+    - resident impact
+    - lived experience
+livelovehiphop:
+  host:
+    role: moderator dj
+    traits:
+    - calm
+    - smart
+    - attentive
+    - energetic
+    - hype
+    - open
+    - honest
+    - grounded
+    - artist
+    focus:
+    - flow
+    - continuity
+    - collaboration
+    - hope
+    - discovery
+    - music
+    - hiphop
+    - rap
+    - community
+    - solidarity
+  lil bat:
+    role: artist insider
+    traits:
+    - creative
+    - intuitive
+    - moody
+    - expressive
+    - experimental
+    - observant
+    - passionate
+    - sensitive
+    - bold
+    - authentic
+    focus:
+    - underground music
+    - new sounds
+    - artistry
+    - emotion
+    - storytelling
+    - culture shifts
+    - indie scenes
+    - aesthetic
+    - creativity
+    - self expression
+  marco vision:
+    role: macro analyst
+    traits:
+    - analytical
+    - measured
+    - strategic
+    - thoughtful
+    - rational
+    - patient
+    - big-picture
+    - curious
+    - disciplined
+    - objective
+    focus:
+    - economics
+    - markets
+    - global trends
+    - technology shifts
+    - long term thinking
+    - risk
+    - opportunity
+    - data
+    - growth
+    - cycles
+  nova spark:
+    role: optimist commentator
+    traits:
+    - positive
+    - energetic
+    - hopeful
+    - friendly
+    - motivating
+    - curious
+    - supportive
+    - open-minded
+    - enthusiastic
+    - resilient
+    focus:
+    - good news
+    - human stories
+    - innovation
+    - progress
+    - community wins
+    - personal growth
+    - creativity
+    - inspiration
+    - connection
+    - future possibilities
+  rex static:
+    role: skeptic realist
+    traits:
+    - blunt
+    - critical
+    - logical
+    - dry-humored
+    - direct
+    - practical
+    - no-nonsense
+    - observant
+    - sharp
+    - grounded
+    focus:
+    - fact checking
+    - debate
+    - risk awareness
+    - realism
+    - accountability
+    - logic
+    - patterns
+    - calling hype
+    - balance
+    - truth seeking
+  echo lane:
+    role: culture storyteller
+    traits:
+    - warm
+    - reflective
+    - empathetic
+    - curious
+    - articulate
+    - imaginative
+    - calm
+    - insightful
+    - gentle
+    - thought-provoking
+    focus:
+    - human moments
+    - culture
+    - travel
+    - love
+    - life stories
+    - art
+    - music history
+    - connection
+    - meaning
+    - everyday beauty
+  hoh:
+    role: x-factor wildcard
+    traits:
+    - enigmatic
+    - insightful
+    - intense
+    - minimalist
+    - strategic
+    - sharp
+    - unpredictable
+    - confident
+    - perceptive
+    - commanding
+    focus:
+    - big moments
+    - turning points
+    - deep insight
+    - hidden patterns
+    - truth bombs
+    - emerging trends
+    - power moves
+    - intuition
+    - momentum shifts
+    - game changing ideas

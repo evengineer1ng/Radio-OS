@@ -1,0 +1,275 @@
+station:
+  name: evenrac1ngFM
+  host: Kai
+  category: This tracks
+  logo: logos/evenrac1ngfm.png
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: qwen3:8b
+  host: llama3.1:8b
+  navigator: deepseek-r1:8b
+  embedding: nomic-embed-text:v1.5
+embedding:
+  enabled: true
+scheduler:
+  source_quotas:
+    visual_reader: 3
+    reddit: 6
+    rss: 1
+    ftb_game: 3
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+riff:
+  tag_catalog:
+  - execution
+  - risk
+  - performance
+  - psychology
+  - trends
+  - strategy
+  - news
+  shapes:
+  - connect_two
+  - myth_bust
+  - failure_mode
+  - tradeoff
+  - tease_next
+pacing:
+  idle_riff_sec: 20
+  between_segments_sec: 2
+  queue_target_depth: 16
+  queue_max_depth: 40
+  producer_tick_sec: 30
+  audio_target_depth: 8
+  audio_max_depth: 10
+  audio_tick_sleep: 0.05
+producer:
+  target_depth: 8
+  max_depth: 20
+  tick_sec: 12
+  max_tokens: 320
+  temperature: 0.35
+  per_source_cap: 2
+  source_limits:
+    rss:
+      max_share: 0.2
+      max_abs: 4
+    reddit:
+      max_share: 0.45
+      max_abs: 10
+    markets:
+      max_share: 0.4
+      max_abs: 8
+    portfolio_event:
+      max_share: 0.35
+      max_abs: 6
+    bluesky:
+      max_share: 0.3
+      max_abs: 6
+    document:
+      max_share: 0.25
+      max_abs: 4
+host:
+  max_comments: 4
+  between_segments_sec: 2
+  idle_riff_sec: 23
+  station_id_sec: 240
+  max_tokens: 420
+  temperature: 0.6
+tts:
+  spam_break_priority: 96
+  min_gap_sec: 6
+  deprioritize_penalty: 15
+audio:
+  piper_bin: "{PIPER_BIN_PATH}"
+voices:
+  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
+  skeptic: "{VOICES_DIR}/en_GB-alan-medium.onnx"
+  engineer: ''
+  macro: ''
+  optimist: "{VOICES_DIR}/en_US-danny-low.onnx"
+  coach: ''
+  expert: "{VOICES_DIR}/en_GB-alba-medium.onnx"
+  storyteller: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
+feeds:
+  visual_reader:
+    enabled: true
+  bluesky:
+    enabled: false
+    hashtags:
+    - crypto
+    - bitcoin
+    - trading
+    poll_sec: 60
+    limit: 20
+    priority: 70
+    identifier: ''
+    password: ''
+    burst_delay: 0.25
+  document:
+    enabled: false
+    files:
+    - name: strategy
+      path: ./strategy_reference.txt
+      max_chars: 5000
+      announce: true
+      announce_priority: 86
+      candidate: false
+    - name: playbook
+      path: ./coach_playbook.txt
+      max_chars: 7000
+      announce: false
+      candidate: true
+      candidate_priority: 80
+    poll_sec: 2.5
+    announce_cooldown_sec: 600
+  google_alerts:
+    enabled: false
+  markets:
+    enabled: false
+    symbols:
+    - BTCUSDT
+    - ETHUSDT
+    poll_sec: 15
+    breakout_pct: 0.2
+    priority: 90
+  flows:
+    enabled: false
+    reaction_frequency: 0.2
+    min_reaction_gap_sec: 20
+  portfolio:
+    enabled: false
+  reddit:
+    enabled: true
+    subreddits:
+    - simracing
+    - iracing
+    - simracingstewards
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.2
+    seen_ttl_sec: 3600
+  rss:
+    enabled: true
+    urls:
+    - https://news.google.com/rss/search?q=sim+racing
+    - https://news.google.com/rss/search?q=iRacing
+    - https://news.google.com/rss/search?q=formula+racing
+    - https://news.google.com/rss/search?q=esports+motorsport
+    - https://news.google.com/rss/search?q=sim+racing+league
+    poll_sec: 180
+    priority: 72
+  facebook:
+    enabled: false
+    access_token: ''
+    page_id: ''
+    keywords: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  futuresight:
+    enabled: false
+    poll_sec: 0.25
+    vision_provider: ollama
+    vision_model: llava:latest
+    vision_endpoint: http://localhost:11434
+    vision_api_key: ''
+    vision_prompt: Describe what is happening in this video frame as if you are a
+      commentator watching a live feed. Focus on the action, the people, and the atmosphere.
+      Keep it immediate and descriptive.
+  instagram:
+    enabled: false
+    access_token: ''
+    hashtags: []
+    poll_sec: 120
+    limit: 15
+    priority: 70.0
+  music_breaks:
+    enabled: false
+    break_duration_min: 20
+    break_duration_max: 150
+    break_duration_random: true
+    flow_songs_min: 1
+    flow_songs_max: 3
+    flow_songs_random: true
+  tiktok:
+    enabled: false
+    api_key: ''
+    api_secret: ''
+    hashtags: []
+    poll_sec: 180
+    limit: 10
+    priority: 72.0
+  twitter:
+    enabled: false
+    bearer_token: ''
+    hashtags: []
+    poll_sec: 90
+    limit: 20
+    priority: 75.0
+  ftb_game:
+    enabled: true
+    tick_rate_sec: 2.0
+    audio_narration: continuous
+  meta_from_the_backmarker:
+    enabled: false
+  meta_radio_station:
+    enabled: false
+  ftb_components:
+    enabled: false
+  ftb_names:
+    enabled: false
+  ftb_narrator:
+    enabled: false
+  ftb_state_db:
+    enabled: false
+characters:
+  host:
+    role: moderator
+    traits:
+    - calm
+    - smart
+    focus:
+    - flow
+    - continuity
+  expert:
+    role: technical_voice
+    traits:
+    - precise
+    - knowledgeable
+    focus:
+    - details
+    - accuracy
+  skeptic:
+    role: critical_voice
+    traits:
+    - cautious
+    - blunt
+    focus:
+    - risk
+    - downsides
+  optimist:
+    role: positive_voice
+    traits:
+    - energetic
+    - hopeful
+    focus:
+    - opportunity
+    - strengths
+  storyteller:
+    role: narrative_voice
+    traits:
+    - creative
+    - engaging
+    focus:
+    - examples
+    - analogies
+mix:
+  weights:
+    visual_reader: 0.22
+    reddit: 0.73
+    rss: 0.05
+    ftb_game: 0.0

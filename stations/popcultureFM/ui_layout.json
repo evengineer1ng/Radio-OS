@@ -1,0 +1,44 @@
+{
+  "panes": {
+    "left": {
+      "tabs": [
+        {
+          "widget_key": "radio_dial",
+          "title": "Radio • Dial"
+        },
+        {
+          "widget_key": "segment_meta",
+          "title": "Station • Meta"
+        },
+        {
+          "widget_key": "radio_dial",
+          "title": "Radio • Dial"
+        }
+      ]
+    },
+    "center": {
+      "tabs": [
+        {
+          "widget_key": "segment_body",
+          "title": "Now Playing"
+        },
+        {
+          "widget_key": "mix_rebalance",
+          "title": "Producer Feed Queue Rebalance"
+        }
+      ]
+    },
+    "right": {
+      "tabs": [
+        {
+          "widget_key": "rss_now_playing",
+          "title": "RSS • Feed"
+        },
+        {
+          "widget_key": "reddit_now_playing",
+          "title": "Reddit • Now Playing"
+        }
+      ]
+    }
+  }
+}

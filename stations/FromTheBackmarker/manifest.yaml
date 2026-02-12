@@ -244,6 +244,26 @@ characters:
     focus:
     - flow
     - continuity
+  narrator:
+    role: commentary
+    traits:
+    - observant
+    - analytical
+    - dramatic
+    focus:
+    - race_events
+    - team_performance
+    - strategic_decisions
+  formula_z_news_anchor:
+    role: news_anchor
+    traits:
+    - professional
+    - authoritative
+    - informative
+    focus:
+    - championship_standings
+    - major_developments
+    - world_context
 mix:
   weights:
     document: 0.030769230769230767

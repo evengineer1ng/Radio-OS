@@ -2158,7 +2158,8 @@ Reply with ONLY the news update text."""
                 model=self.model_name,
                 prompt=prompt,
                 max_tokens=150,
-                temperature=0.75  # Slightly lower to stay grounded in facts
+                temperature=0.75,  # Slightly lower to stay grounded in facts
+                timeout=30  # Increased timeout for 8B models
             )
             
             # Extract text

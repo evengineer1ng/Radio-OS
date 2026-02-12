@@ -643,16 +643,16 @@ class FTBAudioEngine:
 _audio_engine: Optional[FTBAudioEngine] = None
 
 
-def feed_worker(stop_event, mem: Dict[str, Any], payload: Dict[str, Any], runtime: Dict[str, Any]) -> None:
+def feed_worker(stop_event, mem: Dict[str, Any], cfg: Dict[str, Any], runtime: Dict[str, Any] = None) -> None:
     """
     Audio engine worker (runs as background thread manager).
     Subscribes to event_q and routes audio events.
     """
     global _audio_engine
     
-    log = runtime.get('log', print)
-    event_q = runtime.get('event_q')
-    ui_cmd_q = runtime.get('ui_cmd_q')
+    log = runtime.get('log', print) if runtime else print
+    event_q = runtime.get('event_q') if runtime else None
+    ui_cmd_q = runtime.get('ui_cmd_q') if runtime else None
     
     if not HAS_PYGAME:
         log("[ftb_audio_engine] pygame not available, skipping audio engine")

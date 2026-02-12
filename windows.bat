@@ -30,7 +30,7 @@ echo.
 echo Welcome to Radio OS! This setup will:
 echo   1. Install Python dependencies
 echo   2. Download Ollama AI models (optional, ~8-12GB)
-echo   3. Download Piper TTS + voice models (optional, ~200-400MB)
+echo   3. Download Piper TTS + voice models (optional, ~100-400MB)
 echo   4. Install PyTorch for ML features (optional, ~2GB)
 echo.
 echo Total setup may take 15-45 minutes depending on your connection.
@@ -210,8 +210,9 @@ echo ========================================
 echo.
 echo Piper is free text-to-speech software. Radio OS uses it to
 echo generate voice audio for station hosts and characters.
+echo Our enhanced setup provides an interactive voice selection menu.
 echo.
-echo Download size: ~200-400MB
+echo Download size: ~20-400MB depending on voice selection
 echo.
 echo Alternative: Skip this and configure ElevenLabs or other
 echo TTS APIs manually later (see README.md).
@@ -230,62 +231,39 @@ if /i "%INSTALL_PIPER%"=="Y" (
 
 :install_piper
 echo.
-echo [*] Downloading Piper TTS binary (~50MB)...
-echo [*] This should take 1-2 minutes
-set PIPER_ZIP=%TEMP%\piper_windows.zip
-set PIPER_URL=https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_windows_amd64.zip
+echo [*] Running enhanced Piper TTS setup...
+echo [*] This will download Piper 2023.11.14-2 + voice models with interactive selection
+echo.
 
-REM Download with progress indication
-powershell -Command "Write-Host '  Downloading from GitHub...' -ForegroundColor Cyan; try { $webClient = New-Object System.Net.WebClient; Register-ObjectEvent -InputObject $webClient -EventName DownloadProgressChanged -SourceIdentifier WebClient.PiperProgress -Action { $Global:piperData = $EventArgs; Write-Progress -Activity 'Downloading Piper TTS' -Status ('{0:N2} MB / {1:N2} MB' -f ($Global:piperData.BytesReceived / 1MB), ($Global:piperData.TotalBytesToReceive / 1MB)) -PercentComplete $Global:piperData.ProgressPercentage } | Out-Null; Register-ObjectEvent -InputObject $webClient -EventName DownloadFileCompleted -SourceIdentifier WebClient.PiperComplete -Action { Write-Progress -Activity 'Downloading Piper TTS' -Completed } | Out-Null; $webClient.DownloadFileAsync('%PIPER_URL%', '%PIPER_ZIP%'); while ($webClient.IsBusy) { Start-Sleep -Milliseconds 100 }; Unregister-Event -SourceIdentifier WebClient.PiperProgress; Unregister-Event -SourceIdentifier WebClient.PiperComplete; $webClient.Dispose(); Write-Host '  [+] Download complete' -ForegroundColor Green } catch { Write-Host '  [!] Download failed: ' $_.Exception.Message -ForegroundColor Red; exit 1 }"
+REM Run the enhanced Python setup script
+python setup.py
 if errorlevel 1 (
-    echo [!] Failed to download Piper
+    echo [!] Failed to run enhanced Piper setup
+    echo [!] Falling back to manual configuration...
     goto :skip_piper
 )
 
-echo [+] Download complete
-echo [*] Extracting Piper...
-
-if not exist "voices\" mkdir voices
-powershell -Command "& {Expand-Archive -Path '%PIPER_ZIP%' -DestinationPath 'voices\' -Force}"
-if errorlevel 1 (
-    echo [!] Failed to extract Piper
-    del "%PIPER_ZIP%" 2>nul
-    goto :skip_piper
-)
-
-del "%PIPER_ZIP%" 2>nul
-echo [+] Piper installed to voices\piper_windows_amd64\
+echo.
+echo [+] Enhanced Piper setup completed successfully
 echo.
 
-REM Download voice models
-echo [*] Downloading voice models (~200MB, may take 5-10 minutes)...
-echo [*] Voices: lessac, alba, danny, amy, hfc_female, southern_english_female, alan
-echo.
-
-REM Helper function for downloading voices
-call :download_voice en_US-lessac-high
-call :download_voice en_GB-alba-medium
-call :download_voice en_US-danny-low
-call :download_voice en_US-amy-medium
-call :download_voice en_US-hfc_female-medium
-call :download_voice en_GB-southern_english_female-low
-call :download_voice en_GB-alan-medium
-
-echo.
-echo [+] Voice models downloaded successfully
-echo.
-
-REM Inject paths into station manifests
-echo [*] Configuring station manifests...
-set PIPER_BIN=%SCRIPT_DIR%voices\piper_windows_amd64\piper\piper.exe
+REM Set up environment variables for the session
+echo [*] Configuring environment variables...
+set PIPER_BIN=%SCRIPT_DIR%voices\piper\piper.exe
 set VOICES_DIR=%SCRIPT_DIR%voices
 
-python tools\inject_manifest_paths.py --piper-bin "%PIPER_BIN%" --voices-dir "%VOICES_DIR%"
-if errorlevel 1 (
-    echo [!] Warning: Manifest path injection failed
-    echo [!] You may need to manually configure voice paths
+REM Inject paths into station manifests if tools are available
+if exist "tools\inject_manifest_paths.py" (
+    echo [*] Configuring station manifests...
+    python tools\inject_manifest_paths.py --piper-bin "%PIPER_BIN%" --voices-dir "%VOICES_DIR%"
+    if errorlevel 1 (
+        echo [!] Warning: Manifest path injection failed
+        echo [!] You may need to manually configure voice paths
+    ) else (
+        echo [+] Station manifests configured
+    )
 ) else (
-    echo [+] Station manifests configured
+    echo [*] Manual setup: Set PIPER_BIN=%PIPER_BIN% in your station manifests
 )
 
 :skip_piper
@@ -435,15 +413,4 @@ REM ========================================
 REM HELPER FUNCTIONS
 REM ========================================
 
-REM Download a Piper voice model
-:download_voice
-set VOICE_NAME=%1
-set BASE_URL=https://huggingface.co/rhasspy/piper-voices/resolve/main
-echo   [*] Downloading %VOICE_NAME%... (this may take 30-60 seconds)
-powershell -Command "try { Write-Host '      - Downloading model file...' -ForegroundColor Gray; $webClient = New-Object System.Net.WebClient; Register-ObjectEvent -InputObject $webClient -EventName DownloadProgressChanged -SourceIdentifier WebClient.VoiceProgress -Action { $Global:voiceData = $EventArgs; Write-Progress -Activity 'Voice: %VOICE_NAME%' -Status ('{0:N2} MB / {1:N2} MB' -f ($Global:voiceData.BytesReceived / 1MB), ($Global:voiceData.TotalBytesToReceive / 1MB)) -PercentComplete $Global:voiceData.ProgressPercentage } | Out-Null; Register-ObjectEvent -InputObject $webClient -EventName DownloadFileCompleted -SourceIdentifier WebClient.VoiceComplete -Action { Write-Progress -Activity 'Voice: %VOICE_NAME%' -Completed } | Out-Null; $webClient.DownloadFileAsync('%BASE_URL%/%VOICE_NAME%.onnx', 'voices\%VOICE_NAME%.onnx'); while ($webClient.IsBusy) { Start-Sleep -Milliseconds 100 }; Unregister-Event -SourceIdentifier WebClient.VoiceProgress; Unregister-Event -SourceIdentifier WebClient.VoiceComplete; $webClient.Dispose(); Write-Host '      - Downloading config file...' -ForegroundColor Gray; Invoke-WebRequest -Uri '%BASE_URL%/%VOICE_NAME%.onnx.json' -OutFile 'voices\%VOICE_NAME%.onnx.json' -UseBasicParsing; exit 0 } catch { exit 1 }"
-if errorlevel 1 (
-    echo   [!] Warning: Could not download %VOICE_NAME%
-) else (
-    echo   [+] %VOICE_NAME% downloaded
-)
-goto :eof
+REM Helper functions removed - now using enhanced setup.py

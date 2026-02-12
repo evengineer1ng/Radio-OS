@@ -76,7 +76,7 @@ echo ""
 echo "Welcome to Radio OS! This setup will:"
 echo "  1. Install Python dependencies"
 echo "  2. Download Ollama AI models (optional, ~8-12GB)"
-echo "  3. Download Piper TTS + voice models (optional, ~200-400MB)"
+echo "  3. Download Piper TTS + voice models (optional, ~20-400MB)"
 echo "  4. Install PyTorch for ML features (optional, ~2GB)"
 echo ""
 echo "Total setup may take 15-45 minutes depending on your connection."
@@ -326,8 +326,9 @@ echo "========================================"
 echo ""
 echo "Piper is free text-to-speech software. Radio OS uses it to"
 echo "generate voice audio for station hosts and characters."
+echo "Our enhanced setup provides an interactive voice selection menu."
 echo ""
-echo "Download size: ~200-400MB"
+echo "Download size: ~20-400MB depending on voice selection"
 echo ""
 echo "Alternative: Skip this and configure ElevenLabs or other"
 echo "TTS APIs manually later (see README.md)."
@@ -336,81 +337,37 @@ read -p "Install Piper + voices now? (Recommended) (Y/n): " INSTALL_PIPER
 
 if [[ "$INSTALL_PIPER" =~ ^[Yy]?$ ]]; then
     echo ""
-    echo "[*] Downloading Piper TTS binary..."
+    echo "[*] Running enhanced Piper TTS setup..."
+    echo "[*] This will download Piper 2023.11.14-2 + voice models with interactive selection"
+    echo ""
     
-    # Determine correct Piper download
-    if [[ "$PLATFORM" == "macOS" ]]; then
-        if [[ "$MACHINE" == "arm64" ]]; then
-            PIPER_URL="https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_macos_arm64.tar.gz"
-            PIPER_ARCHIVE="piper_macos_arm64.tar.gz"
-        else
-            PIPER_URL="https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_macos_amd64.tar.gz"
-            PIPER_ARCHIVE="piper_macos_amd64.tar.gz"
-        fi
-    else
-        PIPER_URL="https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_linux_x86_64.tar.gz"
-        PIPER_ARCHIVE="piper_linux_x86_64.tar.gz"
-    fi
-    
-    echo "  Downloading ~50MB archive (1-2 minutes)..."
-    curl --progress-bar -L "$PIPER_URL" -o "/tmp/$PIPER_ARCHIVE"
+    # Run the enhanced Python setup script
+    "$PYTHON_CMD" setup.py
     if [ $? -eq 0 ]; then
         echo ""
-        echo "[+] Download complete"
-        echo "[*] Extracting Piper..."
-        mkdir -p voices
-        tar -xzf "/tmp/$PIPER_ARCHIVE" -C voices/
-        rm "/tmp/$PIPER_ARCHIVE"
-        echo "[+] Piper installed to voices/"
-        echo ""
+        echo "[+] Enhanced Piper setup completed successfully"
         
-        # Download voice models
-        echo "[*] Downloading voice models (~200MB, may take 5-10 minutes)..."
-        echo "[*] Voices: lessac, alba, danny, amy, hfc_female, southern_english_female, alan"
-        echo ""
+        # Set up environment variables
+        echo "[*] Configuring environment variables..."
+        PIPER_BIN="$(pwd)/voices/piper/piper"
+        VOICES_DIR="$(pwd)/voices"
         
-        download_voice() {
-            local voice=$1
-            echo "  [*] Downloading $voice..."
-            curl --progress-bar -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx" -o "voices/$voice.onnx" 2>&1 | sed 's/^/    /'
-            curl --progress-bar -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx.json" -o "voices/$voice.onnx.json" 2>&1 | sed 's/^/    /'
+        # Inject paths into station manifests if tools are available
+        if [ -f "tools/inject_manifest_paths.py" ]; then
+            echo "[*] Configuring station manifests..."
+            "$PYTHON_CMD" tools/inject_manifest_paths.py --piper-bin "$PIPER_BIN" --voices-dir "$VOICES_DIR"
             if [ $? -eq 0 ]; then
-                echo "  [+] $voice downloaded"
+                echo "[+] Station manifests configured"
             else
-                echo "  [!] Warning: Could not download $voice"
+                echo "[!] Warning: Manifest path injection failed"
+                echo "[!] You may need to manually configure voice paths"
             fi
-        }
-        
-        download_voice "en_US-lessac-high"
-        download_voice "en_GB-alba-medium"
-        download_voice "en_US-danny-low"
-        download_voice "en_US-amy-medium"
-        download_voice "en_US-hfc_female-medium"
-        download_voice "en_GB-southern_english_female-low"
-        download_voice "en_GB-alan-medium"
-        
-        echo ""
-        echo "[+] Voice models downloaded successfully"
-        echo ""
-        
-        # Inject paths into manifests
-        echo "[*] Configuring station manifests..."
-        
-        # Find piper binary
-        PIPER_BIN=$(find "$SCRIPT_DIR/voices" -name "piper" -type f | head -n 1)
-        VOICES_DIR="$SCRIPT_DIR/voices"
-        
-        python tools/inject_manifest_paths.py --piper-bin "$PIPER_BIN" --voices-dir "$VOICES_DIR"
-        if [ $? -ne 0 ]; then
-            echo "[!] Warning: Manifest path injection failed"
-            echo "[!] You may need to manually configure voice paths"
         else
-            echo "[+] Station manifests configured"
+            echo "[*] Manual setup: Set PIPER_BIN=$PIPER_BIN in your station manifests"
         fi
     else
-        echo "[!] Failed to download Piper"
-        echo "[*] Skipping voice setup"
-    fi
+        echo "[!] Enhanced Piper setup failed"
+        echo "[!] You can try running 'python setup.py' manually later"
 else
     echo "[*] Skipping Piper installation"
     echo "[!] Stations will not have audio without TTS configured"

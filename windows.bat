@@ -134,11 +134,12 @@ if /i "%INSTALL_OLLAMA%"=="Y" (
 
 :install_ollama
 echo.
-echo [*] Downloading Ollama installer...
+echo [*] Downloading Ollama installer (~500MB)...
+echo [*] This may take 2-5 minutes depending on your connection
 set OLLAMA_INSTALLER=%TEMP%\OllamaSetup.exe
 
-REM Download Ollama using PowerShell
-powershell -Command "& {Invoke-WebRequest -Uri 'https://ollama.ai/download/OllamaSetup.exe' -OutFile '%OLLAMA_INSTALLER%'}"
+REM Download Ollama using PowerShell with progress
+powershell -Command "$ProgressPreference = 'SilentlyContinue'; Write-Host '  Downloading from https://ollama.ai/download/OllamaSetup.exe'; $URI = 'https://ollama.ai/download/OllamaSetup.exe'; $OutFile = '%OLLAMA_INSTALLER%'; try { $response = Invoke-WebRequest -Uri $URI -OutFile $OutFile -PassThru -UseBasicParsing; Write-Host '  [+] Download complete' -ForegroundColor Green } catch { Write-Host '  [!] Download failed: ' $_.Exception.Message -ForegroundColor Red; exit 1 }"
 if errorlevel 1 (
     echo [!] Failed to download Ollama installer
     echo [!] You can manually download from: https://ollama.ai/download
@@ -161,35 +162,41 @@ del "%OLLAMA_INSTALLER%" 2>nul
 
 echo [+] Ollama installed successfully
 echo.
-echo [*] Downloading AI models (~8-12GB, 10-30 minutes)...
+echo ========================================
+echo   Downloading AI Models (~8-12GB)
+echo ========================================
+echo [*] This is the largest download and may take 10-30 minutes
+echo [*] Ollama will show its own progress bars for each model
 echo [*] Models: qwen3:8b, llama3.1:8b, deepseek-r1:8b, rnj-1:8b, nomic-embed-text
 echo.
 
 REM Wait a moment for Ollama service to start
+echo [*] Starting Ollama service...
 timeout /t 5 /nobreak >nul
+echo.
 
 REM Pull essential models
-echo [*] Pulling qwen3:8b...
+echo [*] Model 1/5: Pulling qwen3:8b...
 ollama pull qwen3:8b
 echo.
 
-echo [*] Pulling llama3.1:8b...
+echo [*] Model 2/5: Pulling llama3.1:8b...
 ollama pull llama3.1:8b
 echo.
 
-echo [*] Pulling deepseek-r1:8b...
+echo [*] Model 3/5: Pulling deepseek-r1:8b...
 ollama pull deepseek-r1:8b
 echo.
 
-echo [*] Pulling rnj-1:8b...
+echo [*] Model 4/5: Pulling rnj-1:8b...
 ollama pull rnj-1:8b
 echo.
 
-echo [*] Pulling nomic-embed-text:v1.5...
+echo [*] Model 5/5: Pulling nomic-embed-text:v1.5...
 ollama pull nomic-embed-text:v1.5
 echo.
 
-echo [+] AI models downloaded successfully
+echo [+] All AI models downloaded successfully
 
 :skip_ollama
 echo.
@@ -223,11 +230,13 @@ if /i "%INSTALL_PIPER%"=="Y" (
 
 :install_piper
 echo.
-echo [*] Downloading Piper TTS binary...
+echo [*] Downloading Piper TTS binary (~50MB)...
+echo [*] This should take 1-2 minutes
 set PIPER_ZIP=%TEMP%\piper_windows.zip
 set PIPER_URL=https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_windows_amd64.zip
 
-powershell -Command "& {Invoke-WebRequest -Uri '%PIPER_URL%' -OutFile '%PIPER_ZIP%'}"
+REM Download with progress indication
+powershell -Command "$ProgressPreference = 'SilentlyContinue'; Write-Host '  Downloading from GitHub...'; try { Invoke-WebRequest -Uri '%PIPER_URL%' -OutFile '%PIPER_ZIP%' -UseBasicParsing; Write-Host '  [+] Download complete' -ForegroundColor Green } catch { Write-Host '  [!] Download failed: ' $_.Exception.Message -ForegroundColor Red; exit 1 }"
 if errorlevel 1 (
     echo [!] Failed to download Piper
     goto :skip_piper
@@ -311,8 +320,16 @@ if /i "%INSTALL_PYTORCH%"=="Y" (
 
 :install_pytorch
 echo.
-echo [*] Installing PyTorch (~2GB download, may take 5-15 minutes)...
-pip install torch>=2.0.0
+echo ========================================
+echo   PyTorch Installation (~2GB Download)
+echo ========================================
+echo [*] This is a large package that will take 5-15 minutes
+echo [*] You'll see progress bars from pip - this is normal!
+echo [*] Download speed depends on your internet connection
+echo.
+echo [*] Starting PyTorch installation...
+echo.
+pip install torch>=2.0.0 --progress-bar on
 if errorlevel 1 (
     echo [!] PyTorch installation failed
     echo [*] Continuing without PyTorch (From the Backmarker will use basic AI)
@@ -422,9 +439,8 @@ REM Download a Piper voice model
 :download_voice
 set VOICE_NAME=%1
 set BASE_URL=https://huggingface.co/rhasspy/piper-voices/resolve/main
-echo   [*] Downloading %VOICE_NAME%...
-powershell -Command "& {Invoke-WebRequest -Uri '%BASE_URL%/%VOICE_NAME%.onnx' -OutFile 'voices\%VOICE_NAME%.onnx'}" >nul 2>&1
-powershell -Command "& {Invoke-WebRequest -Uri '%BASE_URL%/%VOICE_NAME%.onnx.json' -OutFile 'voices\%VOICE_NAME%.onnx.json'}" >nul 2>&1
+echo   [*] Downloading %VOICE_NAME%... (this may take 30-60 seconds)
+powershell -Command "$ProgressPreference = 'SilentlyContinue'; try { Write-Host '      - Downloading model file...' -ForegroundColor Gray; Invoke-WebRequest -Uri '%BASE_URL%/%VOICE_NAME%.onnx' -OutFile 'voices\%VOICE_NAME%.onnx' -UseBasicParsing; Write-Host '      - Downloading config file...' -ForegroundColor Gray; Invoke-WebRequest -Uri '%BASE_URL%/%VOICE_NAME%.onnx.json' -OutFile 'voices\%VOICE_NAME%.onnx.json' -UseBasicParsing; exit 0 } catch { exit 1 }"
 if errorlevel 1 (
     echo   [!] Warning: Could not download %VOICE_NAME%
 ) else (

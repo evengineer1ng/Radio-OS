@@ -135,8 +135,9 @@ read -p "Install Ollama + AI models now? (Y/n): " INSTALL_OLLAMA
 if [[ "$INSTALL_OLLAMA" =~ ^[Yy]?$ ]]; then
     echo ""
     if [[ "$PLATFORM" == "macOS" ]]; then
-        echo "[*] Downloading Ollama for macOS..."
-        curl -fsSL https://ollama.ai/download/Ollama-darwin.zip -o /tmp/ollama.zip
+        echo "[*] Downloading Ollama for macOS (~500MB)..."
+        echo "[*] This may take 2-5 minutes depending on your connection"
+        curl --progress-bar -L https://ollama.ai/download/Ollama-darwin.zip -o /tmp/ollama.zip
         if [ $? -eq 0 ]; then
             echo "[+] Download complete"
             echo "[*] Extracting and installing..."
@@ -166,33 +167,39 @@ if [[ "$INSTALL_OLLAMA" =~ ^[Yy]?$ ]]; then
     
     if [[ "$INSTALL_OLLAMA" =~ ^[Yy]?$ ]]; then
         echo ""
-        echo "[*] Downloading AI models (~8-12GB, 10-30 minutes)..."
+        echo "========================================"
+        echo "  Downloading AI Models (~8-12GB)"
+        echo "========================================"
+        echo "[*] This is the largest download and may take 10-30 minutes"
+        echo "[*] Ollama will show its own progress bars for each model"
         echo "[*] Models: qwen3:8b, llama3.1:8b, deepseek-r1:8b, rnj-1:8b, nomic-embed-text"
         echo ""
         
+        echo "[*] Starting Ollama service..."
         sleep 3  # Wait for Ollama service
+        echo ""
         
-        echo "[*] Pulling qwen3:8b..."
+        echo "[*] Model 1/5: Pulling qwen3:8b..."
         ollama pull qwen3:8b
         echo ""
         
-        echo "[*] Pulling llama3.1:8b..."
+        echo "[*] Model 2/5: Pulling llama3.1:8b..."
         ollama pull llama3.1:8b
         echo ""
         
-        echo "[*] Pulling deepseek-r1:8b..."
+        echo "[*] Model 3/5: Pulling deepseek-r1:8b..."
         ollama pull deepseek-r1:8b
         echo ""
         
-        echo "[*] Pulling rnj-1:8b..."
+        echo "[*] Model 4/5: Pulling rnj-1:8b..."
         ollama pull rnj-1:8b
         echo ""
         
-        echo "[*] Pulling nomic-embed-text:v1.5..."
+        echo "[*] Model 5/5: Pulling nomic-embed-text:v1.5..."
         ollama pull nomic-embed-text:v1.5
         echo ""
         
-        echo "[+] AI models downloaded successfully"
+        echo "[+] All AI models downloaded successfully"
     fi
 else
     echo "[*] Skipping Ollama installation"
@@ -236,8 +243,10 @@ if [[ "$INSTALL_PIPER" =~ ^[Yy]?$ ]]; then
         PIPER_ARCHIVE="piper_linux_x86_64.tar.gz"
     fi
     
-    curl -L "$PIPER_URL" -o "/tmp/$PIPER_ARCHIVE"
+    echo "  Downloading ~50MB archive (1-2 minutes)..."
+    curl --progress-bar -L "$PIPER_URL" -o "/tmp/$PIPER_ARCHIVE"
     if [ $? -eq 0 ]; then
+        echo ""
         echo "[+] Download complete"
         echo "[*] Extracting Piper..."
         mkdir -p voices
@@ -254,8 +263,8 @@ if [[ "$INSTALL_PIPER" =~ ^[Yy]?$ ]]; then
         download_voice() {
             local voice=$1
             echo "  [*] Downloading $voice..."
-            curl -s -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx" -o "voices/$voice.onnx"
-            curl -s -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx.json" -o "voices/$voice.onnx.json"
+            curl --progress-bar -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx" -o "voices/$voice.onnx" 2>&1 | sed 's/^/    /'
+            curl --progress-bar -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/$voice.onnx.json" -o "voices/$voice.onnx.json" 2>&1 | sed 's/^/    /'
             if [ $? -eq 0 ]; then
                 echo "  [+] $voice downloaded"
             else
@@ -319,8 +328,16 @@ read -p "Install PyTorch now? (Y/n): " INSTALL_PYTORCH
 
 if [[ "$INSTALL_PYTORCH" =~ ^[Yy]?$ ]]; then
     echo ""
-    echo "[*] Installing PyTorch (~2GB download, may take 5-15 minutes)..."
-    pip install torch>=2.0.0
+    echo "========================================"
+    echo "  PyTorch Installation (~2GB Download)"
+    echo "========================================"
+    echo "[*] This is a large package that will take 5-15 minutes"
+    echo "[*] You'll see progress bars from pip - this is normal!"
+    echo "[*] Download speed depends on your internet connection"
+    echo ""
+    echo "[*] Starting PyTorch installation..."
+    echo ""
+    pip install torch>=2.0.0 --progress-bar on
     if [ $? -ne 0 ]; then
         echo "[!] PyTorch installation failed"
         echo "[*] Continuing without PyTorch (From the Backmarker will use basic AI)"

@@ -47,14 +47,29 @@ Each voice needs:
   - model.onnx.json (metadata)
 """
 
+def _download_progress_hook(count, block_size, total_size):
+    """Progress callback for urllib.request.urlretrieve."""
+    if total_size > 0:
+        percent = min(int(count * block_size * 100 / total_size), 100)
+        downloaded_mb = (count * block_size) / (1024 * 1024)
+        total_mb = total_size / (1024 * 1024)
+        bar_length = 40
+        filled_length = int(bar_length * percent / 100)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        print(f"\r  [{bar}] {percent}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='', flush=True)
+
 def download_file(url, dest):
     """Download file with progress indication."""
-    print(f"Downloading {os.path.basename(dest)}...")
+    filename = os.path.basename(dest)
+    print(f"Downloading {filename}...")
+    print(f"  Source: {url}")
     try:
-        urllib.request.urlretrieve(url, dest)
+        urllib.request.urlretrieve(url, dest, reporthook=_download_progress_hook)
+        print()  # New line after progress bar
         print(f"✓ Downloaded to {dest}")
         return True
     except Exception as e:
+        print()  # New line after progress bar
         print(f"✗ Download failed: {e}")
         return False
 

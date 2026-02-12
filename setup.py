@@ -25,10 +25,10 @@ print(f"Python: {sys.version}")
 
 # Piper download URLs (from official Rhasspy releases)
 PIPER_URLS = {
-    "windows": "https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_windows_amd64.zip",
-    "macos_amd64": "https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_macos_amd64.tar.gz",
-    "macos_arm64": "https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_macos_arm64.tar.gz",
-    "linux": "https://github.com/rhasspy/piper/releases/download/2024.1.1/piper_linux_x86_64.tar.gz",
+    "windows": "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_windows_amd64.zip",
+    "macos_amd64": "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_x64.tar.gz",
+    "macos_arm64": "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_aarch64.tar.gz",
+    "linux": "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz",
 }
 
 VOICES_INFO = """
@@ -53,20 +53,28 @@ def _download_progress_hook(count, block_size, total_size):
         percent = min(int(count * block_size * 100 / total_size), 100)
         downloaded_mb = (count * block_size) / (1024 * 1024)
         total_mb = total_size / (1024 * 1024)
-        bar_length = 40
+        bar_length = 50
         filled_length = int(bar_length * percent / 100)
         bar = '█' * filled_length + '░' * (bar_length - filled_length)
-        print(f"\r  [{bar}] {percent}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='', flush=True)
+        speed_indicator = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][count % 10]
+        print(f"\r  {speed_indicator} [{bar}] {percent}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='', flush=True)
+    else:
+        # Indeterminate progress when size is unknown
+        spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][count % 10]
+        downloaded_mb = (count * block_size) / (1024 * 1024)
+        print(f"\r  {spinner} Downloading... ({downloaded_mb:.1f} MB)", end='', flush=True)
 
 def download_file(url, dest):
     """Download file with progress indication."""
     filename = os.path.basename(dest)
-    print(f"Downloading {filename}...")
+    print(f"\nDownloading {filename}...")
     print(f"  Source: {url}")
+    print(f"  Destination: {dest}")
+    print()
     try:
         urllib.request.urlretrieve(url, dest, reporthook=_download_progress_hook)
         print()  # New line after progress bar
-        print(f"✓ Downloaded to {dest}")
+        print(f"✓ Downloaded successfully")
         return True
     except Exception as e:
         print()  # New line after progress bar

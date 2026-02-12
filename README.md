@@ -362,7 +362,7 @@ def register_widgets(registry, runtime_stub):
 
 ### Radio OS
 - **License**: GPL-3.0 (GNU General Public License v3.0)
-- **Copyright**: (c) 2026 Evan Pena
+- **Copyright**: (c) 2026 Evan Pelletier
 - **Summary**: Free, open source, and hackable forever. Any derivative work must remain open source under GPL-3.0.
 
 See [LICENSE](LICENSE) for full details.
@@ -417,17 +417,6 @@ These are automatically set for each launched station:
    - **macOS/Linux**: `~/.radioOS/config.json`
 
 Changes apply to newly launched stations. Running stations need to be restarted to pick up changes.
-
-## Environment Variables
-
-- `RADIO_OS_ROOT`: Project root directory
-- `RADIO_OS_PLUGINS`: Global plugins directory
-- `RADIO_OS_VOICES`: Global voices directory
-- `STATION_DIR`: Active station directory
-- `STATION_DB_PATH`: Station SQLite database
-- `STATION_MEMORY_PATH`: Station memory JSON
-- `CONTEXT_MODEL`: LLM model for producer
-- `HOST_MODEL`: LLM model for host
 
 ## Contributing
 

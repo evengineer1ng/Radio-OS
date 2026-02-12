@@ -362,7 +362,7 @@ def register_widgets(registry, runtime_stub):
 
 ### Radio OS
 - **License**: GPL-3.0 (GNU General Public License v3.0)
-- **Copyright**: (c) 2026 Evan Pena
+- **Copyright**: (c) 2026 Evan Pelletier
 - **Summary**: Free, open source, and hackable forever. Any derivative work must remain open source under GPL-3.0.
 
 See [LICENSE](LICENSE) for full details.

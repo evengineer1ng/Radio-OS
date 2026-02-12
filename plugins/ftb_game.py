@@ -3633,6 +3633,11 @@ class SimState:
         
         # Remove expired contracts
         for entity_id in expired_ids:
+            entity = self._find_entity_by_id(entity_id)
+            entity_name = entity.display_name if entity and hasattr(entity, 'display_name') else (entity.name if entity else "Unknown")
+            contract = self.contracts.get(entity_id)
+            team_name = contract.team_name if contract else "Unknown"
+            print(f"[FTB CONTRACT_EXPIRY] Removing expired contract: {entity_name} from team '{team_name}' (entity stays on roster)")
             del self.contracts[entity_id]
         
         return events
@@ -5258,7 +5263,16 @@ class SimState:
         # SAFETY CHECK: Ensure player team is never in ai_teams after load
         # This prevents AI from controlling the player team on regular ticks
         if state.player_team:
+            before_count = len(state.ai_teams)
             state.ai_teams = [t for t in state.ai_teams if t.name != state.player_team.name]
+            after_count = len(state.ai_teams)
+            print(f"[FTB LOAD] Player team: '{state.player_team.name}', AI teams: {after_count} (filtered: {before_count - after_count})")
+            # Verify player team is not in ai_teams
+            player_in_ai = any(t.name == state.player_team.name for t in state.ai_teams)
+            if player_in_ai:
+                print(f"[FTB LOAD] ❌ ERROR: Player team '{state.player_team.name}' is STILL in ai_teams after filtering!")
+            else:
+                print(f"[FTB LOAD] ✓ Verified: Player team NOT in ai_teams")
         
         # MIGRATION: Convert old pending_developments to active_rd_projects (after teams loaded!)
         if state.pending_developments and state.player_team:
@@ -12595,6 +12609,8 @@ class FTBSimulation:
             events.extend(FTBSimulation._apply_purchase_part(action, team, state))
         elif action.name == "equip_part":
             events.extend(FTBSimulation._apply_equip_part(action, team, state))
+        elif action.name == "sell_part":
+            events.extend(FTBSimulation._apply_sell_part(action, team, state))
         elif action.name.startswith("rd_"):
             # R&D project actions
             if action.name == "rd_start":
@@ -12729,6 +12745,17 @@ class FTBSimulation:
     def _apply_fire_driver(action: Action, team: Team, state: SimState) -> List[SimEvent]:
         """Fire a driver from the roster"""
         events = []
+        
+        # SAFETY LOG: Track if this is being called on player team
+        is_player_team = state.player_team and team.name == state.player_team.name
+        if is_player_team:
+            print(f"[FTB FIRE_DRIVER] ⚠️ WARNING: Firing driver from PLAYER TEAM '{team.name}'")
+            print(f"[FTB FIRE_DRIVER] Driver: {action.target}")
+            print(f"[FTB FIRE_DRIVER] Control mode: {state.control_mode}")
+            import traceback
+            traceback.print_stack()
+        else:
+            print(f"[FTB FIRE_DRIVER] Firing driver from AI team '{team.name}': {action.target}")
         
         # Find driver by name (action.target should be driver name)
         driver_name = action.target
@@ -13132,8 +13159,29 @@ class FTBSimulation:
                                 ))
                                 return events
         
+        # Deduct cost from team budget
+        team.budget.cash -= action.cost
+        
         # Add part to inventory
         team.parts_inventory.append(part)
+        
+        # Log transaction (only for player team)
+        if team == state.player_team:
+            state.log_transaction(
+                type='expense',
+                category='part_purchase',
+                amount=action.cost,
+                description=f"Purchased {part.name} ({part.part_type})",
+                balance_after=team.budget.cash,
+                related_entity=part.manufacturer_id,
+                metadata={
+                    'part_id': part_id,
+                    'part_name': part.name,
+                    'part_type': part.part_type,
+                    'manufacturer': part.manufacturer_id,
+                    'performance_score': round(part.performance_score, 2)
+                }
+            )
         
         # Create purchase event
         events.append(SimEvent(
@@ -13246,6 +13294,103 @@ class FTBSimulation:
         if not old_part or part.performance_score > old_part.performance_score:
             morale_boost = min(3.0, (part.performance_score - (old_part.performance_score if old_part else 50.0)) * 0.1)
             team.standing_metrics['morale'] = min(100, team.standing_metrics['morale'] + morale_boost)
+        
+        return events
+    
+    @staticmethod
+    def _apply_sell_part(action: Action, team: Team, state: SimState) -> List[SimEvent]:
+        """Sell a part from inventory for cash (Phase 2.7)"""
+        events = []
+        
+        # action.target should be a part_id string
+        part_id = action.target
+        if not part_id:
+            return events
+        
+        # Find part in team inventory
+        part = next((p for p in team.parts_inventory if p.part_id == part_id), None)
+        if not part:
+            return events  # No-op if part not in inventory
+        
+        # Can't sell equipped parts
+        if part_id in [p.part_id for p in team.equipped_parts.values()]:
+            events.append(SimEvent(
+                event_type="outcome",
+                category="sale_rejected",
+                ts=state.tick,
+                priority=50.0,
+                severity="warning",
+                data={
+                    'team': team.name,
+                    'part_id': part_id,
+                    'part_name': part.name,
+                    'reason': "Cannot sell equipped parts. Unequip first."
+                }
+            ))
+            return events
+        
+        # Calculate sale price (40-60% of original cost depending on condition and obsolescence)
+        # Base depreciation: 50%
+        # - Obsolescence penalty: -20% if obsolete
+        # - Condition bonus: +10% if performance_score > 70
+        
+        base_discount = 0.50
+        obsolescence_penalty = 0.20 if part.is_obsolete else 0.0
+        condition_bonus = 0.10 if part.performance_score > 70.0 else 0.0
+        
+        sale_multiplier = base_discount - obsolescence_penalty + condition_bonus
+        sale_multiplier = max(0.30, min(0.60, sale_multiplier))  # Clamp between 30-60%
+        
+        # Get original cost from action or estimate based on performance
+        original_cost = getattr(action, 'original_cost', None) or (part.performance_score * 100)
+        sale_price = original_cost * sale_multiplier
+        
+        # Add funds to team budget
+        team.budget.cash += sale_price
+        
+        # Remove from inventory
+        team.parts_inventory.remove(part)
+        
+        # Log transaction (only for player team)
+        if team == state.player_team:
+            state.log_transaction(
+                type='income',
+                category='part_sale',
+                amount=sale_price,
+                description=f"Sold {part.name} ({part.part_type})",
+                balance_after=team.budget.cash,
+                related_entity=part.manufacturer_id,
+                metadata={
+                    'part_id': part_id,
+                    'part_name': part.name,
+                    'part_type': part.part_type,
+                    'manufacturer': part.manufacturer_id,
+                    'performance_score': round(part.performance_score, 2),
+                    'original_cost': original_cost,
+                    'sale_price': sale_price,
+                    'sale_multiplier': round(sale_multiplier, 2)
+                }
+            )
+        
+        # Create sale event
+        events.append(SimEvent(
+            event_type="structural",
+            category="part_sold",
+            ts=state.tick,
+            priority=55.0,
+            severity="info",
+            data={
+                'team': team.name,
+                'part_id': part_id,
+                'part_name': part.name,
+                'part_type': part.part_type,
+                'manufacturer': part.manufacturer_id,
+                'performance_score': round(part.performance_score, 2),
+                'sale_price': sale_price,
+                'sale_multiplier': round(sale_multiplier, 2),
+                'was_obsolete': part.is_obsolete
+            }
+        ))
         
         return events
     
@@ -14865,8 +15010,10 @@ class FTBSimulation:
             # SAFETY CHECK: Never process player team in AI team actions
             # Compare by name since team_id changes across save/load cycles
             if state.player_team and team.name == state.player_team.name:
+                print(f"[FTB AI_ACTIONS] ✓ Skipping player team '{team.name}' from AI actions (safety check passed)")
                 continue
             if rng.random() < 0.10:  # 10% chance per tick
+                print(f"[FTB AI_ACTIONS] AI team '{team.name}' executing action (player team is '{state.player_team.name if state.player_team else 'None'}')")
                 # Determine action type (Phase 4.9: add R&D for tier 4+, Phase 5.9: add upgrades for tier 2+)
                 team_features = TIER_FEATURES.get(team.tier, TIER_FEATURES[1])
                 
@@ -14917,10 +15064,12 @@ class FTBSimulation:
                 
                 # FIRING: Remove underperforming staff
                 elif action_type == 'fire':
+                    print(f"[FTB AI_ACTIONS] Team '{team.name}' considering firing action (player team: '{state.player_team.name if state.player_team else 'None'}')")
                     # Find worst performing driver (if have multiple)
                     if len(team.drivers) > 1:
                         worst_driver = min(team.drivers, key=lambda d: d.overall_rating)
                         if worst_driver.overall_rating < 40:  # Only fire if truly bad
+                            print(f"[FTB AI_ACTIONS] Team '{team.name}' firing driver '{worst_driver.name}' (rating: {worst_driver.overall_rating})")
                             action = Action('fire_driver', cost=0, target=worst_driver.name)
                             action_events = FTBSimulation.apply_action(action, team, state)
                             events.extend(action_events)
@@ -15462,6 +15611,7 @@ class FTBSimulation:
         
         # Apply the chosen action
         try:
+            print(f"[FTB DELEGATION] Player team '{state.player_team.name}' applying action: {chosen_action.name} (target: {chosen_action.target}, score: {chosen_score:.1f})")
             action_events = FTBSimulation.apply_action(chosen_action, state.player_team, state)
             events.extend(action_events)
             
@@ -19478,7 +19628,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     pts_label.pack(side=tk.LEFT, padx=10, pady=6, expand=True)
         
         def _build_car_tab(self):
-            """Build Car tab - Car overview, equipped parts, inventory"""
+            """Build Car tab - Car overview, equipped parts, inventory, and marketplace"""
             tab = self.tab_car
             
             # Two column layout
@@ -19493,10 +19643,10 @@ Teams Managed: {len(stats.teams_managed)}"""
             self.car_overview_container.pack(fill=tk.X, pady=(0, 15))
             
             self.car_parts_visual_container = ctk.CTkFrame(left_panel, fg_color="transparent")
-            self.car_parts_visual_container.pack(fill=tk.BOTH, expand=True)
+            self.car_parts_visual_container.pack(fill=tk.X, pady=(0, 15))
             
-            # Right: Parts Inventory
-            inventory_header = ctk.CTkFrame(right_panel, fg_color=FTBTheme.CARD, corner_radius=8)
+            # Parts Inventory
+            inventory_header = ctk.CTkFrame(left_panel, fg_color=FTBTheme.CARD, corner_radius=8)
             inventory_header.pack(fill=tk.X, pady=(0, 10))
             
             ctk.CTkLabel(
@@ -19506,8 +19656,129 @@ Teams Managed: {len(stats.teams_managed)}"""
                 text_color=FTBTheme.TEXT
             ).pack(padx=15, pady=15, anchor="w")
             
-            self.parts_inventory_container = ctk.CTkFrame(right_panel, fg_color="transparent")
-            self.parts_inventory_container.pack(fill=tk.BOTH, expand=True)
+            self.parts_inventory_container = ctk.CTkFrame(left_panel, fg_color="transparent")
+            self.parts_inventory_container.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+            
+            # Right: Parts Marketplace with filters
+            marketplace_header = ctk.CTkFrame(right_panel, fg_color=FTBTheme.CARD, corner_radius=8)
+            marketplace_header.pack(fill=tk.X, pady=(0, 10))
+            
+            header_top = ctk.CTkFrame(marketplace_header, fg_color="transparent")
+            header_top.pack(fill=tk.X, padx=15, pady=(15, 5))
+            
+            ctk.CTkLabel(
+                header_top,
+                text="🛒 Parts Marketplace",
+                font=("Arial", 16, "bold"),
+                text_color=FTBTheme.TEXT
+            ).pack(side=tk.LEFT)
+            
+            # Market controls
+            controls_frame = ctk.CTkFrame(marketplace_header, fg_color="transparent")
+            controls_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+            
+            # Filter by part type dropdown
+            filter_row1 = ctk.CTkFrame(controls_frame, fg_color="transparent")
+            filter_row1.pack(fill=tk.X, pady=(0, 5))
+            
+            ctk.CTkLabel(
+                filter_row1,
+                text="Type:",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_MUTED,
+                width=60
+            ).pack(side=tk.LEFT)
+            
+            self.marketplace_type_var = tk.StringVar(value="All Types")
+            self.marketplace_type_filter = ctk.CTkOptionMenu(
+                filter_row1,
+                variable=self.marketplace_type_var,
+                values=["All Types"],
+                command=lambda _: self._refresh_parts_marketplace(),
+                fg_color=FTBTheme.SURFACE,
+                button_color=FTBTheme.ACCENT,
+                button_hover_color=FTBTheme.CARD_HOVER,
+                width=160,
+                height=28,
+                font=("Arial", 10)
+            )
+            self.marketplace_type_filter.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # Sort dropdown
+            ctk.CTkLabel(
+                filter_row1,
+                text="Sort:",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_MUTED,
+                width=40
+            ).pack(side=tk.LEFT)
+            
+            self.marketplace_sort_var = tk.StringVar(value="Latest")
+            self.marketplace_sort_menu = ctk.CTkOptionMenu(
+                filter_row1,
+                variable=self.marketplace_sort_var,
+                values=["Latest", "Performance", "Price (Low)", "Price (High)", "Manufacturer"],
+                command=lambda _: self._refresh_parts_marketplace(),
+                fg_color=FTBTheme.SURFACE,
+                button_color=FTBTheme.ACCENT,
+                button_hover_color=FTBTheme.CARD_HOVER,
+                width=120,
+                height=28,
+                font=("Arial", 10)
+            )
+            self.marketplace_sort_menu.pack(side=tk.LEFT)
+            
+            # Search and manufacturer filter
+            filter_row2 = ctk.CTkFrame(controls_frame, fg_color="transparent")
+            filter_row2.pack(fill=tk.X)
+            
+            ctk.CTkLabel(
+                filter_row2,
+                text="Search:",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_MUTED,
+                width=60
+            ).pack(side=tk.LEFT)
+            
+            self.marketplace_search_var = tk.StringVar()
+            self.marketplace_search_var.trace_add("write", lambda *args: self._refresh_parts_marketplace())
+            self.marketplace_search_entry = ctk.CTkEntry(
+                filter_row2,
+                textvariable=self.marketplace_search_var,
+                placeholder_text="Search parts...",
+                fg_color=FTBTheme.SURFACE,
+                border_color=FTBTheme.CARD_HOVER,
+                width=180,
+                height=28,
+                font=("Arial", 10)
+            )
+            self.marketplace_search_entry.pack(side=tk.LEFT, padx=(0, 10))
+            
+            ctk.CTkLabel(
+                filter_row2,
+                text="Brand:",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_MUTED,
+                width=40
+            ).pack(side=tk.LEFT)
+            
+            self.marketplace_mfr_var = tk.StringVar(value="All Brands")
+            self.marketplace_mfr_filter = ctk.CTkOptionMenu(
+                filter_row2,
+                variable=self.marketplace_mfr_var,
+                values=["All Brands"],
+                command=lambda _: self._refresh_parts_marketplace(),
+                fg_color=FTBTheme.SURFACE,
+                button_color=FTBTheme.ACCENT,
+                button_hover_color=FTBTheme.CARD_HOVER,
+                width=140,
+                height=28,
+                font=("Arial", 10)
+            )
+            self.marketplace_mfr_filter.pack(side=tk.LEFT)
+            
+            self.parts_marketplace_container = ctk.CTkFrame(right_panel, fg_color="transparent")
+            self.parts_marketplace_container.pack(fill=tk.BOTH, expand=True)
         
         def _refresh_car_overview(self):
             """Update car overview section"""
@@ -19826,6 +20097,10 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             team = self.sim_state.player_team
             inventory = team.parts_inventory
+            print(f"[FTB WIDGET] _refresh_parts_inventory called: inventory has {len(inventory)} parts")
+            if inventory:
+                for part in inventory[:3]:  # Show first 3
+                    print(f"[FTB WIDGET]   - {part.name} ({part.part_type})")
             
             if not inventory:
                 # Empty state
@@ -20266,21 +20541,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             ).pack(padx=15, pady=15, anchor="w")
             
             self.infrastructure_container = ctk.CTkFrame(right_panel, fg_color="transparent")
-            self.infrastructure_container.pack(fill=tk.X, pady=(0, 15))
-            
-            # Parts Marketplace
-            marketplace_header = ctk.CTkFrame(right_panel, fg_color=FTBTheme.CARD, corner_radius=8)
-            marketplace_header.pack(fill=tk.X, pady=(0, 10))
-            
-            ctk.CTkLabel(
-                marketplace_header,
-                text="🛒 Parts Marketplace",
-                font=("Arial", 16, "bold"),
-                text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=15, anchor="w")
-            
-            self.parts_marketplace_container = ctk.CTkFrame(right_panel, fg_color="transparent")
-            self.parts_marketplace_container.pack(fill=tk.BOTH, expand=True)
+            self.infrastructure_container.pack(fill=tk.BOTH, expand=True)
         
         def _refresh_development_projects(self):
             """Update active projects display"""
@@ -20635,7 +20896,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                 ).pack(padx=10, pady=10)
         
         def _refresh_parts_marketplace(self):
-            """Update parts marketplace display"""
+            """Update parts marketplace display with filtering, sorting, and search"""
             if not self.sim_state or not self.sim_state.player_team:
                 return
             
@@ -20650,7 +20911,6 @@ Teams Managed: {len(stats.teams_managed)}"""
             available_types = {ptype: tiers for ptype, tiers in PART_TYPES.items() if team.tier in tiers}
             
             if not catalog:
-                # Empty state
                 empty_label = ctk.CTkLabel(
                     self.parts_marketplace_container,
                     text="No parts available in catalog",
@@ -20660,8 +20920,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                 empty_label.pack(pady=20)
                 return
             
-            # Group parts by type and filter by tier + effectiveness
-            parts_by_type = {}
+            # Filter parts
+            filtered_parts = []
+            manufacturers = set()
+            part_types_available = set()
+            
             for part in catalog.values():
                 # Filter by tier access
                 if team.tier < part.tier_minimum or team.tier > part.tier_maximum:
@@ -20675,84 +20938,206 @@ Teams Managed: {len(stats.teams_managed)}"""
                 # Skip already equipped
                 if part.part_id in [p.part_id for p in team.equipped_parts.values() if p]:
                     continue
-                
-                if part.part_type not in parts_by_type:
-                    parts_by_type[part.part_type] = []
-                parts_by_type[part.part_type].append(part)
-            
-            # Display grouped by type
-            for part_type, parts in sorted(parts_by_type.items()):
-                if part_type not in available_types:
+                # Check if part type is available for this tier
+                if part.part_type not in available_types:
                     continue
                 
-                type_card = ctk.CTkFrame(self.parts_marketplace_container, fg_color=FTBTheme.CARD, corner_radius=8)
-                type_card.pack(fill=tk.X, pady=(0, 10))
-                
-                # Type header (collapsible)
-                type_header = ctk.CTkButton(
-                    type_card,
-                    text=f"▼ {part_type.replace('_', ' ').title()} ({len(parts)} available)",
-                    command=lambda: None,  # TODO: implement collapse/expand
-                    fg_color=FTBTheme.SURFACE,
-                    hover_color=FTBTheme.CARD_HOVER,
-                    height=40,
-                    font=("Arial", 12, "bold"),
-                    anchor="w"
+                filtered_parts.append(part)
+                manufacturers.add(part.manufacturer_id)
+                part_types_available.add(part.part_type)
+            
+            # Update filter dropdowns with available options
+            if hasattr(self, 'marketplace_type_filter'):
+                type_options = ["All Types"] + sorted([t.replace('_', ' ').title() for t in part_types_available])
+                current_type = self.marketplace_type_var.get()
+                self.marketplace_type_filter.configure(values=type_options)
+                if current_type not in type_options:
+                    self.marketplace_type_var.set("All Types")
+            
+            if hasattr(self, 'marketplace_mfr_filter'):
+                mfr_options = ["All Brands"] + sorted(list(manufacturers))
+                current_mfr = self.marketplace_mfr_var.get()
+                self.marketplace_mfr_filter.configure(values=mfr_options)
+                if current_mfr not in mfr_options:
+                    self.marketplace_mfr_var.set("All Brands")
+            
+            # Apply filters
+            selected_type = self.marketplace_type_var.get() if hasattr(self, 'marketplace_type_var') else "All Types"
+            selected_mfr = self.marketplace_mfr_var.get() if hasattr(self, 'marketplace_mfr_var') else "All Brands"
+            search_text = self.marketplace_search_var.get().lower() if hasattr(self, 'marketplace_search_var') else ""
+            
+            if selected_type != "All Types":
+                selected_type_key = selected_type.lower().replace(' ', '_')
+                filtered_parts = [p for p in filtered_parts if p.part_type == selected_type_key]
+            
+            if selected_mfr != "All Brands":
+                filtered_parts = [p for p in filtered_parts if p.manufacturer_id == selected_mfr]
+            
+            if search_text:
+                filtered_parts = [p for p in filtered_parts if 
+                    search_text in p.name.lower() or 
+                    search_text in p.manufacturer_id.lower() or
+                    search_text in p.part_type.lower()]
+            
+            # Apply sorting
+            sort_mode = self.marketplace_sort_var.get() if hasattr(self, 'marketplace_sort_var') else "Latest"
+            
+            if sort_mode == "Latest":
+                filtered_parts.sort(key=lambda p: (p.generation, p.introduction_tick), reverse=True)
+            elif sort_mode == "Performance":
+                filtered_parts.sort(key=lambda p: p.performance_score, reverse=True)
+            elif sort_mode == "Price (Low)":
+                filtered_parts.sort(key=lambda p: FTBSimulation.calculate_part_cost(p))
+            elif sort_mode == "Price (High)":
+                filtered_parts.sort(key=lambda p: FTBSimulation.calculate_part_cost(p), reverse=True)
+            elif sort_mode == "Manufacturer":
+                filtered_parts.sort(key=lambda p: (p.manufacturer_id, p.part_type, p.generation))
+            
+            # Check if no parts remain after filtering
+            if not filtered_parts:
+                empty_label = ctk.CTkLabel(
+                    self.parts_marketplace_container,
+                    text="No parts match your search criteria",
+                    font=("Arial", 12),
+                    text_color=FTBTheme.TEXT_DIM
                 )
-                type_header.pack(fill=tk.X, padx=10, pady=10)
-                
-                # Sort by generation (newest first), then performance
-                sorted_parts = sorted(parts, key=lambda p: (p.generation, p.performance_score), reverse=True)
-                
-                # Show top 3 per type
-                for part in sorted_parts[:3]:
-                    self._create_marketplace_part_card(type_card, part)
-        
-        def _create_marketplace_part_card(self, parent, part):
-            """Create a marketplace part card with purchase option"""
-            card = ctk.CTkFrame(parent, fg_color=FTBTheme.SURFACE, corner_radius=6)
-            card.pack(fill=tk.X, padx=10, pady=3)
+                empty_label.pack(pady=20)
+                return
             
-            content = ctk.CTkFrame(card, fg_color="transparent")
-            content.pack(fill=tk.X, padx=10, pady=8)
-            
-            # Left: Part info
-            info_frame = ctk.CTkFrame(content, fg_color="transparent")
-            info_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            
-            # Name and generation
-            name_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-            name_row.pack(fill=tk.X, anchor="w")
+            # Display results count
+            results_header = ctk.CTkFrame(self.parts_marketplace_container, fg_color=FTBTheme.SURFACE, corner_radius=6)
+            results_header.pack(fill=tk.X, pady=(0, 10))
             
             ctk.CTkLabel(
-                name_row,
-                text=part.name,
+                results_header,
+                text=f"{len(filtered_parts)} parts available",
                 font=("Arial", 11, "bold"),
                 text_color=FTBTheme.TEXT
+            ).pack(padx=12, pady=8, side=tk.LEFT)
+            
+            # Show balance
+            balance_text = f"Budget: {format_currency(team.budget.cash)}"
+            ctk.CTkLabel(
+                results_header,
+                text=balance_text,
+                font=("Arial", 11),
+                text_color=FTBTheme.TEXT_MUTED
+            ).pack(padx=12, pady=8, side=tk.RIGHT)
+            
+            # Display all filtered parts as cards
+            for part in filtered_parts:
+                self._create_marketplace_part_card(self.parts_marketplace_container, part)
+        
+        def _create_marketplace_part_card(self, parent, part):
+            """Create an enhanced marketplace part card with purchase option"""
+            card = ctk.CTkFrame(parent, fg_color=FTBTheme.SURFACE, corner_radius=6)
+            card.pack(fill=tk.X, padx=5, pady=5)
+            
+            content = ctk.CTkFrame(card, fg_color="transparent")
+            content.pack(fill=tk.X, padx=12, pady=10)
+            
+            # Top row: Name, badges, and generation
+            top_row = ctk.CTkFrame(content, fg_color="transparent")
+            top_row.pack(fill=tk.X, pady=(0, 6))
+            
+            # Part name and type
+            name_frame = ctk.CTkFrame(top_row, fg_color="transparent")
+            name_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            ctk.CTkLabel(
+                name_frame,
+                text=part.name,
+                font=("Arial", 12, "bold"),
+                text_color=FTBTheme.TEXT,
+                anchor="w"
             ).pack(side=tk.LEFT)
             
-            gen_color = FTBTheme.SUCCESS if part.generation >= 2 else FTBTheme.TEXT_MUTED
+            # Part type badge
             ctk.CTkLabel(
-                name_row,
-                text=f"Mk{part.generation}",
-                font=("Arial", 9, "bold"),
-                text_color=gen_color
+                name_frame,
+                text=part.part_type.replace('_', ' ').title(),
+                font=("Arial", 8),
+                text_color=FTBTheme.TEXT_MUTED,
+                fg_color=FTBTheme.CARD,
+                corner_radius=3,
+                padx=6,
+                pady=2
             ).pack(side=tk.LEFT, padx=(8, 0))
+            
+            # Generation badge (right side)
+            gen_color = FTBTheme.SUCCESS if part.generation >= 3 else (FTBTheme.ACCENT if part.generation >= 2 else FTBTheme.TEXT_MUTED)
+            ctk.CTkLabel(
+                top_row,
+                text=f"Gen {part.generation}",
+                font=("Arial", 10, "bold"),
+                text_color=FTBTheme.BG,
+                fg_color=gen_color,
+                corner_radius=4,
+                padx=8,
+                pady=3
+            ).pack(side=tk.RIGHT, padx=(8, 0))
             
             # NEW badge if recently introduced
             if self.sim_state.tick - part.introduction_tick < 14:  # Within 2 weeks
                 ctk.CTkLabel(
-                    name_row,
+                    top_row,
                     text="NEW",
-                    font=("Arial", 8, "bold"),
+                    font=("Arial", 9, "bold"),
                     text_color=FTBTheme.BG,
                     fg_color=FTBTheme.ACCENT,
-                    corner_radius=3,
-                    padx=4,
-                    pady=1
-                ).pack(side=tk.LEFT, padx=(6, 0))
+                    corner_radius=4,
+                    padx=6,
+                    pady=3
+                ).pack(side=tk.RIGHT)
             
-            # UPGRADE badge if player owns previous generation
+            # Middle row: Manufacturer and stats
+            mid_row = ctk.CTkFrame(content, fg_color="transparent")
+            mid_row.pack(fill=tk.X, pady=(0, 8))
+            
+            # Manufacturer
+            ctk.CTkLabel(
+                mid_row,
+                text=f"🏭 {part.manufacturer_id}",
+                font=("Arial", 10),
+                text_color=FTBTheme.TEXT_DIM,
+                anchor="w"
+            ).pack(side=tk.LEFT)
+            
+            # Stats preview
+            stats_frame = ctk.CTkFrame(mid_row, fg_color="transparent")
+            stats_frame.pack(side=tk.LEFT, padx=(20, 0))
+            
+            # Performance score
+            perf_score = part.performance_score
+            score_color = FTBTheme.get_stat_color(perf_score)
+            ctk.CTkLabel(
+                stats_frame,
+                text=f"⚡ {perf_score:.1f}",
+                font=("Arial", 10, "bold"),
+                text_color=score_color
+            ).pack(side=tk.LEFT, padx=(0, 12))
+            
+            # Reliability
+            reliability = part.current_ratings.get('reliability', 50)
+            rel_color = FTBTheme.get_stat_color(reliability)
+            ctk.CTkLabel(
+                stats_frame,
+                text=f"🛡️ {reliability:.0f}",
+                font=("Arial", 10),
+                text_color=rel_color
+            ).pack(side=tk.LEFT, padx=(0, 12))
+            
+            # Effectiveness
+            eff_percent = part.effectiveness_modifier * 100
+            eff_color = FTBTheme.SUCCESS if part.effectiveness_modifier >= 0.9 else (FTBTheme.TEXT if part.effectiveness_modifier >= 0.7 else FTBTheme.WARNING)
+            ctk.CTkLabel(
+                stats_frame,
+                text=f"📊 {eff_percent:.0f}%",
+                font=("Arial", 10),
+                text_color=eff_color
+            ).pack(side=tk.LEFT)
+            
+            # Upgrade indicator
             team = self.sim_state.player_team
             prev_gen_owned = False
             for inventory_part in team.parts_inventory + list(team.equipped_parts.values()):
@@ -20765,95 +21150,119 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             if prev_gen_owned:
                 ctk.CTkLabel(
-                    name_row,
-                    text=f"UPGRADE FROM MK{part.generation - 1}",
-                    font=("Arial", 8, "bold"),
+                    mid_row,
+                    text=f"⬆️ UPGRADE",
+                    font=("Arial", 9, "bold"),
                     text_color=FTBTheme.BG,
                     fg_color=FTBTheme.SUCCESS,
                     corner_radius=3,
-                    padx=4,
-                    pady=1
-                ).pack(side=tk.LEFT, padx=(6, 0))
+                    padx=6,
+                    pady=2
+                ).pack(side=tk.RIGHT, padx=(8, 0))
             
-            # Manufacturer and stats
-            meta_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-            meta_row.pack(fill=tk.X, anchor="w", pady=(2, 0))
-            
-            ctk.CTkLabel(
-                meta_row,
-                text=f"{part.manufacturer_id}",
-                font=("Arial", 9),
-                text_color=FTBTheme.TEXT_DIM
-            ).pack(side=tk.LEFT)
-            
-            perf_score = part.performance_score
-            score_color = FTBTheme.get_stat_color(perf_score)
-            ctk.CTkLabel(
-                meta_row,
-                text=f"• Performance: {perf_score:.1f}",
-                font=("Arial", 9),
-                text_color=score_color
-            ).pack(side=tk.LEFT, padx=(8, 0))
-            
-            eff_color = FTBTheme.SUCCESS if part.effectiveness_modifier >= 0.9 else FTBTheme.TEXT
-            ctk.CTkLabel(
-                meta_row,
-                text=f"• {part.effectiveness_modifier*100:.0f}% effective",
-                font=("Arial", 9),
-                text_color=eff_color
-            ).pack(side=tk.LEFT, padx=(8, 0))
-            
-            # Right: Purchase actions
-            actions_frame = ctk.CTkFrame(content, fg_color="transparent")
-            actions_frame.pack(side=tk.RIGHT)
+            # Bottom row: Price and actions
+            bottom_row = ctk.CTkFrame(content, fg_color=FTBTheme.CARD, corner_radius=4)
+            bottom_row.pack(fill=tk.X, pady=(0, 0))
             
             # Calculate cost
             cost = int(FTBSimulation.calculate_part_cost(part))
-            
-            # Can afford?
             can_afford = self.sim_state.player_team.budget.cash >= cost
             
-            # Purchase button
-            purchase_btn = ctk.CTkButton(
-                actions_frame,
-                text=f"Buy {format_currency(cost)}",
-                command=lambda p=part, c=cost: self._purchase_part(p, c),
-                fg_color=FTBTheme.ACCENT if can_afford else FTBTheme.SURFACE,
-                hover_color=FTBTheme.CARD_HOVER,
-                width=120,
-                height=28,
-                font=("Arial", 10, "bold" if can_afford else "normal"),
-                state="normal" if can_afford else "disabled"
-            )
-            purchase_btn.pack(side=tk.LEFT, padx=2)
+            # Price display
+            price_frame = ctk.CTkFrame(bottom_row, fg_color="transparent")
+            price_frame.pack(side=tk.LEFT, padx=10, pady=8)
+            
+            ctk.CTkLabel(
+                price_frame,
+                text="Price:",
+                font=("Arial", 9),
+                text_color=FTBTheme.TEXT_MUTED
+            ).pack(side=tk.LEFT, padx=(0, 4))
+            
+            price_color = FTBTheme.TEXT if can_afford else FTBTheme.WARNING
+            ctk.CTkLabel(
+                price_frame,
+                text=format_currency(cost),
+                font=("Arial", 11, "bold"),
+                text_color=price_color
+            ).pack(side=tk.LEFT)
+            
+            # Action buttons
+            actions_frame = ctk.CTkFrame(bottom_row, fg_color="transparent")
+            actions_frame.pack(side=tk.RIGHT, padx=8, pady=6)
             
             # Details button
             ctk.CTkButton(
                 actions_frame,
-                text="Details",
+                text="📋 Details",
                 command=lambda p=part: self._show_part_details(p),
                 fg_color=FTBTheme.SURFACE,
                 hover_color=FTBTheme.CARD_HOVER,
-                width=70,
-                height=28,
-                font=("Arial", 9)
-            ).pack(side=tk.LEFT, padx=2)
+                width=90,
+                height=30,
+                font=("Arial", 10),
+                border_width=1,
+                border_color=FTBTheme.CARD_HOVER
+            ).pack(side=tk.LEFT, padx=3)
+            
+            # Purchase button
+            purchase_btn = ctk.CTkButton(
+                actions_frame,
+                text=f"🛒 Buy" if can_afford else "❌ Too Expensive",
+                command=lambda p=part, c=cost: self._purchase_part(p, c),
+                fg_color=FTBTheme.ACCENT if can_afford else FTBTheme.SURFACE,
+                hover_color=FTBTheme.SUCCESS if can_afford else FTBTheme.SURFACE,
+                width=110,
+                height=30,
+                font=("Arial", 10, "bold" if can_afford else "normal"),
+                state="normal" if can_afford else "disabled",
+                border_width=0 if can_afford else 1,
+                border_color=FTBTheme.WARNING if not can_afford else None
+            )
+            purchase_btn.pack(side=tk.LEFT, padx=3)
         
         def _purchase_part(self, part, cost):
-            """Purchase a part and add to inventory"""
+            """Purchase a part and add to inventory with confirmation"""
             if not self.sim_state or not self.sim_state.player_team:
                 return
             
-            if self.sim_state.player_team.budget.cash < cost:
+            team = self.sim_state.player_team
+            
+            if team.budget.cash < cost:
                 messagebox.showwarning("Insufficient Funds", f"Cannot afford {part.name}. Need {format_currency(cost)}.", parent=self)
                 return
             
-            # Send purchase command
+            # Show confirmation dialog
+            remaining_cash = team.budget.cash - cost
+            msg = f"Purchase {part.name}?\n\n"
+            msg += f"Cost: {format_currency(cost)}\n"
+            msg += f"Cash remaining: {format_currency(remaining_cash)}\n\n"
+            msg += f"Generation: MK{part.generation}\n"
+            msg += f"Performance: {part.performance_score:.1f}\n"
+            msg += f"Manufacturer: {part.manufacturer_id}"
+            
+            confirm = messagebox.askyesno(
+                "Confirm Purchase", 
+                msg,
+                parent=self
+            )
+            
+            if not confirm:
+                return
+            
+            # Send purchase command (processed asynchronously by controller)
             self.runtime["ftb_cmd_q"].put({
                 "cmd": "ftb_purchase_part",
                 "part_id": part.part_id,
                 "cost": cost
             })
+            
+            # Show success message (command will complete shortly)
+            messagebox.showinfo(
+                "Purchase Queued",
+                f"Purchasing {part.name}...\n\nIt will appear in your Parts Inventory momentarily.",
+                parent=self
+            )
         
         def _start_new_project(self):
             """Open development wizard"""
@@ -24562,6 +24971,8 @@ Teams Managed: {len(stats.teams_managed)}"""
             if hasattr(self, 'tabview'):
                 current_tab = self.tabview.get()
                 tab_changed = (not hasattr(self, '_last_tab') or self._last_tab != current_tab)
+                if tab_changed:
+                    print(f"[FTB WIDGET] Tab switched: {getattr(self, '_last_tab', 'None')} → {current_tab}")
                 self._last_tab = current_tab
                 
                 # Write tab change to state DB for narrator awareness
@@ -24714,26 +25125,43 @@ Teams Managed: {len(stats.teams_managed)}"""
                             self._refresh_team_browser()
                     except Exception as e:
                         print(f"[FTB WIDGET] Team tab refresh error: {e}")
-                elif current_tab == "Manager Career" and should_update:
-                    if hasattr(self, 'manager_career_container'):
-                        self._refresh_manager_career()
-                elif current_tab == "Car" and (tab_changed or getattr(state, '_car_dirty', True)):
-                    if hasattr(self, 'car_overview_container'):
-                        self._refresh_car_overview()
-                        self._refresh_car_parts_visual()
-                        self._refresh_parts_inventory()
+                elif current_tab == "Manager Career" and (tab_changed or getattr(state, '_team_dirty', False)):
+                    print(f"[FTB WIDGET] Refreshing Manager Career tab: tab_changed={tab_changed}, dirty={getattr(state, '_team_dirty', False)}")
+                    try:
+                        if hasattr(self, 'manager_career_container'):
+                            self._refresh_manager_career()
+                    except Exception as e:
+                        print(f"[FTB WIDGET] Manager Career tab refresh error: {e}")
+                elif current_tab == "Car" and (tab_changed or getattr(state, '_car_dirty', False)):
+                    print(f"[FTB WIDGET] Refreshing Car tab: tab_changed={tab_changed}, dirty={getattr(state, '_car_dirty', False)}")
+                    try:
+                        if hasattr(self, 'car_overview_container'):
+                            self._refresh_car_overview()
+                        if hasattr(self, 'car_parts_visual_container'):
+                            self._refresh_car_parts_visual()
+                        if hasattr(self, 'parts_inventory_container'):
+                            self._refresh_parts_inventory()
+                        if hasattr(self, 'parts_marketplace_container'):
+                            print(f"[FTB WIDGET] Refreshing parts marketplace...")
+                            self._refresh_parts_marketplace()
+                            print(f"[FTB WIDGET] Parts marketplace refresh complete")
                         state._car_dirty = False
-                elif current_tab == "Development" and (tab_changed or state._development_dirty):
+                    except Exception as e:
+                        print(f"[FTB WIDGET] Car tab refresh error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                elif current_tab == "Development" and (tab_changed or getattr(state, '_development_dirty', False)):
+                    print(f"[FTB WIDGET] Refreshing Development tab: tab_changed={tab_changed}, dirty={getattr(state, '_development_dirty', False)}")
                     try:
                         if hasattr(self, 'projects_container'):
                             self._refresh_development_projects()
                             state._development_dirty = False
                         if hasattr(self, 'infrastructure_container'):
                             self._refresh_infrastructure()
-                        if hasattr(self, 'parts_marketplace_container'):
-                            self._refresh_parts_marketplace()
                     except Exception as e:
                         print(f"[FTB WIDGET] Development tab refresh error: {e}")
+                        import traceback
+                        traceback.print_exc()
                 elif current_tab == "Finance" and (tab_changed or state._finance_dirty):
                     if hasattr(self, 'cash_metric'):
                         self._refresh_finance()
@@ -26676,10 +27104,9 @@ class FTBController:
                             # Show popup via ui_q
                             ui_q = self.runtime.get("ui_q")
                             if ui_q:
-                                ui_q.put({
-                                    "type": "batch_summary",
+                                ui_q.put(("batch_summary", {
                                     "data": summary.data
-                                })
+                                }))
                         
                         # Autosave check after batch
                         if self.state.tick % self.autosave_interval == 0:
@@ -27229,81 +27656,72 @@ class FTBController:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
                                 return
                             
-                            # Calculate sell value (40% of cost)
-                            sell_value = int(FTBSimulation.calculate_part_cost(part) * 0.4)
-                            
-                            # Remove from inventory
-                            self.state.player_team.parts_inventory.remove(part)
-                            
-                            # Add cash
-                            self.state.player_team.budget.cash += sell_value
-                            
-                            # Generate event
-                            event = SimEvent(
-                                event_type="structural",
-                                category="part_sold",
-                                ts=self.state.tick,
-                                priority=45.0,
-                                severity="info",
-                                event_id=FTBSimulation._generate_event_id(self.state),
-                                data={
-                                    'team': self.state.player_team.name,
-                                    'part_id': part_id,
-                                    'part_name': part.name,
-                                    'part_type': part.part_type,
-                                    'sell_value': sell_value
-                                }
+                            # Create sell_part action and apply it
+                            original_cost = FTBSimulation.calculate_part_cost(part)
+                            action = Action(
+                                name="sell_part",
+                                target=part_id,
+                                cost=0,
+                                original_cost=original_cost
                             )
-                            self.state.event_history.append(event)
-                            self._emit_events([event], skip_narration=True)
+                            
+                            events = FTBSimulation._apply_sell_part(action, self.state.player_team, self.state)
+                            
+                            # Emit events
+                            if events:
+                                self.state.event_history.extend(events)
+                                self._emit_events(events, skip_narration=True)
+                            
                             self.state.mark_dirty('car')
-                            self.log("ftb", f"Part sold: {part.name} for ${sell_value:,}")
+                            self.log("ftb", f"Part sold: {part.name}")
                 
                 elif cmd == "ftb_purchase_part":
                     part_id = msg.get("part_id")
                     cost = msg.get("cost", 0)
+                    print(f"[FTB CONTROLLER] Purchase command received: part_id={part_id}, cost=${cost:,}")
                     if self.state and self.state.player_team and part_id:
                         with self.state_lock:
                             # Check if can afford
                             if self.state.player_team.budget.cash < cost:
+                                print(f"[FTB CONTROLLER] ❌ Purchase FAILED - insufficient funds: have ${self.state.player_team.budget.cash:,}, need ${cost:,}")
                                 self.log("ftb", f"Cannot afford part {part_id}")
                                 return
                             
                             # Find part in catalog
                             part = self.state.parts_catalog.get(part_id)
                             if not part:
+                                print(f"[FTB CONTROLLER] ❌ Purchase FAILED - part not found in catalog: {part_id}")
                                 self.log("ftb", f"Part {part_id} not found in catalog")
                                 return
                             
-                            # Deduct cost
-                            self.state.player_team.budget.cash -= cost
+                            print(f"[FTB CONTROLLER] Processing purchase: {part.name} (${cost:,})")
+                            print(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
                             
-                            # Add to inventory
-                            self.state.player_team.parts_inventory.append(part)
-                            
-                            # Generate event
-                            event = SimEvent(
-                                event_type="structural",
-                                category="part_purchased",
-                                ts=self.state.tick,
-                                priority=60.0,
-                                severity="info",
-                                event_id=FTBSimulation._generate_event_id(self.state),
-                                data={
-                                    'team': self.state.player_team.name,
-                                    'part_id': part_id,
-                                    'part_name': part.name,
-                                    'part_type': part.part_type,
-                                    'manufacturer': part.manufacturer_id,
-                                    'cost': cost,
-                                    'generation': part.generation
-                                }
+                            # Create purchase_part action and apply it
+                            action = Action(
+                                name="purchase_part",
+                                target=part_id,
+                                cost=cost
                             )
-                            self.state.event_history.append(event)
-                            self._emit_events([event], skip_narration=True)
+                            
+                            events = FTBSimulation._apply_purchase_part(action, self.state.player_team, self.state)
+                            
+                            print(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            print(f"[FTB CONTROLLER] Part now in inventory: {part in self.state.player_team.parts_inventory}")
+                            
+                            # Emit events
+                            if events:
+                                self.state.event_history.extend(events)
+                                self._emit_events(events, skip_narration=True)
+                                
                             self.state.mark_dirty('car')
                             self.state.mark_dirty('development')
+                            self.state.mark_dirty('finance')  # Also update finance for cash change
+                            print(f"[FTB CONTROLLER] ✅ Purchase complete - dirty flags set: car={self.state._car_dirty}, dev={self.state._development_dirty}, finance={self.state._finance_dirty}")
                             self.log("ftb", f"Part purchased: {part.name} for ${cost:,}")
+                            
+                            # Force immediate UI refresh via ui_q (not needed - dirty flags handle it)
+                            # Commenting out the force_refresh since tab-based dirty flags already handle updates
                 
                 elif cmd == "ftb_upgrade_infrastructure":
                     facility = msg.get("facility")
@@ -27632,7 +28050,7 @@ class FTBController:
             try:
                 ui_cmd_q = self.runtime.get("ui_cmd_q")
                 if ui_cmd_q:
-                    ui_cmd_q.put({"cmd": "ftb_clear_stats_cache"})
+                    ui_cmd_q.put(("ftb_clear_stats_cache", {}))
                     print(f"[FTB CONTROLLER] 🗑️ Sent clear stats cache command to UI")
             except Exception as e:
                 print(f"[FTB CONTROLLER] ⚠️ Failed to send clear stats cache command: {e}")

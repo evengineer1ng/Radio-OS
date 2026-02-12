@@ -26,7 +26,7 @@ stations/**/runtime.log
 # Temporary files
 *.tmp
 *.temp
-*.wav
+# *.wav - now committed for audio assets
 *.log
 
 # IDE

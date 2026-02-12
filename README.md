@@ -84,8 +84,8 @@ If you prefer manual setup or encounter issues:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/radio_os.git
-cd radio_os
+git clone https://github.com/evengineer1ng/radio-os.git
+cd radio-os
 ```
 
 2. Create and activate virtual environment:
@@ -313,8 +313,8 @@ sudo dnf install ffmpeg      # Fedora
 
 ## Support & Community
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/radio_os/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/radio_os/discussions)
+- **Issues**: [GitHub Issues](https://github.com/evengineer1ng/radio-os/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/evengineer1ng/radio-os/discussions)
 - **Documentation**: [/documentation](documentation/)
 
 ## Plugin Development

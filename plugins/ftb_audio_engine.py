@@ -643,7 +643,7 @@ class FTBAudioEngine:
 _audio_engine: Optional[FTBAudioEngine] = None
 
 
-def feed_worker(runtime: Dict[str, Any]) -> None:
+def feed_worker(stop_event, mem: Dict[str, Any], payload: Dict[str, Any], runtime: Dict[str, Any]) -> None:
     """
     Audio engine worker (runs as background thread manager).
     Subscribes to event_q and routes audio events.
@@ -668,10 +668,9 @@ def feed_worker(runtime: Dict[str, Any]) -> None:
     
     log("[ftb_audio_engine] Feed worker started, listening for events")
     
-    # Note: Feed workers in the modern runtime run in managed threads
-    # and don't need explicit stop_event checking as they're daemon threads
+    # Use stop_event for graceful shutdown
     try:
-        while True:
+        while not stop_event.is_set():
             # Check for station events
             try:
                 station_event = event_q.get(timeout=0.5)

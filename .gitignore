@@ -55,3 +55,8 @@ voices/piper_linux_*/
 voices/piper/
 voices/*.onnx
 voices/*.onnx.json
+
+# Autosave files (user-specific save data)
+**/ftb_autosave.db
+**/ftb_autosave.json
+ftb_autosave.json

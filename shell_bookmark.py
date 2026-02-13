@@ -451,6 +451,7 @@ class StationProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def launch(self, station: StationInfo) -> None:
+        print(f"DEBUG: StationProcess.launch() called")
         self.stop()
 
         env = os.environ.copy()
@@ -509,9 +510,13 @@ class StationProcess:
             lf = None
 
         cmd = [sys.executable, "-u", RUNTIME_PATH]
+        print(f"DEBUG: Command: {cmd}")
+        print(f"DEBUG: CWD: {BASE}")
+        print(f"DEBUG: RUNTIME_PATH: {RUNTIME_PATH}")
 
         # Fix: Use subprocess.PIPE for stdout/stderr to avoid file descriptor issues
-        kwargs = {"cwd": BASE, "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+        # CRITICAL: Set encoding='utf-8' explicitly on Windows to handle emoji in output
+        kwargs = {"cwd": BASE, "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True, "encoding": "utf-8", "errors": "replace"}
         if sys.platform == "win32":
             # hide console window for runtime (Windows only)
             # NOTE: CREATE_NO_WINDOW can prevent win32gui.EnumWindows() from working correctly.
@@ -523,7 +528,13 @@ class StationProcess:
                     pass
 
         self._log_file = lf
-        self.proc = subprocess.Popen(cmd, **kwargs)
+        print(f"DEBUG: About to spawn subprocess...")
+        try:
+            self.proc = subprocess.Popen(cmd, **kwargs)
+            print(f"DEBUG: Subprocess spawned, PID: {self.proc.pid}")
+        except Exception as e:
+            print(f"DEBUG ERROR: Failed to spawn subprocess: {e}")
+            raise
         self.station = station
         
         # Start a thread to capture and log output
@@ -532,19 +543,45 @@ class StationProcess:
             
             def log_output():
                 try:
+                    # Platform-specific handling for encoding edge cases
+                    is_windows = sys.platform == "win32"
+                    
                     while self.proc and self.proc.poll() is None:
                         line = self.proc.stdout.readline()
                         if line:
-                            lf.write(line)
-                            lf.flush()
+                            if is_windows:
+                                # Windows: Extra error handling for charmap codec issues
+                                try:
+                                    # If line is bytes, decode with error handling
+                                    if isinstance(line, bytes):
+                                        line = line.decode('utf-8', errors='replace')
+                                    lf.write(line)
+                                    lf.flush()
+                                except UnicodeDecodeError as ude:
+                                    # Fallback: write sanitized version
+                                    lf.write(f"[decode error in output: {ude}]\n")
+                                    lf.flush()
+                            else:
+                                # Mac/Linux: Direct write (subprocess handles encoding)
+                                lf.write(line)
+                                lf.flush()
                         else:
                             break
                     # Get any remaining output
                     if self.proc and self.proc.stdout:
                         remaining = self.proc.stdout.read()
                         if remaining:
-                            lf.write(remaining)
-                            lf.flush()
+                            if is_windows:
+                                try:
+                                    if isinstance(remaining, bytes):
+                                        remaining = remaining.decode('utf-8', errors='replace')
+                                    lf.write(remaining)
+                                    lf.flush()
+                                except UnicodeDecodeError:
+                                    pass  # Skip corrupted trailing output
+                            else:
+                                lf.write(remaining)
+                                lf.flush()
                 except Exception as e:
                     print(f"Log capture error: {e}")
             
@@ -1373,6 +1410,8 @@ class RadioShell:
     # Station actions
     # -----------------------------
     def launch_station(self, station: StationInfo):
+        print(f"DEBUG: launch_station called for {station.station_id}")
+        print(f"DEBUG: Station path: {station.path}")
         self.proc.launch(station)
         name = (station.manifest.get("station", {}) or {}).get("name", station.station_id)
         self.now_playing.config(text=f"Now Playing — {name}")

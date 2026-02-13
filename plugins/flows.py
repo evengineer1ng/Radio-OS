@@ -551,15 +551,28 @@ class MacAppleScriptBackend(MediaBackend):
         self._stop.set()
 
     def _osascript(self, script: str) -> str:
-        p = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-        if p.returncode != 0:
+        try:
+            p = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if p.returncode != 0:
+                return ""
+            return (p.stdout or "").strip()
+        except subprocess.TimeoutExpired:
+            if callable(self.log):
+                self.log("flows", "[MAC] osascript timeout")
             return ""
-        return (p.stdout or "").strip()
+        except FileNotFoundError:
+            if callable(self.log):
+                self.log("flows", "[MAC] osascript not found (not on macOS?)")
+            return ""
+        except Exception as e:
+            if callable(self.log):
+                self.log("flows", f"[MAC] osascript error: {e}")
+            return ""
 
     def _detect_player(self) -> str:
         # Prefer whichever is actively playing; fallback to running app
@@ -587,45 +600,49 @@ class MacAppleScriptBackend(MediaBackend):
         if app == "none":
             return st
 
-        # Common fields
-        state = self._osascript(f'tell application "{app}" to return (player state as string)')
-        st["playing"] = (state or "").lower() == "playing"
+        try:
+            # Common fields
+            state = self._osascript(f'tell application "{app}" to return (player state as string)')
+            st["playing"] = (state or "").lower() == "playing"
 
-        # Metadata
-        title = self._osascript(f'tell application "{app}" to return (name of current track as string)')
-        artist = self._osascript(f'tell application "{app}" to return (artist of current track as string)')
-        album = self._osascript(f'tell application "{app}" to return (album of current track as string)')
-        st["title"] = title or ""
-        st["artist"] = artist or ""
-        st["album"] = album or ""
+            # Metadata
+            title = self._osascript(f'tell application "{app}" to return (name of current track as string)')
+            artist = self._osascript(f'tell application "{app}" to return (artist of current track as string)')
+            album = self._osascript(f'tell application "{app}" to return (album of current track as string)')
+            st["title"] = title or ""
+            st["artist"] = artist or ""
+            st["album"] = album or ""
 
-        # Position / duration (best-effort)
-        # Music: player position seconds; Spotify: player position ms
-        if app == "Music":
-            pos = self._osascript('tell application "Music" to return (player position as string)')
-            dur = self._osascript('tell application "Music" to return (duration of current track as string)')  # seconds
-            try:
-                st["position_sec"] = float(pos) if pos else None
-            except Exception:
-                st["position_sec"] = None
-            try:
-                st["duration_sec"] = float(dur) if dur else None
-            except Exception:
-                st["duration_sec"] = None
-        elif app == "Spotify":
-            pos = self._osascript('tell application "Spotify" to return (player position as string)')  # seconds
-            dur = self._osascript('tell application "Spotify" to return (duration of current track as string)')  # ms
-            try:
-                st["position_sec"] = float(pos) if pos else None
-            except Exception:
-                st["position_sec"] = None
-            try:
-                st["duration_sec"] = (float(dur) / 1000.0) if dur else None
-            except Exception:
-                st["duration_sec"] = None
+            # Position / duration (best-effort)
+            # Music: player position seconds; Spotify: player position ms
+            if app == "Music":
+                pos = self._osascript('tell application "Music" to return (player position as string)')
+                dur = self._osascript('tell application "Music" to return (duration of current track as string)')  # seconds
+                try:
+                    st["position_sec"] = float(pos) if pos else None
+                except Exception:
+                    st["position_sec"] = None
+                try:
+                    st["duration_sec"] = float(dur) if dur else None
+                except Exception:
+                    st["duration_sec"] = None
+            elif app == "Spotify":
+                pos = self._osascript('tell application "Spotify" to return (player position as string)')  # seconds
+                dur = self._osascript('tell application "Spotify" to return (duration of current track as string)')  # ms
+                try:
+                    st["position_sec"] = float(pos) if pos else None
+                except Exception:
+                    st["position_sec"] = None
+                try:
+                    st["duration_sec"] = (float(dur) / 1000.0) if dur else None
+                except Exception:
+                    st["duration_sec"] = None
 
-        if isinstance(st.get("position_sec"), (int, float)) and isinstance(st.get("duration_sec"), (int, float)):
-            st["remaining_sec"] = max(0.0, float(st["duration_sec"]) - float(st["position_sec"]))
+            if isinstance(st.get("position_sec"), (int, float)) and isinstance(st.get("duration_sec"), (int, float)):
+                st["remaining_sec"] = max(0.0, float(st["duration_sec"]) - float(st["position_sec"]))
+        except Exception as e:
+            if callable(self.log):
+                self.log("flows", f"[MAC] Error reading player {app}: {e}")
 
         return st
 
@@ -636,31 +653,41 @@ class MacAppleScriptBackend(MediaBackend):
                 self._player = self._detect_player()
                 st = self._read_player(self._player)
                 self.update(st)
-            except Exception:
-                pass
+            except Exception as e:
+                if callable(self.log):
+                    self.log("flows", f"[MAC] Backend polling error: {e}")
             time.sleep(0.75)
 
     def control(self, cmd: str) -> bool:
-        app = self.snapshot().get("source_app") or self._player
-        if app not in ("Music", "Spotify"):
+        try:
+            app = self.snapshot().get("source_app") or self._player
+            if app not in ("Music", "Spotify"):
+                if callable(self.log):
+                    self.log("flows", f"[MAC] Control ignored - no valid app (current: {app})")
+                return False
+            c = (cmd or "").lower().strip()
+            if callable(self.log):
+                self.log("flows", f"[MAC] Control command: {c} for {app}")
+            if c in ("play_pause", "toggle"):
+                self._osascript(f'tell application "{app}" to playpause')
+                return True
+            if c == "pause":
+                self._osascript(f'tell application "{app}" to pause')
+                return True
+            if c == "play":
+                self._osascript(f'tell application "{app}" to play')
+                return True
+            if c in ("next", "skip"):
+                self._osascript(f'tell application "{app}" to next track')
+                return True
+            if c in ("prev", "previous", "back"):
+                self._osascript(f'tell application "{app}" to previous track')
+                return True
             return False
-        c = (cmd or "").lower().strip()
-        if c in ("play_pause", "toggle"):
-            out = self._osascript(f'tell application "{app}" to playpause')
-            return True if out is not None else True  # osascript often returns empty
-        if c == "pause":
-            self._osascript(f'tell application "{app}" to pause')
-            return True
-        if c == "play":
-            self._osascript(f'tell application "{app}" to play')
-            return True
-        if c in ("next", "skip"):
-            self._osascript(f'tell application "{app}" to next track')
-            return True
-        if c in ("prev", "previous", "back"):
-            self._osascript(f'tell application "{app}" to previous track')
-            return True
-        return False
+        except Exception as e:
+            if callable(self.log):
+                self.log("flows", f"[MAC] Control error: {e}")
+            return False
 
 
 def make_media_backend(log=None, runtime_music_state=None) -> MediaBackend:

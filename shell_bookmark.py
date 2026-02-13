@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 # Radio OS Version
-__version__ = "1.04"
-RADIO_OS_VERSION = "1.04"
-RADIO_OS_RELEASE_DATE = "2026-02-11"
+__version__ = "1.06"
+RADIO_OS_VERSION = "1.06"
+RADIO_OS_RELEASE_DATE = "2026-02-13"
 
 import importlib.util
 import sys
@@ -956,6 +956,11 @@ class RadioShell:
             self.cards.append({"frame": card, "station": st})
 
         self._highlight_selected()
+        
+        # Force geometry update on Mac to ensure cards are properly positioned
+        if sys.platform == "darwin":
+            self.root.update_idletasks()
+            self.canvas.update_idletasks()
 
 
     def _add_rounded_corners(self, parent_frame: tk.Frame, radius: int, bg_color: str, card_color: str):
@@ -1268,6 +1273,14 @@ class RadioShell:
 
         step()
 
+    def _force_card_refresh(self):
+        """Force a card re-render and snap. Used on Mac after view transitions."""
+        if not self.cards:
+            return
+        # Re-snap to current selection to ensure proper layout
+        self.root.update_idletasks()
+        self._snap_to_index(self.selected_idx, animate=False)
+
     # -----------------------------
     # Runtime view
     # -----------------------------
@@ -1338,6 +1351,9 @@ class RadioShell:
         self.mode_lbl.config(text="Station Browser")
         self.runtime.pack_forget()
         self.home.pack(fill="both", expand=True)
+        # Force geometry update on Mac to ensure cards render properly
+        if sys.platform == "darwin":
+            self.root.update_idletasks()
         self._transitioning = False if instant else True
         if not instant:
             self.root.after(180, lambda: setattr(self, "_transitioning", False))
@@ -1368,6 +1384,9 @@ class RadioShell:
         self.now_playing.config(text="")
         self.now_sub.config(text="")
         self.show_home()
+        # Force card refresh on Mac to ensure proper rendering
+        if sys.platform == "darwin":
+            self.root.after(50, self._force_card_refresh)
 
     # -----------------------------
     # Settings

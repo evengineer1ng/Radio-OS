@@ -2764,7 +2764,11 @@ class FloatingWindow:
         self.geometry = {"x": x, "y": y, "width": width, "height": height}
         
         # Main frame (the window itself)
-        self.frame = tk.Frame(parent, bg="#121212", relief="solid", bd=1, highlightthickness=1, highlightbackground="#2a2a2a")
+        # Reduce border padding on Mac for cleaner appearance
+        border_width = 0 if IS_MAC else 1
+        highlight_thickness = 0 if IS_MAC else 1
+        self.frame = tk.Frame(parent, bg="#121212", relief="solid", bd=border_width, 
+                             highlightthickness=highlight_thickness, highlightbackground="#2a2a2a")
         self.frame.place(x=x, y=y, width=width, height=height)
         
         # Title bar with icon and title
@@ -3177,7 +3181,7 @@ class StationUI:
             text="Flush Producer Queue",
             command=lambda: ui_cmd_q.put(("flush_queue", None)),
             bg="#2a2a2a",
-            fg="#ffffff",
+            fg="#e8e8e8",
             relief="flat",
             padx=12,
             pady=6
@@ -3210,22 +3214,46 @@ class StationUI:
         def create_toolbar_button(parent, text, command, icon="", bg_color="#1e3a4d", fg_color="#4cc9f0", hover_bg="#2a4f65"):
             """Create a styled button with hover effects."""
             btn_text = f"{icon} {text}" if icon else text
-            btn = tk.Button(
-                parent, 
-                text=btn_text,
-                command=command,
-                bg=bg_color, 
-                fg=fg_color, 
-                relief="solid",
-                bd=1,
-                font=("Segoe UI", 8),
-                padx=8, 
-                pady=4,
-                activebackground=hover_bg,
-                activeforeground=fg_color,
-                highlightthickness=0,
-                cursor="hand2"
-            )
+            
+            # On Mac, tk.Button doesn't respect bg color, so use Label instead
+            if IS_MAC:
+                btn = tk.Label(
+                    parent,
+                    text=btn_text,
+                    bg=bg_color,
+                    fg=fg_color,
+                    relief="solid",
+                    bd=1,
+                    font=("Segoe UI", 8),
+                    padx=8,
+                    pady=4,
+                    cursor="hand2"
+                )
+                
+                # Add click handler
+                def on_click(e):
+                    if command:
+                        command()
+                
+                btn.bind("<Button-1>", on_click)
+            else:
+                # Windows/Linux: use regular Button
+                btn = tk.Button(
+                    parent, 
+                    text=btn_text,
+                    command=command,
+                    bg=bg_color, 
+                    fg=fg_color, 
+                    relief="solid",
+                    bd=1,
+                    font=("Segoe UI", 8),
+                    padx=8, 
+                    pady=4,
+                    activebackground=hover_bg,
+                    activeforeground=fg_color,
+                    highlightthickness=0,
+                    cursor="hand2"
+                )
             
             # Add hover effects
             def on_enter(e):
@@ -3438,7 +3466,7 @@ class StationUI:
                 except:
                     pass
 
-            tk.Button(row, text="Pick", command=on_pick, bg="#2a2a2a", fg="#ffffff", 
+            tk.Button(row, text="Pick", command=on_pick, bg="#2a2a2a", fg="#e8e8e8", 
                       relief="flat", font=("Segoe UI", 8), padx=8).pack(side="left", padx=2)
             
             # Update on focus out to prevent keystroke race conditions
@@ -3761,7 +3789,7 @@ class StationUI:
                 # Refresh UI
                 refresh_media()
             
-            tk.Button(btn_row, text="Clear", command=clear_media, bg="#666", fg="#fff",
+            tk.Button(btn_row, text="Clear", command=clear_media, bg="#666", fg="#e8e8e8",
                      relief="flat", font=("Segoe UI", 8), padx=6).pack(side="right", padx=3)
             
             # Initial population
@@ -3973,8 +4001,8 @@ class StationUI:
                 
                 load_selected() # Reload default
 
-        tk.Button(bar, text="Save Prompt", command=save, bg="#2a2a2a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
-        tk.Button(bar, text="Reset to Default", command=reset, bg="#2a2a2a", fg="white", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
+        tk.Button(bar, text="Save Prompt", command=save, bg="#2a2a2a", fg="#e8e8e8", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
+        tk.Button(bar, text="Reset to Default", command=reset, bg="#2a2a2a", fg="#e8e8e8", relief="flat", padx=12, pady=6).pack(side="right", padx=5)
         
         # Load first if exists
         if all_keys:

@@ -1,5 +1,51 @@
 # Radio OS Changelog
 
+## Version 1.06 (February 13, 2026)
+
+### 🍎 macOS-Focused Improvements
+
+**Enhanced Flows Media Player Integration**
+- Robust AppleScript backend with proper error handling
+- Music.app and Spotify support with timeout protection
+- FileNotFoundError catching for missing osascript
+- Improved control commands with validation and logging
+- Better state tracking and playback detection
+
+**Fixed UI Button Colors on Mac**
+- Toolbar buttons now display proper themed colors on macOS
+- Platform-specific button implementation (Label on Mac, Button on Windows/Linux)
+- All themed buttons (purple, green, red, blue, teal, magenta) render correctly
+- Maintained hover effects and interactions
+
+**Card Loading Fix**
+- Fixed station cards not appearing after exiting a station on macOS
+- Smart geometry updates with platform-specific `update_idletasks()` calls
+- New `_force_card_refresh()` method for reliable Mac transitions
+- Improved carousel positioning and snapping
+
+**Reduced Widget Window Borders**
+- Removed excessive border padding on widget windows for Mac
+- Zero-border design (`bd=0`, `highlightthickness=0`) on macOS
+- Cleaner appearance with more usable screen space
+- Better alignment with macOS design standards
+
+**Button Text Improvements**
+- Changed harsh white (`#ffffff`) to softer `#e8e8e8` for better contrast
+- Reduced eye strain on dark backgrounds
+- Applied to theme editor, media editor, prompt editor, and queue buttons
+
+### 🔧 Technical Changes
+
+- Enhanced `MacAppleScriptBackend` error handling in `plugins/flows.py`
+- Platform-specific button creation in `bookmark.py` toolbar
+- Mac-specific geometry updates in `shell_bookmark.py` card rendering
+- Conditional border styling for `FloatingWindow` class
+
+### 📁 Files Changed
+- `plugins/flows.py`: Mac media backend improvements
+- `bookmark.py`: Button colors, widget borders, text contrast
+- `shell_bookmark.py`: Card loading fix, version bump to 1.06
+
 ## Version 1.04 (February 11, 2026)
 
 ### 🚀 Major Features

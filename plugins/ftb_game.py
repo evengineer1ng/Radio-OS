@@ -1893,12 +1893,32 @@ class Part(Entity):
         if not self.current_ratings or len(self.current_ratings) == 0:
             if 'Part' in STATS_SCHEMAS:
                 self.current_ratings = STATS_SCHEMAS['Part'].copy()
+        
+        # Defensive: ensure effectiveness_modifier and install_quality are set
+        if not hasattr(self, 'effectiveness_modifier') or self.effectiveness_modifier is None:
+            self.effectiveness_modifier = 1.0
+        if not hasattr(self, 'install_quality') or self.install_quality is None:
+            self.install_quality = 100.0
     
     @property
     def performance_score(self) -> float:
         """Effective performance accounting for obsolescence"""
+        # Defensive: ensure current_ratings exists
+        if not self.current_ratings:
+            self.current_ratings = STATS_SCHEMAS.get('Part', {}).copy()
+        
         base_performance = self.current_ratings.get('peak_performance', 50.0)
-        obsolescence_penalty = self.current_ratings.get('obsolescence_resistance', 50.0) / 100.0
+        obsolescence_resistance = self.current_ratings.get('obsolescence_resistance', 50.0)
+        
+        # Defensive: ensure values are valid floats
+        if base_performance is None or not isinstance(base_performance, (int, float)):
+            base_performance = 50.0
+        if obsolescence_resistance is None or not isinstance(obsolescence_resistance, (int, float)):
+            obsolescence_resistance = 50.0
+        if self.effectiveness_modifier is None or not isinstance(self.effectiveness_modifier, (int, float)):
+            self.effectiveness_modifier = 1.0
+            
+        obsolescence_penalty = obsolescence_resistance / 100.0
         return base_performance * obsolescence_penalty * self.effectiveness_modifier
     
     @property
@@ -3327,6 +3347,9 @@ class SimState:
         self._last_race_results: Dict[str, 'RaceResult'] = {}
         self._last_race_contexts: Dict[str, Dict[str, Any]] = {}
         self.completed_race_ticks: Set[Tuple[str, int]] = set()
+        
+        # Live race viewing prompt state (NEW)
+        self.watch_race_live_response: Optional[bool] = None  # None = waiting for answer, True = watch live, False = skip
         
         self.player_team: Optional[Team] = None
         self.player_identity: List[str] = []  # 5 typed answers from "who are you?"
@@ -4806,6 +4829,8 @@ class SimState:
             'release_year': part.introduction_year,
             'compatibility_tags': part.compatibility_tags,
             'regulatory_exposure': part.regulatory_exposure,
+            'effectiveness_modifier': part.effectiveness_modifier,
+            'install_quality': part.install_quality,
         })
         return base
     
@@ -4831,6 +4856,22 @@ class SimState:
         part.introduction_year = data.get('release_year', 1)
         part.compatibility_tags = data.get('compatibility_tags', set())
         part.regulatory_exposure = data.get('regulatory_exposure', {})
+        
+        # Restore effectiveness_modifier and install_quality (default to full effectiveness if not present)
+        part.effectiveness_modifier = data.get('effectiveness_modifier', 1.0)
+        part.install_quality = data.get('install_quality', 100.0)
+        
+        # Migration fix: Add regulatory exposure for legacy parts that don't have it
+        if not part.regulatory_exposure:
+            import random
+            part.regulatory_exposure = {
+                'structural_margin': random.uniform(0.0, 1.0),
+                'aero_freedom': random.uniform(0.0, 1.0),
+                'power_ceiling': random.uniform(0.0, 1.0),
+                'reliability_mandate': random.uniform(0.0, 1.0),
+                'cost_cap_friendly': random.uniform(0.0, 1.0)
+            }
+        
         return part
     
     def save_to_json(self, path: str) -> None:
@@ -7330,6 +7371,314 @@ class FTBSimulation:
 
     
     @staticmethod
+    def _get_expected_races(league: League) -> int:
+        """Get expected number of races for a league based on tier"""
+        if league.tier == 5:
+            return 24  # Formula Z: 24 races
+        elif league.tier == 4:
+            return 18  # Formula Y: 18 races
+        elif league.tier == 3:
+            return 16  # Formula X: 16 races
+        elif league.tier == 2:
+            return 14  # Formula V: 14 races
+        else:
+            return 12  # Grassroots: 12 races
+    
+    @staticmethod
+    def _get_tier_name(tier: int) -> str:
+        """Get display name for tier"""
+        tier_names = {
+            1: "Grassroots",
+            2: "Formula V",
+            3: "Formula X",
+            4: "Formula Y",
+            5: "Formula Z"
+        }
+        return tier_names.get(tier, f"Tier {tier}")
+    
+    @staticmethod
+    def _calculate_promotion_eligibility(state: SimState, team: Team, position: int, points: float, league: League) -> float:
+        """
+        Calculate promotion eligibility score (0-100) based on:
+        - Championship position
+        - Points earned
+        - Financial health
+        - Team reputation
+        - Infrastructure quality
+        """
+        score = 0.0
+        
+        # Position weight (40 points max)
+        if position == 1:
+            score += 40
+        elif position == 2:
+            score += 30
+        elif position == 3:
+            score += 20
+        
+        # Points earned (20 points max)
+        # Assume average winner gets ~300 points in grassroots
+        expected_winner_points = {1: 250, 2: 350, 3: 400, 4: 450, 5: 500}.get(league.tier, 250)
+        points_ratio = min(1.0, points / expected_winner_points)
+        score += points_ratio * 20
+        
+        # Financial health (20 points max)
+        cash = team.budget.cash
+        tier_cash_threshold = {1: 150000, 2: 300000, 3: 600000, 4: 1200000, 5: 2500000}.get(league.tier, 150000)
+        financial_score = min(1.0, cash / tier_cash_threshold)
+        score += financial_score * 20
+        
+        # Reputation (10 points max)
+        reputation = team.standing_metrics.get('reputation', 50)
+        score += (reputation / 100) * 10
+        
+        # Infrastructure (10 points max)
+        avg_infrastructure = 50  # Default
+        if hasattr(team, 'infrastructure') and team.infrastructure:
+            qualities = [getattr(team.infrastructure, field, 50) for field in ['factory_quality', 'sim_quality', 'windtunnel_quality', 'data_quality']]
+            avg_infrastructure = sum(q for q in qualities if q > 0) / len([q for q in qualities if q > 0]) if any(q > 0 for q in qualities) else 50
+        score += (avg_infrastructure / 100) * 10
+        
+        return score
+    
+    @staticmethod
+    def _calculate_promotion_fee(to_tier: int, team: Team) -> int:
+        """Calculate entry fee for applying to promotion"""
+        base_fees = {
+            2: 100000,   # Grassroots → Formula V
+            3: 250000,   # Formula V → Formula X
+            4: 500000,   # Formula X → Formula Y
+            5: 1000000   # Formula Y → Formula Z
+        }
+        return base_fees.get(to_tier, 100000)
+    
+    @staticmethod
+    def _evaluate_relegation_risk(state: SimState, team: Team, position: int, points: float, league: League) -> dict:
+        """
+        Evaluate relegation risk factors and return risk score + reasons
+        """
+        risk_score = 0.0
+        reasons = []
+        
+        # Poor championship position (40 points max)
+        total_teams = len([t for t in league.teams if t])
+        if position >= total_teams:
+            risk_score += 40
+            reasons.append(f"Last place finish")
+        elif position >= total_teams - 1:
+            risk_score += 30
+            reasons.append(f"Second-to-last place")
+        elif position >= total_teams - 2:
+            risk_score += 20
+            reasons.append(f"Bottom 3 finish")
+        
+        # Low points (20 points max)
+        if points < 10:
+            risk_score += 20
+            reasons.append("Critically low points")
+        elif points < 30:
+            risk_score += 10
+            reasons.append("Below-average points")
+        
+        # Financial crisis (30 points max)
+        cash = team.budget.cash
+        financial_crisis = False
+        if cash < 20000:
+            risk_score += 30
+            reasons.append("Financial insolvency")
+            financial_crisis = True
+        elif cash < 50000:
+            risk_score += 20
+            reasons.append("Severe cash shortage")
+            financial_crisis = True
+        elif cash < 100000:
+            risk_score += 10
+            reasons.append("Financial strain")
+        
+        # Poor reputation (10 points max)
+        reputation = team.standing_metrics.get('reputation', 50)
+        if reputation < 20:
+            risk_score += 10
+            reasons.append("Damaged reputation")
+        elif reputation < 35:
+            risk_score += 5
+            reasons.append("Poor reputation")
+        
+        return {
+            'risk_score': risk_score,
+            'reasons': reasons,
+            'financial_crisis': financial_crisis
+        }
+    
+    @staticmethod
+    def _process_promotion(state: SimState, promo_data: dict) -> List[SimEvent]:
+        """Execute a promotion (move team to higher tier)"""
+        events = []
+        team_obj = promo_data['team_obj']
+        from_league = promo_data['from_league']
+        to_tier = promo_data['to_tier']
+        entry_fee = promo_data['entry_fee']
+        
+        # Find target league
+        target_leagues = [l for l in state.leagues.values() if l.tier == to_tier]
+        if not target_leagues:
+            print(f"[FTB] ERROR: No league found for tier {to_tier} promotion")
+            return events
+        
+        target_league = target_leagues[0]
+        
+        # Charge entry fee if applicable
+        if entry_fee > 0:
+            team_obj.budget.cash -= entry_fee
+            events.append(SimEvent(
+                event_type="outcome",
+                category="promotion_fee_paid",
+                ts=state.tick,
+                priority=75.0,
+                severity="info",
+                data={
+                    'team': team_obj.name,
+                    'fee': entry_fee,
+                    'message': f'Paid ${entry_fee:,} promotion entry fee'
+                }
+            ))
+        
+        # Move team
+        old_tier = team_obj.tier
+        from_league.teams.remove(team_obj)
+        target_league.teams.append(team_obj)
+        team_obj.tier = target_league.tier
+        team_obj.league_id = target_league.league_id
+        team_obj.tier_name = target_league.tier_name
+        
+        # Generate promotion success event
+        events.append(SimEvent(
+            event_type="outcome",
+            category="team_promoted",
+            ts=state.tick,
+            priority=95.0,
+            severity="major",
+            data={
+                'team': team_obj.name,
+                'from_tier': old_tier,
+                'to_tier': target_league.tier,
+                'from_tier_name': FTBSimulation._get_tier_name(old_tier),
+                'to_tier_name': target_league.tier_name,
+                'entry_fee': entry_fee,
+                'message': f'🎉 Promoted to {target_league.tier_name}!'
+            }
+        ))
+        
+        # Feature unlocks
+        old_features = TIER_FEATURES.get(old_tier, {})
+        new_features = TIER_FEATURES.get(target_league.tier, {})
+        
+        unlocked_features = []
+        if not old_features.get('can_hire_strategist') and new_features.get('can_hire_strategist'):
+            unlocked_features.append('Strategist hiring')
+        if not old_features.get('can_rd_projects') and new_features.get('can_rd_projects'):
+            unlocked_features.append('R&D projects')
+        if not old_features.get('can_manufacturer_contracts') and new_features.get('can_manufacturer_contracts'):
+            unlocked_features.append('Manufacturer partnerships')
+        
+        if unlocked_features:
+            events.append(SimEvent(
+                event_type="opportunity",
+                category="tier_features_unlocked",
+                ts=state.tick,
+                priority=85.0,
+                severity="info",
+                data={
+                    'team': team_obj.name,
+                    'tier': target_league.tier,
+                    'tier_name': target_league.tier_name,
+                    'unlocked_features': unlocked_features,
+                    'max_engineers': new_features.get('max_engineers', 0),
+                    'max_mechanics': new_features.get('max_mechanics', 0)
+                }
+            ))
+        
+        state.mark_dirty('standings')
+        print(f"[FTB] PROMOTION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name}")
+        return events
+    
+    @staticmethod
+    def _process_relegation(state: SimState, releg_data: dict) -> List[SimEvent]:
+        """Execute a relegation (move team to lower tier)"""
+        events = []
+        team_obj = releg_data['team_obj']
+        from_league = releg_data['from_league']
+        to_tier = releg_data['to_tier']
+        forced = releg_data['forced']
+        
+        # Find target league
+        target_leagues = [l for l in state.leagues.values() if l.tier == to_tier]
+        if not target_leagues:
+            print(f"[FTB] ERROR: No league found for tier {to_tier} relegation")
+            return events
+        
+        target_league = target_leagues[0]
+        
+        # Move team
+        old_tier = team_obj.tier
+        from_league.teams.remove(team_obj)
+        target_league.teams.append(team_obj)
+        team_obj.tier = target_league.tier
+        team_obj.league_id = target_league.league_id
+        team_obj.tier_name = target_league.tier_name
+        
+        # Generate relegation event
+        events.append(SimEvent(
+            event_type="outcome",
+            category="team_relegated",
+            ts=state.tick,
+            priority=90.0,
+            severity="major" if forced else "warning",
+            data={
+                'team': team_obj.name,
+                'from_tier': old_tier,
+                'to_tier': target_league.tier,
+                'from_tier_name': FTBSimulation._get_tier_name(old_tier),
+                'to_tier_name': target_league.tier_name,
+                'forced': forced,
+                'message': f'{"⚠️ FORCED" if forced else "📉 Voluntary"} Relegation to {target_league.tier_name}'
+            }
+        ))
+        
+        # Feature losses
+        old_features = TIER_FEATURES.get(old_tier, {})
+        new_features = TIER_FEATURES.get(target_league.tier, {})
+        
+        lost_features = []
+        if old_features.get('can_hire_strategist') and not new_features.get('can_hire_strategist'):
+            lost_features.append('Strategist hiring')
+        if old_features.get('can_rd_projects') and not new_features.get('can_rd_projects'):
+            lost_features.append('R&D projects')
+        if old_features.get('can_manufacturer_contracts') and not new_features.get('can_manufacturer_contracts'):
+            lost_features.append('Manufacturer partnerships')
+        
+        if lost_features:
+            events.append(SimEvent(
+                event_type="outcome",
+                category="tier_features_lost",
+                ts=state.tick,
+                priority=85.0,
+                severity="warning",
+                data={
+                    'team': team_obj.name,
+                    'tier': target_league.tier,
+                    'tier_name': target_league.tier_name,
+                    'lost_features': lost_features,
+                    'max_engineers': new_features.get('max_engineers', 0),
+                    'max_mechanics': new_features.get('max_mechanics', 0)
+                }
+            ))
+        
+        state.mark_dirty('standings')
+        print(f"[FTB] RELEGATION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name} (forced={forced})")
+        return events
+
+    @staticmethod
     def tick_simulation(state: SimState) -> List[SimEvent]:
         """
         Main tick loop - advance simulation and return events for narration.
@@ -7481,6 +7830,23 @@ class FTBSimulation:
                                     description=f"Sponsor offer from {offer.sponsor_name}: ${offer.base_payment_per_season:,}/season"
                                 ))
         
+        # ═══════════════════════════════════════════════════════════════
+        # PROCESS PENDING PROMOTIONS & RELEGATIONS
+        # ═══════════════════════════════════════════════════════════════
+        if hasattr(state, 'pending_promotions'):
+            promotions_to_process = [p for p in state.pending_promotions if p['process_tick'] <= state.tick]
+            for promo in promotions_to_process:
+                promo_events = FTBSimulation._process_promotion(state, promo)
+                events.extend(promo_events)
+                state.pending_promotions.remove(promo)
+        
+        if hasattr(state, 'pending_relegations'):
+            relegations_to_process = [r for r in state.pending_relegations if r['process_tick'] <= state.tick]
+            for releg in relegations_to_process:
+                releg_events = FTBSimulation._process_relegation(state, releg)
+                events.extend(releg_events)
+                state.pending_relegations.remove(releg)
+        
         # Process economic downturn events (rare, every ~3-5 seasons)
         if state.tick % 30 == 0:  # Check monthly
             downturn_events = FTBSimulation._process_economic_downturn(state, rng)
@@ -7596,7 +7962,20 @@ class FTBSimulation:
                             continue
                 track_name = track.name if track else "Unknown Circuit"
                 
+                # CHECK: Is this the player's league and should we prompt for live viewing?
+                is_player_race = state.player_team and state.player_team.league_id == league_id
+                should_watch_live = False
+                
+                # For player races (not in delegate mode), ask if they want to watch live
+                # This happens automatically without interrupting flow
+                if is_player_race and state.control_mode != "delegated":
+                    # Check if we should watch live (default to instant if not set)
+                    should_watch_live = getattr(state, '_watch_current_race_live', False)
+                    # Clear the flag after checking
+                    state._watch_current_race_live = False
+                
                 print(f"[FTB] RACE_START: Tick {state.tick} - {league.name} (Tier {league.tier}) Round {league.races_this_season + 1} at {track_name}")
+                print(f"[FTB] Live viewing mode: {'ENABLED' if should_watch_live else 'DISABLED'}")
                 
                 # Update phase to race_weekend
                 state.phase = "race_weekend"
@@ -7635,7 +8014,43 @@ class FTBSimulation:
                 
                 # Simulate race for this league (pass track)
                 race_events = FTBSimulation.simulate_race_weekend(state, league, track)
-                events.extend(race_events)
+                
+                # If should_watch_live, we need to stream these events over time instead of dumping them all at once
+                if should_watch_live:
+                    print(f"[FTB] 🎥 Live race mode activated - will stream {len(race_events)} events")
+                    state._live_pbp_mode = True
+                    state._live_pbp_events = race_events  # Store for streaming
+                    state._live_pbp_cursor = 0
+                    state._live_pbp_start_ts = time.time()
+                    state._live_pbp_interval = 2.0  # 2 seconds per event
+                    
+                    # Start live feed in ftb_pbp
+                    race_result = state._last_race_results.get(league.league_id)
+                    if race_result:
+                        try:
+                            import plugins.ftb_pbp as ftb_pbp
+                            ftb_pbp.start_live_feed(race_result, state, interval_sec=2.0)
+                            print(f"[FTB] 📺 ftb_pbp live feed started")
+                        except Exception as e:
+                            print(f"[FTB] Warning: Could not start ftb_pbp live feed: {e}")
+                    
+                    # Don't add race_events to main events list yet - they'll be streamed
+                    # Instead, return a special event that tells the controller to enter streaming mode
+                    events.append(SimEvent(
+                        event_type="control",
+                        category="enter_live_race_mode",
+                        ts=state.tick,
+                        priority=100.0,
+                        data={
+                            'league_id': league_id,
+                            'total_events': len(race_events),
+                            'duration_sec': len(race_events) * 2.0
+                        }
+                    ))
+                else:
+                    # Normal instant race - add all events immediately
+                    events.extend(race_events)
+                
                 state.completed_race_ticks.add((league.league_id, state.tick))
                 state.pending_race_day = False
                 state.pending_race_info = None
@@ -7708,17 +8123,8 @@ class FTBSimulation:
                 
         # Check for season end per league
         for league_id, league in state.leagues.items():
-            # Check if this league just completed its season (tighter schedules = more races)
-            if league.tier == 5:
-                expected_races = 24
-            elif league.tier == 4:
-                expected_races = 18
-            elif league.tier == 3:
-                expected_races = 16
-            elif league.tier == 2:
-                expected_races = 14
-            else:
-                expected_races = 12
+            # Check if season is complete for this league
+            expected_races = FTBSimulation._get_expected_races(league)
             if league.races_this_season >= expected_races:
                 print(f"[FTB] SEASON_END: {league.name} completed {league.races_this_season} races")
                 season_end_events = FTBSimulation.process_season_end_for_league(state, league)
@@ -8162,6 +8568,42 @@ class FTBSimulation:
             }
 
             ftb_state_db.write_race_result_archive(state.state_db_path, race_record)
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2: UPDATE HISTORICAL DATA AFTER RACE COMPLETION
+            # ═══════════════════════════════════════════════════════════════
+            try:
+                from plugins import ftb_historical_integration
+                
+                # Update real-time metrics after race
+                race_data = {
+                    'race_id': race_record['race_id'],
+                    'season': state.season_number,
+                    'round_number': race_record['round_number'],
+                    'track_name': race_record['track_name'],
+                    'finish_positions': finish_positions,
+                    'player_team': player_team_name
+                }
+                
+                ftb_historical_integration.on_race_completed(
+                    state.state_db_path, 
+                    state, 
+                    race_data
+                )
+                
+                # Check for milestones (podium streaks, records, etc.)
+                milestones = ftb_historical_integration.check_milestone_alerts(
+                    state.state_db_path,
+                    player_team_name
+                )
+                
+                if milestones:
+                    print(f"[FTB] 🏆 Milestones achieved: {len(milestones)}")
+                    for milestone in milestones[:3]:  # Log first 3
+                        print(f"[FTB]    • {milestone['type']}: {milestone['description']}")
+                        
+            except Exception as e:
+                print(f"[FTB] Warning: Could not update historical data after race: {e}")
         except Exception as e:
             print(f"[FTB] Warning: Could not archive race result: {e}")
 
@@ -9437,6 +9879,40 @@ class FTBSimulation:
                 
                 ftb_state_db.write_season_summary(state.state_db_path, season_summary)
                 print(f"[FTB] Wrote season {state.season_number} summary for {state.player_team.name}")
+                
+                # ═══════════════════════════════════════════════════════════════
+                # PHASE 2: UPDATE HISTORICAL DATA AT SEASON END
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    from plugins import ftb_historical_integration
+                    
+                    # Compile season data for historical update
+                    season_data = {
+                        'season': state.season_number,
+                        'league_id': league.league_id,
+                        'team_name': state.player_team.name,
+                        'championship_position': player_position,
+                        'total_points': player_points,
+                        'races_entered': races_entered,
+                        'wins': wins,
+                        'podiums': podiums,
+                        'poles': poles,
+                        'promoted': False,  # Will be updated if promotion occurs
+                        'relegated': False
+                    }
+                    
+                    # Run bulk historical updates (career totals, peak/valley, etc.)
+                    ftb_historical_integration.on_season_completed(
+                        state.state_db_path,
+                        state,
+                        season_data
+                    )
+                    
+                    print(f"[FTB] ✓ Historical data updated for season {state.season_number}")
+                    
+                except Exception as e:
+                    print(f"[FTB] Warning: Could not update historical data at season end: {e}")
+                    
             except Exception as e:
                 print(f"[FTB] Warning: Could not write season summary: {e}")
         
@@ -9518,145 +9994,252 @@ class FTBSimulation:
                 }
             ))
             
-            # Promotion logic (top 2 teams in tiers 1-4)
+            # ============================================================
+            # PROMOTION ELIGIBILITY & INVITATIONS (Phase 3.3)
+            # ============================================================
+            # Top teams become ELIGIBLE for promotion but don't automatically move
+            # System generates either:
+            # - Invitation offers for exceptional performers
+            # - Opportunity to apply for promotion (with fees)
+            
             if league.tier < 5 and len(teams_sorted) >= 2:
-                # Get promoted teams
-                promoted_teams = []
-                for i in range(min(2, len(teams_sorted))):
+                # Top 3 teams are considered for promotion opportunities
+                for i in range(min(3, len(teams_sorted))):
                     team_name = teams_sorted[i][0]
-                    # Find team object
                     team_obj = next((t for t in league.teams if t.name == team_name), None)
-                    if team_obj:
-                        promoted_teams.append((team_name, team_obj))
-                        events.append(SimEvent(
-                            event_type="outcome",
-                            category="team_promotion",
-                            ts=state.tick,
-                            priority=90.0,
-                            severity="major",
-                            data={
-                                'team': team_name,
-                                'from_tier': league.tier,
-                                'to_tier': league.tier + 1,
-                                'final_points': teams_sorted[i][1]
-                            }
-                        ))
-                
-                # Actually move teams to higher tier (simplified - find first league in next tier)
-                target_tier = league.tier + 1
-                target_leagues = [l for l in state.leagues.values() if l.tier == target_tier]
-                if target_leagues:
-                    target_league = target_leagues[0]  # Pick first available
-                    for team_name, team_obj in promoted_teams:
-                        old_tier = team_obj.tier
-                        league.teams.remove(team_obj)
-                        target_league.teams.append(team_obj)
-                        # Update tier attributes (Phase 0 fix)
-                        team_obj.tier = target_league.tier
-                        team_obj.league_id = target_league.league_id
-                        team_obj.tier_name = target_league.tier_name
-                        
-                        # Emit feature unlock event (Phase 3.5)
-                        old_features = TIER_FEATURES.get(old_tier, {})
-                        new_features = TIER_FEATURES.get(target_league.tier, {})
-                        
-                        unlocked_features = []
-                        if not old_features.get('can_hire_strategist') and new_features.get('can_hire_strategist'):
-                            unlocked_features.append('Strategist hiring')
-                        if not old_features.get('can_rd_projects') and new_features.get('can_rd_projects'):
-                            unlocked_features.append('R&D projects')
-                        if not old_features.get('can_manufacturer_contracts') and new_features.get('can_manufacturer_contracts'):
-                            unlocked_features.append('Manufacturer partnerships')
-                        
-                        new_upgrades = set(new_features.get('upgrade_packages_available', [])) - set(old_features.get('upgrade_packages_available', []))
-                        if new_upgrades:
-                            unlocked_features.append(f"{len(new_upgrades)} new upgrade packages")
-                        
-                        if unlocked_features:
+                    if not team_obj:
+                        continue
+                    
+                    position = i + 1
+                    final_points = teams_sorted[i][1]
+                    
+                    # Calculate promotion eligibility score
+                    eligibility_score = FTBSimulation._calculate_promotion_eligibility(
+                        state, team_obj, position, final_points, league
+                    )
+                    
+                    # Exceptional teams (P1-P2 with strong metrics) get invitations
+                    is_invited = (
+                        position <= 2 and 
+                        eligibility_score >= 75 and
+                        team_obj.budget.cash >= 200000  # Must have financial stability
+                    )
+                    
+                    # Good teams (P1-P3 with decent metrics) can apply
+                    can_apply = (
+                        position <= 3 and
+                        eligibility_score >= 50
+                    )
+                    
+                    if team_obj == state.player_team:
+                        if is_invited:
+                            # Send invitation to player
                             events.append(SimEvent(
                                 event_type="opportunity",
-                                category="tier_features_unlocked",
+                                category="promotion_invitation",
+                                ts=state.tick,
+                                priority=95.0,
+                                severity="major",
+                                data={
+                                    'team': team_name,
+                                    'from_tier': league.tier,
+                                    'to_tier': league.tier + 1,
+                                    'from_tier_name': league.tier_name,
+                                    'to_tier_name': FTBSimulation._get_tier_name(league.tier + 1),
+                                    'position': position,
+                                    'points': final_points,
+                                    'eligibility_score': eligibility_score,
+                                    'entry_fee': 0,  # Invited = no fee
+                                    'message': f'Congratulations! P{position} finish has earned an invitation to {FTBSimulation._get_tier_name(league.tier + 1)}!',
+                                    'action_required': True,
+                                    'expires_tick': state.tick + 42  # 6 weeks to respond
+                                }
+                            ))
+                        elif can_apply:
+                            # Player can apply (with entry fee)
+                            entry_fee = FTBSimulation._calculate_promotion_fee(league.tier + 1, team_obj)
+                            events.append(SimEvent(
+                                event_type="opportunity",
+                                category="promotion_application",
                                 ts=state.tick,
                                 priority=85.0,
                                 severity="info",
                                 data={
                                     'team': team_name,
-                                    'tier': target_league.tier,
-                                    'tier_name': target_league.tier_name,
-                                    'unlocked_features': unlocked_features,
-                                    'max_engineers': new_features.get('max_engineers', 0),
-                                    'max_mechanics': new_features.get('max_mechanics', 0)
+                                    'from_tier': league.tier,
+                                    'to_tier': league.tier + 1,
+                                    'from_tier_name': league.tier_name,
+                                    'to_tier_name': FTBSimulation._get_tier_name(league.tier + 1),
+                                    'position': position,
+                                    'points': final_points,
+                                    'eligibility_score': eligibility_score,
+                                    'entry_fee': entry_fee,
+                                    'message': f'P{position} finish qualifies you to apply for promotion to {FTBSimulation._get_tier_name(league.tier + 1)}',
+                                    'action_required': True,
+                                    'expires_tick': state.tick + 42
                                 }
                             ))
+                        else:
+                            # Not eligible yet - show what's needed
+                            events.append(SimEvent(
+                                event_type="outcome",
+                                category="promotion_ineligible",
+                                ts=state.tick,
+                                priority=60.0,
+                                severity="info",
+                                data={
+                                    'team': team_name,
+                                    'position': position,
+                                    'eligibility_score': eligibility_score,
+                                    'threshold': 50,
+                                    'message': f'P{position} finish - Not yet eligible for promotion (Score: {eligibility_score:.0f}/100)'
+                                }
+                            ))
+                    else:
+                        # AI teams: auto-decide based on eligibility
+                        if is_invited or (can_apply and state.rng.random() > 0.3):
+                            # AI accepts invitation or applies (70% chance if eligible)
+                            # This will be processed in a separate promotion handler
+                            if not hasattr(state, 'pending_promotions'):
+                                state.pending_promotions = []
+                            state.pending_promotions.append({
+                                'team_name': team_name,
+                                'team_obj': team_obj,
+                                'from_league': league,
+                                'to_tier': league.tier + 1,
+                                'is_invited': is_invited,
+                                'entry_fee': 0 if is_invited else FTBSimulation._calculate_promotion_fee(league.tier + 1, team_obj),
+                                'process_tick': state.tick + 14  # Process in 2 weeks
+                            })
             
-            # Relegation logic (bottom 2 teams in tiers 2-5)
+            # ============================================================
+            # RELEGATION EVALUATION (Phase 3.3)
+            # ============================================================
+            # Bottom teams face FORCED relegation or can VOLUNTARILY drop down
+            
             if league.tier > 1 and len(teams_sorted) >= 2:
-                # Get relegated teams
-                relegated_teams = []
-                for i in range(min(2, len(teams_sorted))):
+                # Bottom 3 teams face relegation pressure
+                for i in range(min(3, len(teams_sorted))):
                     idx = -(i+1)  # Start from end
                     team_name = teams_sorted[idx][0]
                     team_obj = next((t for t in league.teams if t.name == team_name), None)
-                    if team_obj:
-                        relegated_teams.append((team_name, team_obj))
-                        events.append(SimEvent(
-                            event_type="outcome",
-                            category="team_relegation",
-                            ts=state.tick,
-                            priority=90.0,
-                            severity="major",
-                            data={
-                                'team': team_name,
-                                'from_tier': league.tier,
-                                'to_tier': league.tier - 1,
-                                'final_points': teams_sorted[idx][1]
-                            }
-                        ))
-                
-                # Move teams to lower tier
-                target_tier = league.tier - 1
-                target_leagues = [l for l in state.leagues.values() if l.tier == target_tier]
-                if target_leagues:
-                    target_league = target_leagues[0]
-                    for team_name, team_obj in relegated_teams:
-                        old_tier = team_obj.tier
-                        league.teams.remove(team_obj)
-                        target_league.teams.append(team_obj)
-                        # Update tier attributes (Phase 0 fix)
-                        team_obj.tier = target_league.tier
-                        team_obj.league_id = target_league.league_id
-                        team_obj.tier_name = target_league.tier_name
-                        
-                        # Emit feature downgrade event (Phase 3.5)
-                        old_features = TIER_FEATURES.get(old_tier, {})
-                        new_features = TIER_FEATURES.get(target_league.tier, {})
-                        
-                        lost_features = []
-                        if old_features.get('can_hire_strategist') and not new_features.get('can_hire_strategist'):
-                            lost_features.append('Strategist hiring')
-                        if old_features.get('can_rd_projects') and not new_features.get('can_rd_projects'):
-                            lost_features.append('R&D projects')
-                        if old_features.get('can_manufacturer_contracts') and not new_features.get('can_manufacturer_contracts'):
-                            lost_features.append('Manufacturer partnerships')
-                        
-                        if lost_features:
+                    if not team_obj:
+                        continue
+                    
+                    position = len(teams_sorted) - i
+                    final_points = teams_sorted[idx][1]
+                    
+                    # Calculate relegation factors
+                    relegation_factors = FTBSimulation._evaluate_relegation_risk(
+                        state, team_obj, position, final_points, league
+                    )
+                    
+                    # FORCED relegation: catastrophic failure on multiple fronts
+                    force_relegation = (
+                        relegation_factors['risk_score'] >= 80 or
+                        (position >= len(teams_sorted) - 1 and relegation_factors['financial_crisis']) or
+                        (final_points < 10 and team_obj.budget.cash < 50000)
+                    )
+                    
+                    # VOLUNTARY opportunity: struggling teams can choose to drop down
+                    can_volunteer = (
+                        relegation_factors['risk_score'] >= 40 and
+                        not force_relegation
+                    )
+                    
+                    if team_obj == state.player_team:
+                        if force_relegation:
+                            # Player MUST be relegated (game over scenario or forced move)
                             events.append(SimEvent(
                                 event_type="outcome",
-                                category="tier_features_lost",
+                                category="forced_relegation",
                                 ts=state.tick,
-                                priority=85.0,
+                                priority=98.0,
+                                severity="critical",
+                                data={
+                                    'team': team_name,
+                                    'from_tier': league.tier,
+                                    'to_tier': league.tier - 1,
+                                    'from_tier_name': league.tier_name,
+                                    'to_tier_name': FTBSimulation._get_tier_name(league.tier - 1),
+                                    'position': position,
+                                    'points': final_points,
+                                    'risk_score': relegation_factors['risk_score'],
+                                    'reasons': relegation_factors['reasons'],
+                                    'message': f'FORCED RELEGATION: {", ".join(relegation_factors["reasons"])}',
+                                    'auto_execute': True  # Happens automatically
+                                }
+                            ))
+                            
+                            # Queue for automatic relegation processing
+                            if not hasattr(state, 'pending_relegations'):
+                                state.pending_relegations = []
+                            state.pending_relegations.append({
+                                'team_name': team_name,
+                                'team_obj': team_obj,
+                                'from_league': league,
+                                'to_tier': league.tier - 1,
+                                'forced': True,
+                                'process_tick': state.tick + 7  # Process in 1 week
+                            })
+                            
+                        elif can_volunteer:
+                            # Player can CHOOSE to voluntarily relegate
+                            events.append(SimEvent(
+                                event_type="opportunity",
+                                category="voluntary_relegation_offer",
+                                ts=state.tick,
+                                priority=80.0,
                                 severity="warning",
                                 data={
                                     'team': team_name,
-                                    'tier': target_league.tier,
-                                    'tier_name': target_league.tier_name,
-                                    'lost_features': lost_features,
-                                    'max_engineers': new_features.get('max_engineers', 0),
-                                    'max_mechanics': new_features.get('max_mechanics', 0)
+                                    'from_tier': league.tier,
+                                    'to_tier': league.tier - 1,
+                                    'from_tier_name': league.tier_name,
+                                    'to_tier_name': FTBSimulation._get_tier_name(league.tier - 1),
+                                    'position': position,
+                                    'points': final_points,
+                                    'risk_score': relegation_factors['risk_score'],
+                                    'reasons': relegation_factors['reasons'],
+                                    'benefits': [
+                                        'Lower operating costs',
+                                        'Easier competition',
+                                        'Time to rebuild',
+                                        'Reduced pressure'
+                                    ],
+                                    'message': f'Struggling at P{position} - Consider voluntary relegation to rebuild?',
+                                    'action_required': True,
+                                    'expires_tick': state.tick + 28  # 4 weeks to decide
                                 }
                             ))
+                    else:
+                        # AI teams: auto-decide based on circumstances
+                        if force_relegation:
+                            # AI automatically relegated
+                            if not hasattr(state, 'pending_relegations'):
+                                state.pending_relegations = []
+                            state.pending_relegations.append({
+                                'team_name': team_name,
+                                'team_obj': team_obj,
+                                'from_league': league,
+                                'to_tier': league.tier - 1,
+                                'forced': True,
+                                'process_tick': state.tick + 7
+                            })
+                        elif can_volunteer and state.rng.random() > 0.7:
+                            # 30% of struggling AI teams voluntarily relegate
+                            if not hasattr(state, 'pending_relegations'):
+                                state.pending_relegations = []
+                            state.pending_relegations.append({
+                                'team_name': team_name,
+                                'team_obj': team_obj,
+                                'from_league': league,
+                                'to_tier': league.tier - 1,
+                                'forced': False,
+                                'process_tick': state.tick + 14
+                            })
             
-            # Team liquidation (last place in tier 1)
+            # Team liquidation (catastrophic failure in tier 1)
             if league.tier == 1 and len(teams_sorted) >= 1:
                 last_team_name = teams_sorted[-1][0]
                 last_team_obj = next((t for t in league.teams if t.name == last_team_name), None)
@@ -9780,25 +10363,89 @@ class FTBSimulation:
             # PRIZE MONEY & INCOME DISTRIBUTION (Phase 3.2)
             # ============================================================
             # Award prize money based on championship position
-            # Tier-scaled prize pools (increased to balance economy):
-            tier_prize_scales = {
-                1: 2000000,    # Tier 1 (Grassroots) - was 500k (4x increase)
-                2: 4000000,    # Tier 2 (Formula V) - was 1M (4x increase)
-                3: 10000000,   # Tier 3 (Formula X) - was 2.5M (4x increase)
-                4: 20000000,   # Tier 4 (Formula Y) - was 5M (4x increase)
-                5: 40000000    # Tier 5 (Formula Z) - was 10M (4x increase)
+            # Championship finish payout structure with hype drift influence
+            
+            # Define tier-specific prize structures with position-based payouts
+            # Structure: {position: base_payout} for positions 1-10+
+            tier_prize_structures = {
+                1: {  # Tier 1 (Grassroots)
+                    1: 150000,
+                    2: 110000,
+                    3: 85000,
+                    4: 70000,
+                    5: 60000,
+                    6: 55000,
+                    7: 45000,
+                    8: 35000,
+                    9: 25000,
+                    10: 15000  # 10th+ all get this
+                },
+                2: {  # Tier 2 (Formula V)
+                    1: 400000,
+                    2: 300000,
+                    3: 230000,
+                    4: 180000,
+                    5: 150000,
+                    6: 130000,
+                    7: 110000,
+                    8: 90000,
+                    9: 70000,
+                    10: 50000
+                },
+                3: {  # Tier 3 (Formula X)
+                    1: 1200000,
+                    2: 900000,
+                    3: 700000,
+                    4: 550000,
+                    5: 450000,
+                    6: 380000,
+                    7: 320000,
+                    8: 260000,
+                    9: 200000,
+                    10: 150000
+                },
+                4: {  # Tier 4 (Formula Y)
+                    1: 3000000,
+                    2: 2200000,
+                    3: 1700000,
+                    4: 1300000,
+                    5: 1100000,
+                    6: 950000,
+                    7: 800000,
+                    8: 650000,
+                    9: 500000,
+                    10: 400000
+                },
+                5: {  # Tier 5 (Formula Z)
+                    1: 8000000,
+                    2: 6000000,
+                    3: 4500000,
+                    4: 3500000,
+                    5: 2900000,
+                    6: 2500000,
+                    7: 2100000,
+                    8: 1700000,
+                    9: 1400000,
+                    10: 1100000
+                }
             }
             
-            base_prize = tier_prize_scales.get(league.tier, 500000)
+            prize_structure = tier_prize_structures.get(league.tier, tier_prize_structures[1])
             
             for position, (team_name, points) in enumerate(teams_sorted, 1):
                 team_obj = next((t for t in league.teams if t.name == team_name), None)
                 if not team_obj:
                     continue
                 
-                # Exponential decay: P1 gets base, P2 gets 60%, P3 gets 40%, etc.
-                position_multiplier = max(0.1, 1.0 / (position ** 0.7))
-                prize_money = base_prize * position_multiplier
+                # Get base prize for position (positions 10+ all get position 10 payout)
+                base_prize = prize_structure.get(min(position, 10), prize_structure[10])
+                
+                # Apply hype drift modifier: ±15% based on league hype
+                # Hype ranges from ~0.5 to ~2.0, so hype_modifier ranges from ~0.85 to ~1.15
+                league_hype = league.hype
+                hype_modifier = 0.85 + (min(max(league_hype, 0.5), 2.0) - 0.5) * 0.2  # Maps 0.5-2.0 → 0.85-1.15
+                
+                prize_money = base_prize * hype_modifier
                 
                 # Award the prize money
                 team_obj.budget.cash += prize_money
@@ -9820,8 +10467,19 @@ class FTBSimulation:
                 
                 if team_obj == state.player_team:
                     hype_status = ""
+                    prize_hype_status = ""
+                    
+                    # Show hype modifier for prize money
+                    if hype_modifier != 1.0:
+                        if hype_modifier > 1.0:
+                            prize_hype_status = f" [+{(hype_modifier - 1.0) * 100:.1f}% hype bonus]"
+                        else:
+                            prize_hype_status = f" [{(hype_modifier - 1.0) * 100:.1f}% hype penalty]"
+                    
+                    # Show hype multiplier for media rights
                     if league_hype_multiplier > 1.0:
                         hype_status = f" [{league_hype_multiplier:.2f}x league hype!]"
+                    
                     events.append(SimEvent(
                         event_type="outcome",
                         category="prize_money",
@@ -9832,10 +10490,12 @@ class FTBSimulation:
                             'team': team_name,
                             'position': position,
                             'prize': prize_money,
+                            'base_prize': base_prize,
+                            'hype_modifier': hype_modifier,
                             'media_rights': media_rights_payment,
                             'media_bonus': media_bonus,
                             'league_hype': league_hype_multiplier,
-                            'message': f'Season prizes awarded: ${prize_money:,.0f} + ${media_rights_payment:,.0f} media rights{hype_status}'
+                            'message': f'Championship P{position} Prize: ${prize_money:,.0f}{prize_hype_status} + ${media_rights_payment:,.0f} media rights{hype_status}'
                         }
                     ))
             
@@ -9879,6 +10539,41 @@ class FTBSimulation:
                         team_obj._season_start_budget = ending_budget
                 except Exception as e:
                     print(f"[FTB ML] Warning: Failed to log season outcomes for {league_id}: {e}")
+            
+            # ============================================================
+            # PER-LEAGUE SEASON ROLLOVER
+            # ============================================================
+            # Each league runs on its own season cycle - no global synchronization
+            # Track per-league season numbers for historical tracking
+            if not hasattr(league, 'season_number'):
+                league.season_number = 1
+            
+            league.season_number += 1
+            
+            # Only increment global season_number when player's league completes
+            if state.player_team and state.player_team.league_id == league.league_id:
+                state.season_number += 1
+                state.manager_career_stats.seasons_managed += 1
+                state.races_completed_this_season = 0
+                state.in_offseason = True
+                state.offseason_ticks_remaining = 56  # 8 weeks
+                state.phase = "offseason"
+                print(f"[FTB] PLAYER_SEASON_ROLLOVER: {league.name} complete, advancing to Season {state.season_number}")
+                
+                events.append(SimEvent(
+                    event_type="time",
+                    category="season_rollover",
+                    ts=state.tick,
+                    priority=98.0,
+                    severity="major",
+                    data={
+                        'new_season': state.season_number,
+                        'league': league.name,
+                        'message': f'{league.name} Season {league.season_number} begins!'
+                    }
+                ))
+            else:
+                print(f"[FTB] LEAGUE_SEASON_COMPLETE: {league.name} finished season {league.season_number - 1}, starting season {league.season_number}")
             
             # Reset championship table for new season
             league.championship_table = {}
@@ -10378,26 +11073,31 @@ class FTBSimulation:
         if cash_runway < 14 and not hasattr(team, '_fire_sale_triggered'):
             team._fire_sale_triggered = True
             
-            # Create fire sale decision
+            # SAFETY CHECK: Skip auto-decisions for player team in human control mode
+            is_player_team = state.player_team and team.name == state.player_team.name
+            if is_player_team and state.control_mode == 'human':
+                print(f"[FTB CASH_CRISIS] ⚠️ BLOCKED: Fire sale decision skipped for player team '{team.name}' in human control mode")
+                events.append(SimEvent(
+                    event_type="pressure",
+                    category="cash_crisis",
+                    ts=state.tick,
+                    priority=90.0,
+                    severity="critical",
+                    data={
+                        'cash_runway_weeks': cash_runway / 7,
+                        'message': f'CRITICAL: Team {team.name} cash crisis! Manual intervention required.'
+                    }
+                ))
+                return events  # Exit early, don't create auto-fire sale decision
+            
+            # Create fire sale decision - focus on selling facilities (NOT firing staff)
             options = []
-            fire_driver = next((d for d in team.drivers if d), None)
-            if fire_driver:
-                options.append(DecisionOption(
-                    id="fire_driver_0",
-                    label=f"Fire {fire_driver.name}",
-                    cost=0,
-                    description=f"Remove driver from payroll",
-                    consequence_preview="Reputation -5, immediate cost savings"
-                ))
-            fire_engineer = next((e for e in team.engineers if e), None)
-            if fire_engineer:
-                options.append(DecisionOption(
-                    id="fire_engineer_0",
-                    label=f"Fire {fire_engineer.name}",
-                    cost=0,
-                    description=f"Remove engineer from payroll",
-                    consequence_preview="Reputation -3, reduced development capability"
-                ))
+            
+            # REMOVED: Firing staff during cash crisis is counterproductive
+            # - Firing costs money (severance, contract buyouts)
+            # - Team is already broke, can't afford more expenses
+            # - Better to sell facilities which generate immediate cash
+            
             # Offer multiple facility sales based on what team has
             sellable_facilities = []
             
@@ -10480,6 +11180,16 @@ class FTBSimulation:
                     cost=0,
                     description=f"{warning_str}Quality {fac_data['quality']:.0f} ({fac_data['tier']})",
                     consequence_preview=f"+${fac_data['recovery']:,.0f} cash, lose facility benefits"
+                ))
+            
+            # Fallback if no facilities available to sell
+            if not options:
+                options.append(DecisionOption(
+                    id="emergency_loan",
+                    label="Emergency Loan",
+                    cost=0,
+                    description="Last resort high-interest loan",
+                    consequence_preview="Emergency funding, high interest debt"
                 ))
             
             if options:
@@ -11112,8 +11822,11 @@ class FTBSimulation:
             # Risk of staff resignation
             rng = state.get_rng("morale", state.tick)
             all_staff = team.drivers + team.engineers + team.mechanics
+            staff_to_resign = []  # Track who's resigning to avoid modifying lists during iteration
+            
             for staff in all_staff:
                 if rng.random() < 0.05:  # 5% chance per staff member
+                    staff_to_resign.append(staff)
                     events.append(SimEvent(
                         event_type="consequence",
                         category="staff_resignation",
@@ -11128,6 +11841,31 @@ class FTBSimulation:
                             'message': f'{staff.name} resigned due to poor working conditions'
                         }
                     ))
+            
+            # Actually remove resigned staff from the team
+            for staff in staff_to_resign:
+                if staff in team.drivers:
+                    team.drivers.remove(staff)
+                    team.budget.remove_staff_salary(staff.name)
+                elif staff in team.engineers:
+                    team.engineers.remove(staff)
+                    team.budget.remove_staff_salary(staff.name)
+                elif staff in team.mechanics:
+                    team.mechanics.remove(staff)
+                    team.budget.remove_staff_salary(staff.name)
+                
+                # Remove contract if exists
+                if hasattr(staff, 'entity_id') and staff.entity_id in state.contracts:
+                    del state.contracts[staff.entity_id]
+                
+                # Add to free agent pool with reduced asking salary (fired status)
+                per_tick_salary = estimate_salary_expectation(staff, team_tier=team.tier, fired=True)
+                asking_salary = per_tick_salary * 365  # Annual salary
+                state.add_to_free_agent_pool(staff, "resigned", asking_salary)
+            
+            # Normalize roster if anyone resigned
+            if staff_to_resign:
+                team.normalize_roster()
         
         # Media Standing Rewards/Penalties
         if media_standing > 70 and media_standing < 72:  # One-time windfall check
@@ -11377,25 +12115,13 @@ class FTBSimulation:
                 # TODO: Trigger job search or game over
                 pass
         
-        # Fire Sale
+        # Fire Sale - emergency facility liquidation
         elif category == "fire_sale":
-            if option_id.startswith("fire_driver"):
-                fire_driver = next((d for d in team.drivers if d), None)
-                if fire_driver:
-                    base_rep = team.standing_metrics.get('reputation', 0.0)
-                    action = Action("fire_driver", cost=0, target=fire_driver.name)
-                    events.extend(FTBSimulation._apply_fire_driver(action, team, state))
-                    if base_rep - team.standing_metrics.get('reputation', 0.0) < 5:
-                        team.standing_metrics['reputation'] = max(0, base_rep - 5)
-            elif option_id.startswith("fire_engineer"):
-                fire_engineer = next((e for e in team.engineers if e), None)
-                if fire_engineer:
-                    base_rep = team.standing_metrics.get('reputation', 0.0)
-                    action = Action("fire_engineer", cost=0, target=fire_engineer.name)
-                    events.extend(FTBSimulation._apply_fire_engineer(action, team, state))
-                    if base_rep - team.standing_metrics.get('reputation', 0.0) < 3:
-                        team.standing_metrics['reputation'] = max(0, base_rep - 3)
-            elif option_id.startswith("sell_facility_"):
+            # REMOVED: Firing staff during fire sale (economically backwards)
+            # Fire sales should focus on selling facilities to raise immediate cash
+            # Firing staff costs money (severance/buyouts) when you're already broke
+            
+            if option_id.startswith("sell_facility_"):
                 # Extract facility key from option_id
                 facility_key = option_id.replace("sell_facility_", "")
                 result = team.sell_facility(facility_key)
@@ -11408,6 +12134,31 @@ class FTBSimulation:
                             description=f"{team.name} forced to sell {facility_key} facility for ${result['recovery_cash']:,.0f}",
                             data={'facility': facility_key, 'tier': result['tier'], 'recovery': result['recovery_cash']}
                         ))
+            elif option_id == "emergency_loan":
+                # Provide emergency loan with high interest
+                loan_amount = 50000  # Enough to survive a few more weeks
+                team.budget.cash += loan_amount
+                # Track as high-interest debt (simplified)
+                if not hasattr(team.budget, 'emergency_debt'):
+                    team.budget.emergency_debt = 0
+                team.budget.emergency_debt += loan_amount * 1.5  # 50% penalty
+                
+                events.append(SimEvent(
+                    event_type="financial",
+                    category="emergency_loan",
+                    ts=state.tick,
+                    priority=85.0,
+                    severity="warning",
+                    data={
+                        'team': team.name,
+                        'loan_amount': loan_amount,
+                        'debt_incurred': loan_amount * 1.5,
+                        'message': f'{team.name} takes emergency loan of ${loan_amount:,} (total debt: ${loan_amount * 1.5:,})'
+                    }
+                ))
+            else:
+                # Unknown fire sale option
+                print(f"[FTB] Unknown fire sale option: {option_id}")
         
         # Sponsor Bailout
         elif category == "sponsor_bailout":
@@ -11490,6 +12241,27 @@ class FTBSimulation:
         
         for decision in state.pending_decisions[:]:
             if not decision.resolved and state.tick >= decision.deadline_tick:
+                # SAFETY CHECK: Don't auto-resolve decisions for player team in human control mode
+                if (state.control_mode == 'human' and 
+                    decision.category in ['fire_sale', 'ownership_ultimatum'] and
+                    state.player_team):
+                    print(f"[FTB DECISIONS] ⚠️ BLOCKED: Auto-resolution of {decision.category} decision blocked for player team in human control mode")
+                    # Mark as resolved but don't apply consequences
+                    decision.resolved = True
+                    events.append(SimEvent(
+                        event_type="consequence",
+                        category="decision_blocked",
+                        ts=state.tick,
+                        priority=85.0,
+                        severity="warning",
+                        data={
+                            'decision_id': decision.decision_id,
+                            'category': decision.category,
+                            'message': f'Player intervention required - {decision.category} decision blocked'
+                        }
+                    ))
+                    continue
+                
                 # Auto-resolve with default option
                 auto_events = FTBSimulation.resolve_decision(
                     state, 
@@ -12351,8 +13123,20 @@ class FTBSimulation:
             )
         print(f"[FTB] FINANCE_INIT: Media broadcasting rights initialized for all teams")
         
-        # 2. Assign Player (Take over first Grassroots team)
-        target_league_id = 'grassroots_1'
+        # 2. Assign Player (Take over team in specified tier)
+        # Map tier parameter to league tier name
+        tier_map = {
+            'grassroots': 'grassroots',
+            'formula_v': 'formula_v',
+            'formula_x': 'formula_x',
+            'formula_y': 'formula_y',
+            'formula_z': 'formula_z',
+        }
+        tier_name_str = tier_map.get(tier.lower(), 'grassroots')
+        target_league_id = f'{tier_name_str}_1'
+        
+        print(f"[FTB] Player starting in tier: {tier} → league: {target_league_id}")
+        
         if target_league_id in state.leagues:
             league = state.leagues[target_league_id]
             print(f"[FTB] Found league '{league.name}' with {len(league.teams)} teams")
@@ -12461,7 +13245,7 @@ class FTBSimulation:
         FTBSimulation.apply_origin_modifiers(state, origin_story)
         
         # Ensure player team has sponsors (if it was an AI team it already does, otherwise initialize)
-        if state.player_team.name not in state.sponsorships:
+        if state.player_team and state.player_team.name not in state.sponsorships:
             state.sponsorships[state.player_team.name] = []
             state.pending_sponsor_offers[state.player_team.name] = []
             
@@ -12779,17 +13563,6 @@ class FTBSimulation:
         """Fire a driver from the roster"""
         events = []
         
-        # SAFETY LOG: Track if this is being called on player team
-        is_player_team = state.player_team and team.name == state.player_team.name
-        if is_player_team:
-            print(f"[FTB FIRE_DRIVER] ⚠️ WARNING: Firing driver from PLAYER TEAM '{team.name}'")
-            print(f"[FTB FIRE_DRIVER] Driver: {action.target}")
-            print(f"[FTB FIRE_DRIVER] Control mode: {state.control_mode}")
-            import traceback
-            traceback.print_stack()
-        else:
-            print(f"[FTB FIRE_DRIVER] Firing driver from AI team '{team.name}': {action.target}")
-        
         # Find driver by name (action.target should be driver name)
         driver_name = action.target
         driver = next((d for d in team.drivers if d.name == driver_name), None)
@@ -13100,7 +13873,34 @@ class FTBSimulation:
         if not part_id or part_id not in state.parts_catalog:
             return events  # No-op if part not found
         
-        part = state.parts_catalog[part_id]
+        catalog_part = state.parts_catalog[part_id]
+        
+        # CRITICAL: Create a deep copy of the part so each purchase is independent
+        # This prevents issues where multiple teams share the same Part object reference
+        from copy import deepcopy
+        part = deepcopy(catalog_part)
+        
+        # Generate a unique part_id for this specific instance
+        part.part_id = f"{catalog_part.part_id}_{uuid.uuid4().hex[:8]}"
+        
+        # Defensive: Ensure the copied part has proper current_ratings
+        if not part.current_ratings or len(part.current_ratings) == 0:
+            if 'Part' in STATS_SCHEMAS:
+                part.current_ratings = STATS_SCHEMAS['Part'].copy()
+        
+        # Defensive: Ensure effectiveness_modifier is set
+        if not hasattr(part, 'effectiveness_modifier') or part.effectiveness_modifier is None:
+            part.effectiveness_modifier = 1.0
+        
+        # Defensive: Ensure regulatory_exposure exists
+        if not hasattr(part, 'regulatory_exposure') or not part.regulatory_exposure:
+            part.regulatory_exposure = {
+                'structural_margin': 0.5,
+                'aero_freedom': 0.5,
+                'power_ceiling': 0.5,
+                'reliability_mandate': 0.5,
+                'cost_cap_friendly': 0.5
+            }
         
         # Validate tier access
         if not FTBSimulation.validate_part_access_for_tier(part, team.tier):
@@ -13791,7 +14591,16 @@ class FTBSimulation:
                             custom_part.generation = 1
                             custom_part.release_year = state.sim_year
                             custom_part.compatibility_tags = team.car.architecture_tags[:2]  # Inherit top 2 tags
-                            custom_part.regulatory_exposure = {}
+                            
+                            # Generate regulatory exposure for custom parts (like regular parts)
+                            custom_part.regulatory_exposure = {
+                                'structural_margin': random.uniform(0.0, 1.0),
+                                'aero_freedom': random.uniform(0.0, 1.0),
+                                'power_ceiling': random.uniform(0.0, 1.0),
+                                'reliability_mandate': random.uniform(0.0, 1.0),
+                                'cost_cap_friendly': random.uniform(0.0, 1.0)
+                            }
+                            
                             custom_part.tier_minimum = team.tier
                             custom_part.tier_maximum = 5
                             
@@ -13867,8 +14676,17 @@ class FTBSimulation:
                                     }
                                 ))
                         
-                        # Morale boost
+                        # Morale boost (base for all project completions)
                         morale_boost = min(8.0, project.total_cost / 50000.0)
+                        
+                        # Infrastructure projects get additional morale boost
+                        # Better facilities improve working conditions and team satisfaction
+                        if project.project_type in ("infrastructure_unlock", "infrastructure_upgrade"):
+                            infrastructure_morale_bonus = 4.0  # Additional flat bonus for infrastructure
+                            if project.project_type == "infrastructure_unlock":
+                                infrastructure_morale_bonus += 2.0  # Extra bonus for new facilities
+                            morale_boost += infrastructure_morale_bonus
+                        
                         team.standing_metrics['morale'] = min(100, team.standing_metrics['morale'] + morale_boost)
                         
                     else:
@@ -16082,16 +16900,17 @@ try:
         
         def _get_autosave_path(self):
             """Get path to autosave file"""
-            station_dir = self.runtime.get("STATION_DIR", ".")
-            return os.path.join(station_dir, "ftb_autosave.json")
+            workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
+            return os.path.join(workspace_root, "ftb_autosave.json")
         
         def _has_autosave(self):
             """Check if autosave file exists"""
             return os.path.exists(self._get_autosave_path())
         
-        def show_start_menu(self, save_path: str):
+        def show_start_menu(self, save_path: str = None):
             """Show start menu with New Game / Load Save options"""
-            if self.current_view == "start_menu": return
+            # Allow redrawing the menu (removed early return check)
+            print(f"[FTB] show_start_menu called with save_path={save_path}")
             self.clear_ui()
             self.current_view = "start_menu"
             
@@ -16120,27 +16939,53 @@ try:
             btn_frame = ctk.CTkFrame(main, fg_color="transparent")
             btn_frame.pack()
             
-            # Load Save button
-            load_btn = ctk.CTkButton(
-                btn_frame,
-                text="Continue Save",
-                command=lambda: self._load_and_start(save_path),
-                fg_color=FTBTheme.SUCCESS,
-                hover_color=FTBTheme.SUCCESS_HOVER,
-                width=300,
-                height=60,
-                font=("Arial", 16, "bold"),
-                corner_radius=12
-            )
-            load_btn.pack(pady=10)
+            # Continue Save button (only if autosave exists)
+            if save_path and os.path.exists(save_path):
+                print(f"[FTB] Adding 'Continue Save' button for {save_path}")
+                load_btn = ctk.CTkButton(
+                    btn_frame,
+                    text="Continue Save",
+                    command=lambda: self._load_and_start(save_path),
+                    fg_color=FTBTheme.SUCCESS,
+                    hover_color=FTBTheme.SUCCESS_HOVER,
+                    width=300,
+                    height=60,
+                    font=("Arial", 16, "bold"),
+                    corner_radius=12
+                )
+                load_btn.pack(pady=10)
+            else:
+                print(f"[FTB] Skipping 'Continue Save' button (save_path={save_path}, exists={os.path.exists(save_path) if save_path else False})")
+            
+            # Load Game button (opens file picker)
+            try:
+                print(f"[FTB] Adding 'Load Game' button")
+                load_any_btn = ctk.CTkButton(
+                    btn_frame,
+                    text="Load Game",
+                    command=self._browse_and_load,
+                    fg_color=FTBTheme.ACCENT,
+                    hover_color=FTBTheme.ACCENT_HOVER,
+                    width=300,
+                    height=60,
+                    font=("Arial", 16, "bold"),
+                    corner_radius=12
+                )
+                load_any_btn.pack(pady=10)
+                print(f"[FTB] 'Load Game' button created and packed successfully")
+            except Exception as e:
+                print(f"[FTB] ERROR creating 'Load Game' button: {e}")
+                import traceback
+                traceback.print_exc()
             
             # New Game button
+            print(f"[FTB] Adding 'New Game' button")
             new_btn = ctk.CTkButton(
                 btn_frame,
                 text="New Game",
                 command=self.show_wizard,
-                fg_color=FTBTheme.ACCENT,
-                hover_color=FTBTheme.ACCENT_HOVER,
+                fg_color=FTBTheme.CARD,
+                hover_color=FTBTheme.CARD_HOVER,
                 width=300,
                 height=60,
                 font=("Arial", 16, "bold"),
@@ -16148,21 +16993,21 @@ try:
             )
             new_btn.pack(pady=10)
             
-            # Save info
-            try:
-                import os
-                import time
-                mod_time = os.path.getmtime(save_path)
-                time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mod_time))
-                info = ctk.CTkLabel(
-                    main,
-                    text=f"Last saved: {time_str}",
-                    font=("Arial", 11),
-                    text_color=FTBTheme.TEXT_DIM
-                )
-                info.pack(pady=(40, 0))
-            except:
-                pass
+            # Save info (only if autosave exists)
+            if save_path and os.path.exists(save_path):
+                try:
+                    import time
+                    mod_time = os.path.getmtime(save_path)
+                    time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mod_time))
+                    info = ctk.CTkLabel(
+                        main,
+                        text=f"Autosave: {time_str}",
+                        font=("Arial", 11),
+                        text_color=FTBTheme.TEXT_DIM
+                    )
+                    info.pack(pady=(40, 0))
+                except:
+                    pass
         
         def _load_and_start(self, save_path: str):
             """Load save file and show game UI"""
@@ -16171,6 +17016,33 @@ try:
                 cmd_q.put({"cmd": "ftb_load_save", "path": save_path})
                 # The controller will load the state and trigger a refresh
                 # which will call show_game_ui() when state exists
+        
+        def _browse_and_load(self):
+            """Open file browser to select a save file"""
+            print("[FTB] _browse_and_load called")
+            workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
+            saves_dir = os.path.join(workspace_root, "saves")
+            print(f"[FTB] Looking for saves in: {saves_dir}")
+            
+            # Ensure saves directory exists
+            if not os.path.exists(saves_dir):
+                print(f"[FTB] Creating saves directory: {saves_dir}")
+                os.makedirs(saves_dir)
+            
+            print("[FTB] Opening file dialog...")
+            filename = filedialog.askopenfilename(
+                initialdir=saves_dir,
+                title="Select save file",
+                filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+                parent=self
+            )
+            
+            print(f"[FTB] User selected: {filename}")
+            if filename and os.path.exists(filename):
+                print(f"[FTB] Loading save from: {filename}")
+                self._load_and_start(filename)
+            else:
+                print(f"[FTB] No file selected or file doesn't exist")
         
         def _show_welcome_choice(self):
             """Show Continue/New Game choice screen when autosave exists"""
@@ -16211,6 +17083,19 @@ try:
                 width=200,
                 height=50,
                 font=("Arial", 14, "bold"),
+                corner_radius=8
+            ).pack(pady=10)
+            
+            # Load Game button (browse for different save)
+            ctk.CTkButton(
+                button_frame,
+                text="Load Game",
+                command=self._browse_and_load,
+                fg_color=FTBTheme.SUCCESS,
+                hover_color=FTBTheme.SUCCESS_HOVER,
+                width=200,
+                height=50,
+                font=("Arial", 14),
                 corner_radius=8
             ).pack(pady=10)
             
@@ -19464,17 +20349,35 @@ Weekly Expenses: {format_currency(sum(team.budget.staff_salaries.values()))}"""
             # Header
             header = ctk.CTkFrame(container, fg_color=FTBTheme.CARD, corner_radius=8)
             header.pack(fill=tk.X, padx=10, pady=(10, 10))
-            
+
+            # Header content frame for title and refresh button
+            header_content = ctk.CTkFrame(header, fg_color="transparent")
+            header_content.pack(fill=tk.X, padx=15, pady=15)
+
             ctk.CTkLabel(
-                header,
+                header_content,
                 text="🏆 Manager Career Statistics",
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=15, anchor="w")
-            
+            ).pack(side=tk.LEFT)
+
+            ctk.CTkButton(
+                header_content,
+                text="🔄 Refresh",
+                command=self._refresh_manager_career,
+                fg_color=FTBTheme.ACCENT,
+                hover_color=FTBTheme.ACCENT_HOVER,
+                width=100,
+                height=30,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
+
             # Manager Career Stats container
             self.manager_career_container = ctk.CTkFrame(container, fg_color="transparent")
             self.manager_career_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+            # Initial refresh to populate data
+            self._refresh_manager_career()
         
         def _refresh_manager_career(self):
             """Refresh manager career stats display"""
@@ -19692,14 +20595,29 @@ Teams Managed: {len(stats.teams_managed)}"""
             # Parts Inventory
             inventory_header = ctk.CTkFrame(left_panel, fg_color=FTBTheme.CARD, corner_radius=8)
             inventory_header.pack(fill=tk.X, pady=(0, 10))
-            
+
+            # Inventory header content frame for title and refresh button
+            inventory_header_content = ctk.CTkFrame(inventory_header, fg_color="transparent")
+            inventory_header_content.pack(fill=tk.X, padx=15, pady=15)
+
             ctk.CTkLabel(
-                inventory_header,
+                inventory_header_content,
                 text="📦 Parts Inventory",
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=15, anchor="w")
-            
+            ).pack(side=tk.LEFT)
+
+            ctk.CTkButton(
+                inventory_header_content,
+                text="🔄 Refresh",
+                command=self._refresh_parts_inventory,
+                fg_color=FTBTheme.ACCENT,
+                hover_color=FTBTheme.ACCENT_HOVER,
+                width=100,
+                height=30,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
+
             self.parts_inventory_container = ctk.CTkFrame(left_panel, fg_color="transparent")
             self.parts_inventory_container.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
             
@@ -19823,6 +20741,12 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             self.parts_marketplace_container = ctk.CTkFrame(right_panel, fg_color="transparent")
             self.parts_marketplace_container.pack(fill=tk.BOTH, expand=True)
+            
+            # Initial refresh to populate data
+            self._refresh_car_overview()
+            self._refresh_car_parts_visual()
+            self._refresh_parts_inventory()
+            self._refresh_parts_marketplace()
         
         def _refresh_car_overview(self):
             """Update car overview section"""
@@ -21449,15 +22373,28 @@ Teams Managed: {len(stats.teams_managed)}"""
             # Budget Overview
             overview_card = ctk.CTkFrame(container, fg_color=FTBTheme.CARD, corner_radius=8)
             overview_card.pack(fill=tk.X, padx=10, pady=(10, 10))
-            
+
+            # Header with refresh button
+            overview_header = ctk.CTkFrame(overview_card, fg_color="transparent")
+            overview_header.pack(fill=tk.X, padx=15, pady=(15, 10))
+
             ctk.CTkLabel(
-                overview_card,
+                overview_header,
                 text="💰 Financial Overview",
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=(15, 10), anchor="w")
-            
-            # Metrics grid
+            ).pack(side=tk.LEFT)
+
+            ctk.CTkButton(
+                overview_header,
+                text="🔄 Refresh",
+                command=self._refresh_finance,
+                fg_color=FTBTheme.ACCENT,
+                hover_color=FTBTheme.ACCENT_HOVER,
+                width=100,
+                height=30,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)            # Metrics grid
             metrics_grid = ctk.CTkFrame(overview_card, fg_color="transparent")
             metrics_grid.pack(fill=tk.X, padx=15, pady=(0, 15))
             
@@ -22880,14 +23817,29 @@ Teams Managed: {len(stats.teams_managed)}"""
             # Performance Comparison Card
             comparison_card = ctk.CTkFrame(container, fg_color=FTBTheme.CARD, corner_radius=8)
             comparison_card.pack(fill=tk.X, padx=10, pady=(10, 10))
-            
+
+            # Header with refresh button
+            comparison_header = ctk.CTkFrame(comparison_card, fg_color="transparent")
+            comparison_header.pack(fill=tk.X, padx=15, pady=(15, 10))
+
             ctk.CTkLabel(
-                comparison_card,
+                comparison_header,
                 text="📊 Team Performance Comparison",
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=(15, 10), anchor="w")
-            
+            ).pack(side=tk.LEFT)
+
+            ctk.CTkButton(
+                comparison_header,
+                text="🔄 Refresh",
+                command=self._refresh_analytics,
+                fg_color=FTBTheme.ACCENT,
+                hover_color=FTBTheme.ACCENT_HOVER,
+                width=100,
+                height=30,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
+
             self.comparison_table_container = ctk.CTkFrame(comparison_card, fg_color="transparent")
             self.comparison_table_container.pack(fill=tk.X, padx=15, pady=(0, 15))
             
@@ -24729,11 +25681,9 @@ Teams Managed: {len(stats.teams_managed)}"""
         def exit_to_menu(self):
             """Exit to menu without destroying save"""
             self.runtime["ftb_cmd_q"].put({"cmd": "ftb_reset"})
-            # Check if save exists
-            if self._has_autosave():
-                self.show_start_menu(self._get_autosave_path())
-            else:
-                self.show_wizard()
+            # Always show start menu (will adapt based on whether autosave exists)
+            autosave_path = self._get_autosave_path() if self._has_autosave() else None
+            self.show_start_menu(autosave_path)
         
         def send_tick(self, n):
             # Debounce rapid clicks - ignore if within 200ms of last click
@@ -24763,13 +25713,13 @@ Teams Managed: {len(stats.teams_managed)}"""
             print(f"[FTB WIDGET {self.widget_id}] 🔄 update_from_state ENTRY: state={'None' if state is None else f'tick={state.tick}'}")
             if state is None:
                 print(f"[FTB WIDGET {self.widget_id}] ❌ State is None, checking for autosave...")
-                # Check if save exists
-                if self._has_autosave():
-                    print(f"[FTB WIDGET {self.widget_id}] 💾 Autosave found, showing start menu")
-                    self.show_start_menu(self._get_autosave_path())
+                # Show start menu (will adapt based on whether autosave exists)
+                autosave_path = self._get_autosave_path() if self._has_autosave() else None
+                if autosave_path:
+                    print(f"[FTB WIDGET {self.widget_id}] 💾 Autosave found, showing start menu with continue option")
                 else:
-                    print(f"[FTB WIDGET {self.widget_id}] 🧙 No autosave, showing wizard")
-                    self.show_wizard()
+                    print(f"[FTB WIDGET {self.widget_id}] 📋 No autosave, showing start menu")
+                self.show_start_menu(autosave_path)
                 return
             
             # Track if we just switched to game view
@@ -25835,18 +26785,13 @@ Teams Managed: {len(stats.teams_managed)}"""
             if not controller.state:
                 print(f"[FTB WIDGET POLL {self.widget_id}] ⚠️ Controller has no state, current_view={self.current_view}")
                 print(f"[FTB WIDGET POLL {self.widget_id}] 🔍 Controller details: thread_alive={controller.thread.is_alive() if controller.thread else False}, stop_event_set={controller.stop_event.is_set()}")
-                # Only switch to wizard if we're not already in start_menu, wizard, welcome, or loading
+                # Only switch to start_menu if we're not already in start_menu, wizard, welcome, or loading
                 if self.current_view not in ["start_menu", "wizard", "welcome", "loading"]:
                     # Check if save exists
-                    autosave_path = self._get_autosave_path()
-                    has_save = self._has_autosave()
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 💾 Autosave check: path={autosave_path}, exists={has_save}")
-                    if has_save:
-                        print(f"[FTB WIDGET POLL {self.widget_id}] 🎮 Switching to start menu")
-                        self.show_start_menu(autosave_path)
-                    else:
-                        print(f"[FTB WIDGET POLL {self.widget_id}] 🧙 Switching to wizard")
-                        self.show_wizard()
+                    autosave_path = self._get_autosave_path() if self._has_autosave() else None
+                    print(f"[FTB WIDGET POLL {self.widget_id}] 💾 Autosave check: path={autosave_path}, exists={autosave_path is not None}")
+                    print(f"[FTB WIDGET POLL {self.widget_id}] 📋 Switching to start menu")
+                    self.show_start_menu(autosave_path)
             else:
                 # Switch to game view if necessary
                 print(f"[FTB WIDGET POLL {self.widget_id}] ✓ Controller has state: tick={controller.state.tick}, current_view={self.current_view}")
@@ -26566,6 +27511,168 @@ class FTBController:
             'track_name': track_name
         }
     
+    def _stream_live_race_event(self) -> bool:
+        """
+        Stream one event from the live race queue.
+        Returns True if event was streamed, False if streaming is complete.
+        """
+        if not self.state or not getattr(self.state, '_live_pbp_mode', False):
+            return False
+        
+        cursor = getattr(self.state, '_live_pbp_cursor', 0)
+        events = getattr(self.state, '_live_pbp_events', [])
+        interval = getattr(self.state, '_live_pbp_interval', 2.0)
+        start_ts = getattr(self.state, '_live_pbp_start_ts', time.time())
+        
+        if cursor >= len(events):
+            # Streaming complete
+            return False
+        
+        # Check if enough time has passed for next event
+        elapsed = time.time() - start_ts
+        expected_time = cursor * interval
+        
+        if elapsed < expected_time:
+            # Not time yet
+            return True
+        
+        # Stream next event
+        event = events[cursor]
+        print(f"[FTB LIVE RACE] 📡 Streaming event {cursor+1}/{len(events)}: {event.category}")
+        
+        # Emit event to narrator/audio system
+        self._emit_events([event])
+        
+        # Write to state DB
+        if self.state_db_path and ftb_state_db:
+            try:
+                ftb_state_db.write_event_batch(self.state_db_path, [event])
+            except Exception as e:
+                print(f"[FTB] Warning: Could not write live event to DB: {e}")
+        
+        # Advance cursor
+        self.state._live_pbp_cursor = cursor + 1
+        
+        return True
+    
+    def _finalize_live_race(self) -> None:
+        """
+        Finalize the live race after all events have been streamed.
+        This completes the tick and returns to normal flow.
+        """
+        if not self.state:
+            return
+        
+        print(f"[FTB LIVE RACE] 🏁 Finalizing live race mode")
+        
+        # Clear live mode flags
+        self.state._live_pbp_mode = False
+        self.state._live_pbp_events = []
+        self.state._live_pbp_cursor = 0
+        
+        # Emit race end event
+        events = []
+        events.append(SimEvent(
+            event_type="audio",
+            category="race_end",
+            ts=self.state.tick,
+            priority=50.0,
+            data={
+                'audio_type': 'world',
+                'action': 'engine_stop'
+            }
+        ))
+        
+        # Emit final events and complete tick
+        self._emit_events(events)
+        
+        if self.state_db_path and ftb_state_db:
+            try:
+                ftb_state_db.write_event_batch(self.state_db_path, events)
+                ftb_state_db.write_game_snapshot(self.state_db_path, self.state)
+            except Exception as e:
+                print(f"[FTB] Warning: Could not write final race events to DB: {e}")
+        
+        print(f"[FTB LIVE RACE] ✅ Live race finalized, returning to normal flow")
+        
+        # Trigger UI refresh
+        self._refresh_widget()
+    
+    def _check_for_upcoming_player_race(self, tick: int) -> Optional[Tuple[str, str, int]]:
+        """
+        Check if player has a race on this tick.
+        Returns (league_name, track_name, round_number) if yes, None otherwise.
+        """
+        if not self.state or not self.state.player_team:
+            return None
+        
+        player_league_id = self.state.player_team.league_id
+        if not player_league_id:
+            return None
+        
+        league = self.state.leagues.get(player_league_id)
+        if not league or not league.schedule:
+            return None
+        
+        # Check if this tick has a race
+        for entry in league.schedule:
+            race_tick = None
+            track_id = None
+            
+            if isinstance(entry, (tuple, list)) and len(entry) == 2:
+                race_tick, track_id = entry[0], entry[1]
+            else:
+                race_tick = entry
+            
+            if race_tick == tick:
+                # Found a race!
+                track = self.state.tracks.get(track_id) if track_id else None
+                track_name = track.name if track else "Unknown Circuit"
+                round_num = league.races_this_season + 1
+                
+                return (league.name, track_name, round_num)
+        
+        return None
+    
+    def _show_watch_race_dialog(self, race_data: Dict[str, Any]) -> None:
+        """
+        Show a dialog asking the user if they want to watch the race live.
+        Uses tkinter messagebox for immediate response.
+        This is a BLOCKING call - it waits for user input.
+        """
+        print(f"[FTB DIALOG] 🏁 Showing watch race dialog for {race_data.get('track_name', 'Unknown Circuit')}")
+        
+        try:
+            import tkinter.messagebox as messagebox
+            
+            league_name = race_data.get('league_name', 'Unknown League')
+            track_name = race_data.get('track_name', 'Unknown Circuit')
+            round_num = race_data.get('round_number', 1)
+            
+            # Show blocking dialog
+            title = f"🏁 Race Day - Round {round_num}"
+            message = f"{league_name}\n{track_name}\n\nWould you like to watch the race unfold live in play-by-play?"
+            
+            # This will block until user responds
+            result = messagebox.askyesno(title, message)
+            
+            print(f"[FTB DIALOG] User responded: {'YES (watch live)' if result else 'NO (instant)'}")
+            
+            # Set flag directly on state
+            if self.state:
+                self.state._watch_current_race_live = result
+                print(f"[FTB DIALOG] Flag set on state: _watch_current_race_live = {result}")
+            else:
+                print(f"[FTB DIALOG] ERROR: No state available to set flag!")
+                    
+        except Exception as e:
+            print(f"[FTB DIALOG] Error showing dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            # Default to NO (instant) if dialog fails
+            if self.state:
+                self.state._watch_current_race_live = False
+    
     def start_new_game(self, origin: Optional[str] = None, 
                       identity: Optional[List[str]] = None,
                       save_mode: Optional[str] = None,
@@ -27096,6 +28203,17 @@ class FTBController:
                 # Handle UI commands
                 self._handle_ui_cmds()
                 
+                # Check if we're in live race streaming mode
+                if self.state and getattr(self.state, '_live_pbp_mode', False):
+                    # Stream race events one at a time
+                    if self._stream_live_race_event():
+                        # Event was streamed, continue streaming
+                        pass
+                    else:
+                        # Streaming complete, finalize race
+                        print(f"[FTB CONTROLLER] 🏁 Live race stream complete, finalizing...")
+                        self._finalize_live_race()
+                
                 # Advance simulation (only if auto mode)
                 should_tick = False
                 print(f"[FTB CONTROLLER] ⏰ Checking if should auto-tick: state={'exists' if self.state else 'None'}")
@@ -27244,6 +28362,20 @@ class FTBController:
                     print(f"[FTB CONTROLLER] ⏩ Manual tick step requested: {n} ticks")
                     if self.state:
                         print(f"[FTB CONTROLLER] ⏩ Starting tick step from tick {self.state.tick}")
+                        
+                        # PRE-TICK CHECK: Is there a player race about to happen?
+                        if n == 1 and self.state.control_mode != "delegated":  # Only for single manual ticks, not batch
+                            race_info = self._check_for_upcoming_player_race(self.state.tick)
+                            if race_info:
+                                # Show dialog and get response
+                                league_name, track_name, round_num = race_info
+                                self._show_watch_race_dialog({
+                                    'league_name': league_name,
+                                    'track_name': track_name,
+                                    'round_number': round_num
+                                })
+                                # Dialog is blocking, so state._watch_current_race_live is now set
+                                print(f"[FTB CONTROLLER] 🏁 Dialog shown, user chose: {'WATCH' if getattr(self.state, '_watch_current_race_live', False) else 'SKIP'}")
                         
                         # ACTUAL TICK EXECUTION
                         # Note: Race day logic removed - races now happen naturally when you tick into them
@@ -27425,6 +28557,16 @@ class FTBController:
                     if self.state and self.state.pending_race_day:
                         self._start_race_day_mode()
                 
+                elif cmd == "ftb_watch_race_live":
+                    # User responded to "watch race live?" prompt
+                    watch_live = msg.get("watch_live", False)
+                    if self.state:
+                        with self.state_lock:
+                            self.state.watch_race_live_response = watch_live
+                        self.log("ftb", f"User chose to {'WATCH' if watch_live else 'SKIP'} live race viewing")
+                        # Trigger immediate tick to continue race execution
+                        print(f"[FTB] ▶️  Resuming tick after user response")
+                
                 elif cmd == "ftb_reset":
                     # Reset to wizard (clear state)
                     with self.state_lock:
@@ -27582,10 +28724,14 @@ class FTBController:
                                     if events:
                                         self.state.event_history.extend(events)
                                     
-                                    # Mark all domains dirty to force complete UI refresh
-                                    self.state.mark_dirty('all')
-                                    fired_successfully = True
-                                    self.log("ftb", f"Fired: {entity_name}")
+                                    # Only mark as successful if events were generated
+                                    if events:
+                                        # Mark all domains dirty to force complete UI refresh
+                                        self.state.mark_dirty('all')
+                                        fired_successfully = True
+                                        self.log("ftb", f"Fired: {entity_name}")
+                                    else:
+                                        self.log("ftb", f"Failed to fire {entity_name} - no events generated")
                             
                             # Trigger immediate UI refresh (outside lock)
                             if fired_successfully:
@@ -27913,7 +29059,11 @@ class FTBController:
                             
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
+                                print(f"[FTB CONTROLLER] ❌ Equip FAILED - part not found in inventory: {part_id}")
                                 return
+                            
+                            print(f"[FTB CONTROLLER] Equipping part: {part.name} ({part.part_type})")
+                            print(f"[FTB CONTROLLER] Before: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
                             
                             # Remove from inventory
                             self.state.player_team.parts_inventory.remove(part)
@@ -27922,13 +29072,16 @@ class FTBController:
                             old_part = self.state.player_team.equipped_parts.get(part.part_type)
                             if old_part:
                                 self.state.player_team.parts_inventory.append(old_part)
+                                print(f"[FTB CONTROLLER] Unequipped old part: {old_part.name}")
                             
                             # Equip new part
                             self.state.player_team.equipped_parts[part.part_type] = part
                             
-                            # Update car ratings
-                            base_ratings = self.state.player_team.car.current_ratings.copy()
+                            # Update car ratings - USE BASE SCHEMA, not current ratings!
+                            base_ratings = STATS_SCHEMAS['Car'].copy()
                             self.state.player_team.car.update_ratings(base_ratings, self.state.player_team.equipped_parts)
+                            
+                            print(f"[FTB CONTROLLER] After: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
                             
                             # Generate event
                             event = SimEvent(
@@ -27943,12 +29096,14 @@ class FTBController:
                                     'part_id': part_id,
                                     'part_name': part.name,
                                     'part_type': part.part_type,
+                                    'performance_score': round(part.performance_score, 2),
                                     'replaced': old_part.name if old_part else None
                                 }
                             )
                             self.state.event_history.append(event)
                             self._emit_events([event], skip_narration=True)
                             self.state.mark_dirty('car')
+                            print(f"[FTB CONTROLLER] ✅ Part equipped successfully")
                             self.log("ftb", f"Part equipped: {part.name} ({part.part_type})")
                 
                 elif cmd == "ftb_sell_part":
@@ -27964,7 +29119,23 @@ class FTBController:
                             
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
+                                print(f"[FTB CONTROLLER] ❌ Sell FAILED - part not found in inventory: {part_id}")
                                 return
+                            
+                            # Check if part is equipped
+                            is_equipped = False
+                            for equipped_part in self.state.player_team.equipped_parts.values():
+                                if equipped_part.part_id == part_id:
+                                    is_equipped = True
+                                    break
+                            
+                            if is_equipped:
+                                self.log("ftb", f"Cannot sell equipped part {part.name}")
+                                print(f"[FTB CONTROLLER] ❌ Sell FAILED - part is equipped: {part.name}")
+                                return
+                            
+                            print(f"[FTB CONTROLLER] Selling part: {part.name} ({part.part_type})")
+                            print(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
                             
                             # Create sell_part action and apply it
                             original_cost = FTBSimulation.calculate_part_cost(part)
@@ -27977,12 +29148,18 @@ class FTBController:
                             
                             events = FTBSimulation._apply_sell_part(action, self.state.player_team, self.state)
                             
+                            print(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            
                             # Emit events
                             if events:
                                 self.state.event_history.extend(events)
                                 self._emit_events(events, skip_narration=True)
+                                print(f"[FTB CONTROLLER] ✅ Part sold successfully - generated {len(events)} events")
+                            else:
+                                print(f"[FTB CONTROLLER] ⚠️ Part sale completed but no events generated")
                             
                             self.state.mark_dirty('car')
+                            self.state.mark_dirty('finance')  # Also mark finance dirty for cash update
                             self.log("ftb", f"Part sold: {part.name}")
                 
                 elif cmd == "ftb_purchase_part":
@@ -28605,6 +29782,45 @@ def register_widgets(registry, runtime_stub):
         controller.start()
         print("[FTB Game] Started ftb_controller thread")
     
+    # Start web server if not already running
+    if "ftb_web_server_started" not in runtime_stub:
+        try:
+            import plugins.ftb_web_server as web_server_mod
+            import threading
+            
+            # Get stop event from runtime
+            stop_event = runtime_stub.get('stop_event', threading.Event())
+            
+            # Start web server in daemon thread
+            web_thread = threading.Thread(
+                target=web_server_mod.start_web_server,
+                args=(stop_event, runtime_stub),
+                daemon=True
+            )
+            web_thread.start()
+            runtime_stub["ftb_web_server_started"] = True
+            print("[FTB Game] Started web server on port 7555")
+        except Exception as e:
+            print(f"[FTB Game] Failed to start web server: {e}")
+
+    # Start HTTP-only remote server (no WebSocket, works over Tailscale)
+    if "ftb_remote_started" not in runtime_stub:
+        try:
+            import plugins.ftb_remote as remote_mod
+            import threading
+
+            stop_event = runtime_stub.get('stop_event', threading.Event())
+            remote_thread = threading.Thread(
+                target=remote_mod.start_remote_server,
+                args=(stop_event, runtime_stub),
+                daemon=True
+            )
+            remote_thread.start()
+            runtime_stub["ftb_remote_started"] = True
+            print("[FTB Game] Started HTTP remote on port 7580 (no WebSocket)")
+        except Exception as e:
+            print(f"[FTB Game] Failed to start remote server: {e}")
+
     # Main game widget
     def ftb_widget_factory(parent_frame):
         """Factory function to create FTB game widget instance"""

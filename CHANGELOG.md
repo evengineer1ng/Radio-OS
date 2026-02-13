@@ -2,7 +2,47 @@
 
 ## Version 1.06 (February 13, 2026)
 
-### 🍎 macOS-Focused Improvements
+### � FTB - Phase 2 Historical Data Integration
+
+**Complete Historical Tracking System**
+- Automatic updates after every race (streaks, momentum, pulse)
+- Season-end bulk updates for career totals and prestige
+- Historical context automatically injected into narrator prompts
+- Rich storytelling with actual game history instead of hallucinations
+
+**Live Race Viewing**
+- Real-time race event display with 2-second lap-by-lap intervals
+- Interactive dialog to watch live or skip to instant results
+- Smart triggering only for single tick advances
+- Enhanced ftb_pbp widget for live race display
+
+**New Database Schema**
+- `historical_streaks`: Win/loss/podium streak tracking
+- `historical_momentum`: Performance trends and pulse metrics
+- `historical_career`: Lifetime totals (races, wins, championships)
+- `historical_achievements`: Milestone tracking
+- `historical_prestige`: Team reputation and peak performance
+- Championship records table
+
+**New Tools & Plugins**
+- `ftb_historical_integration.py`: Core historical data management
+- `ftb_data_explorer.py`: Query and analyze historical data
+- `ftb_db_explorer.py`: Database inspection utilities
+- `ftb_remote.py`: Remote game state access
+- `tools/ftb_historical_data_bootstrap.py`: Bootstrap existing saves
+
+**Narrator Enhancements**
+- Historical context injection in prompts
+- Streak and momentum awareness
+- Achievement and milestone callouts
+- Career statistics references
+
+**Web Interface**
+- New FTBData.svelte tab for historical visualization
+- Enhanced App.svelte navigation
+- WebSocket integration for real-time updates
+
+### �🍎 macOS-Focused Improvements
 
 **Enhanced Flows Media Player Integration**
 - Robust AppleScript backend with proper error handling

@@ -601,6 +601,99 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
             bridge.connected_clients.discard(ws)
             log_fn("web", f"WebSocket client disconnected ({len(bridge.connected_clients)} total)")
 
+    # ──── REST: FTB Data Explorer Endpoints ────
+    @app.post("/api/ftb_data/query_season_summaries")
+    async def query_season_summaries(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_season_summaries(
+                db_path=payload.get("db_path"),
+                team_name=payload.get("team_name"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_race_history")
+    async def query_race_history(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_race_history(
+                db_path=payload.get("db_path"),
+                team_name=payload.get("team_name"),
+                season=payload.get("season"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_financial_history")
+    async def query_financial_history(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_financial_history(
+                db_path=payload.get("db_path"),
+                team_name=payload.get("team_name"),
+                season=payload.get("season"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_career_stats")
+    async def query_career_stats(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_career_stats(
+                db_path=payload.get("db_path"),
+                entity_name=payload.get("entity_name"),
+                role=payload.get("role"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_team_outcomes")
+    async def query_team_outcomes(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_team_outcomes(
+                db_path=payload.get("db_path"),
+                team_name=payload.get("team_name"),
+                season=payload.get("season"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_championship_history")
+    async def query_championship_history(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_championship_history(
+                db_path=payload.get("db_path"),
+                limit=payload.get("limit", 50)
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/ftb_data/query_all_tables")
+    async def query_all_tables(payload: Dict[str, Any]):
+        try:
+            from plugins import ftb_data_explorer
+            result = ftb_data_explorer.query_all_tables(
+                db_path=payload.get("db_path")
+            )
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
     # ──── Mount static files (Svelte build) ────
     radio_root = os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     dist_dir = os.path.join(radio_root, "web", "dist")
@@ -693,14 +786,28 @@ def create_full_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     from fastapi.middleware.cors import CORSMiddleware
 
     app = FastAPI(title="FTB Web Server", version="1.0.0")
+    
+    # CRITICAL: Test if this simple WebSocket works
+    @app.websocket("/ws/simple")
+    async def websocket_simple_test(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_text("Simple WebSocket connected!")
+        try:
+            while True:
+                data = await websocket.receive_text()
+                await websocket.send_text(f"Echo: {data}")
+        except WebSocketDisconnect:
+            pass
+
     broadcaster = BroadcastManager()
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # TEMPORARILY DISABLE CORS MIDDLEWARE TO TEST
+    # app.add_middleware(
+    #     CORSMiddleware,
+    #     allow_origins=["*"],
+    #     allow_methods=["*"],
+    #     allow_headers=["*"],
+    # )
 
     log_fn = shared_runtime.get("log", lambda *a, **k: None)
 
@@ -737,6 +844,10 @@ def create_full_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "ts": time.time()}
+
+    @app.get("/api/websocket-test")
+    async def websocket_test():
+        return {"message": "WebSocket handler should be available at /ws/live", "websocket_endpoint": "/ws/live"}
 
     @app.get("/api/state")
     async def get_state():
@@ -816,78 +927,23 @@ def create_full_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     # ──── WebSocket with per-client queue ────
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):
-        await ws.accept()
-        ws_id = id(ws)
-        client_q = await broadcaster.register(ws_id)
-        bridge.connected_clients.add(ws)
-        log_fn("web", f"WebSocket client connected ({len(bridge.connected_clients)} total)")
-
-        # Send initial state
+        log_fn("web", "🔌 WebSocket /ws/live attempt")
         try:
-            controller = shared_runtime.get("ftb_controller")
-            if controller and hasattr(controller, "state_lock"):
-                with controller.state_lock:
-                    state_data = serialize_game_state(controller)
-                await ws.send_json({"type": "initial_state", "data": state_data})
-            await ws.send_json({"type": "subtitle", "data": {"text": bridge.last_subtitle}})
-        except Exception:
-            pass
-
-        async def send_broadcasts():
-            try:
-                while True:
-                    msg = await client_q.get()
-                    await ws.send_text(msg)
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-
-        send_task = asyncio.create_task(send_broadcasts())
-
-        try:
+            await ws.accept()
+            log_fn("web", "✅ WebSocket /ws/live accepted!")
+            await ws.send_text("WebSocket /ws/live connected!")
+            
             while True:
-                raw = await ws.receive_text()
-                try:
-                    msg = json.loads(raw)
-                    msg_type = msg.get("type", "")
-
-                    if msg_type == "command":
-                        cmd = msg.get("data", {})
-                        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
-                        if ftb_cmd_q and isinstance(cmd, dict):
-                            ftb_cmd_q.put(cmd)
-                            await ws.send_json({"type": "ack", "data": {"cmd": cmd.get("cmd", "")}})
-
-                    elif msg_type == "ui_command":
-                        action = msg.get("action", "")
-                        payload = msg.get("payload", {})
-                        ui_cmd_q = shared_runtime.get("ui_cmd_q")
-                        if ui_cmd_q:
-                            ui_cmd_q.put((action, payload))
-
-                    elif msg_type == "ping":
-                        await ws.send_json({"type": "pong", "data": {"ts": time.time()}})
-
-                    elif msg_type == "get_state":
-                        controller = shared_runtime.get("ftb_controller")
-                        if controller and hasattr(controller, "state_lock"):
-                            with controller.state_lock:
-                                state_data = serialize_game_state(controller)
-                            await ws.send_json({"type": "state_update", "data": state_data})
-
-                except json.JSONDecodeError:
-                    pass
-
+                data = await ws.receive_text()
+                log_fn("web", f"📥 /ws/live received: {data}")
+                await ws.send_text(f"Live echo: {data}")
         except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            send_task.cancel()
-            await broadcaster.unregister(ws_id)
-            bridge.connected_clients.discard(ws)
-            log_fn("web", f"WebSocket client disconnected ({len(bridge.connected_clients)} total)")
+            log_fn("web", "🔌 /ws/live disconnected")
+        except Exception as e:
+            log_fn("web", f"❌ /ws/live error: {e}")
+            import traceback
+            log_fn("web", f"Traceback: {traceback.format_exc()}")
+            raise
 
     # ──── Static files ────
     radio_root = os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -963,6 +1019,7 @@ def start_web_server(stop_event: threading.Event, shared_runtime: Dict[str, Any]
         port=WEB_SERVER_PORT,
         log_level="warning",
         access_log=False,
+        ws="wsproto",  # Force wsproto backend — websockets v16 is incompatible with uvicorn
     )
     server = uvicorn.Server(config)
 

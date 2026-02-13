@@ -26,6 +26,48 @@ STYLE PRINCIPLES:
 """
 
 
+# ============================================================================
+# PHASE 2: HISTORICAL DATA ENHANCEMENT
+# ============================================================================
+
+def enrich_game_facts_with_history(game_facts: dict, db_path: str, team_name: str) -> dict:
+    """
+    Enhance game_facts with historical context from Phase 1 database.
+    
+    Called before format_game_facts to inject career stats, streaks, 
+    records, and momentum into narrator context.
+    """
+    if not game_facts or not db_path or not team_name:
+        return game_facts
+    
+    try:
+        from plugins import ftb_historical_integration
+        
+        # Get comprehensive historical context
+        hist_context = ftb_historical_integration.get_narrator_context_packet(
+            db_path, 
+            team_name
+        )
+        
+        # Add historical sections to game_facts
+        game_facts['historical'] = hist_context
+        
+        # Check for milestone alerts (no season parameter needed)
+        milestones = ftb_historical_integration.check_milestone_alerts(
+            db_path,
+            team_name
+        )
+        
+        if milestones:
+            game_facts['milestone_alerts'] = milestones[:5]  # Top 5 most recent
+        
+        return game_facts
+        
+    except Exception as e:
+        print(f"[FTB] Warning: Could not enrich game facts with history: {e}")
+        return game_facts
+
+
 def format_game_facts(game_facts: dict) -> str:
     """Format comprehensive game facts from database for LLM context."""
     if not game_facts:
@@ -68,6 +110,86 @@ def format_game_facts(game_facts: dict) -> str:
 - Budget: ${p.get('budget', 0):,}
 - Position: P{p.get('championship_position', '?')} | {p.get('points', 0)} pts{season_info}
 - Morale: {p.get('morale', 50):.0f}% | Reputation: {p.get('reputation', 50):.0f}%""")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: HISTORICAL CONTEXT (Career Stats, Streaks, Records)
+    # ═══════════════════════════════════════════════════════════════
+    hist = game_facts.get('historical', {})
+    if hist:
+        # Team career totals
+        career = hist.get('team_career', {})
+        if career:
+            sections.append(f"""CAREER HISTORY:
+- All-Time Record: {career.get('total_wins', 0)} wins, {career.get('total_podiums', 0)} podiums in {career.get('total_races', 0)} races
+- Championships: {career.get('championships_won', 0)} titles
+- Peak Season: S{career.get('best_season', '?')} with P{career.get('best_finish', '?')}
+- Average Season Finish: P{career.get('avg_season_finish', 0):.1f}""")
+        
+        # Active streaks
+        streaks = hist.get('streaks', {})
+        if streaks and any(streaks.values()):
+            streak_lines = []
+            if streaks.get('podium_streak', 0) > 0:
+                streak_lines.append(f"  🔥 {streaks['podium_streak']} consecutive podiums")
+            if streaks.get('points_streak', 0) > 0:
+                streak_lines.append(f"  📊 {streaks['points_streak']} consecutive points finishes")
+            if streaks.get('dnf_streak', 0) > 0:
+                streak_lines.append(f"  ⚠️ {streaks['dnf_streak']} consecutive DNFs")
+            if streak_lines:
+                sections.append(f"""ACTIVE STREAKS:\n""" + "\n".join(streak_lines))
+        
+        # Team pulse (composite health)
+        pulse = hist.get('team_pulse')
+        if pulse is not None:
+            # team_pulse is a float score 0-100
+            pulse_score = float(pulse) if not isinstance(pulse, dict) else pulse.get('pulse_score', 50)
+            pulse_icon = "🟢" if pulse_score >= 70 else ("🟡" if pulse_score >= 40 else "🔴")
+            
+            # Get momentum from career data
+            career = hist.get('career', {})
+            win_rate_str = career.get('win_rate', '0%')
+            win_rate = float(win_rate_str.rstrip('%')) if isinstance(win_rate_str, str) else 0.0
+            
+            if win_rate >= 40:
+                momentum_trend = 'rising'
+                trend_icon = "📈"
+            elif win_rate <= 10:
+                momentum_trend = 'falling'
+                trend_icon = "📉"
+            else:
+                momentum_trend = 'stable'
+                trend_icon = "➡️"
+            
+            # Get narrative temperature (handle string or float)
+            narrative_temp = hist.get('narrative_temperature', 50)
+            if isinstance(narrative_temp, str):
+                # It's a string description like "fragile", "stable", etc.
+                temp_display = narrative_temp.title()
+            else:
+                # It's a numeric value
+                temp_display = f"{float(narrative_temp):.0f}/100"
+            
+            sections.append(f"""TEAM HEALTH:
+{pulse_icon} Pulse Score: {pulse_score:.0f}/100
+{trend_icon} Momentum: {momentum_trend}
+- Historical Win Rate: {win_rate:.1f}%
+- Narrative Temperature: {temp_display}""")
+        
+        # Milestone alerts (if any)
+        milestones = game_facts.get('milestone_alerts', [])
+        if milestones:
+            milestone_lines = []
+            for m in milestones[:3]:  # Show top 3
+                milestone_lines.append(f"  🏆 {m.get('description', 'Unknown milestone')}")
+            sections.append(f"""RECENT MILESTONES:\n""" + "\n".join(milestone_lines))
+        
+        # Notable comparisons
+        comparisons = hist.get('league_comparisons', [])
+        if comparisons:
+            comp_lines = []
+            for c in comparisons[:3]:
+                comp_lines.append(f"  - {c.get('description', 'N/A')}")
+            sections.append(f"""HISTORICAL CONTEXT:\n""" + "\n".join(comp_lines))
 
     # Tier baseline + comparison to player team
     tier_baseline = game_facts.get('league_baseline', {})

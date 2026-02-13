@@ -29,6 +29,7 @@
   import History from './tabs/History.svelte'
   import PlayByPlay from './tabs/PlayByPlay.svelte'
   import Calendar from './tabs/Calendar.svelte'
+  import FTBData from './tabs/FTBData.svelte'
 
   const tabs = [
     { id: 'dashboard',  label: '🏠', name: 'Home' },
@@ -46,6 +47,7 @@
     { id: 'ai',         label: '🤖', name: 'AI' },
     { id: 'penalties',  label: '⚠️', name: 'Penalties' },
     { id: 'history',    label: '📜', name: 'History' },
+    { id: 'data',       label: '🗄️', name: 'Data' },
   ]
 
   let showNotifs = false
@@ -155,6 +157,7 @@
         {:else if $activeTab === 'ai'}<AIAssistant />
         {:else if $activeTab === 'penalties'}<Penalties />
         {:else if $activeTab === 'history'}<History />
+        {:else if $activeTab === 'data'}<FTBData />
         {:else}<Dashboard />
         {/if}
       {/if}

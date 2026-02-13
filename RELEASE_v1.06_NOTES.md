@@ -1,10 +1,57 @@
-# Radio OS v1.06 - macOS UI & Media Integration Enhancements
+# Radio OS v1.06 - macOS UI & FTB Historical Data Integration
 
 ## 🍎 macOS-Focused Improvements
 
 Radio OS v1.06 delivers significant enhancements to the macOS experience, fixing UI rendering issues, improving media player integration, and ensuring buttons and widgets display correctly on Mac.
 
-## ✨ New Features & Fixes
+## 🏁 From The Backmarker (FTB) - Phase 2 Historical Data Integration
+
+**Major Update:** Complete historical data tracking system with automatic game loop integration!
+
+### Historical Data System (Phase 2)
+- **Automatic Updates**: Streaks, momentum, and pulse calculated after every race
+- **Career Tracking**: Season-end bulk updates for career totals, prestige, peak performance
+- **Narrator Context**: Historical data automatically injected into narrator prompts
+- **Rich Storytelling**: Narrator can reference actual game history instead of hallucinating
+- **Performance Metrics**: Win/loss streaks, championship records, milestone achievements
+- **Team Pulse System**: 0-100 metric tracking recent performance momentum
+
+### Live Race Viewing
+- **Real-time Race Events**: Watch races unfold lap-by-lap with 2-second intervals
+- **Interactive Choice**: Dialog prompt to watch live or skip to instant results
+- **Smart Triggering**: Only for single tick advances (batches run instantly)
+- **Delegate Compatible**: No interruptions in delegate/auto mode
+- **Position Updates**: See overtakes, crashes, and position changes live
+- **ftb_pbp Widget**: Enhanced play-by-play display for live races
+
+### New FTB Tools & Plugins
+- **`ftb_historical_integration.py`**: Core historical data management
+- **`ftb_data_explorer.py`**: Query and analyze historical game data
+- **`ftb_db_explorer.py`**: Database inspection utilities
+- **`ftb_remote.py`**: Remote game state access
+- **Bootstrap Tool**: `tools/ftb_historical_data_bootstrap.py` for existing saves
+
+### Enhanced Database Schema
+- **`historical_streaks`**: Track win/loss/podium streaks per team
+- **`historical_momentum`**: Recent performance trends and pulse metrics
+- **`historical_career`**: Lifetime totals (races, wins, championships)
+- **`historical_achievements`**: Milestone tracking (first win, 100th race, etc.)
+- **`historical_prestige`**: Team reputation and peak performance
+- **Championship Records**: Season-by-season championship history
+
+### Narrator Enhancements
+- **Historical Context Injection**: Auto-enrichment with team history
+- **Streak Recognition**: "on a 5-race win streak" references
+- **Momentum Awareness**: High/low pulse period recognition
+- **Achievement Callouts**: Milestone and record-breaking moments
+- **Career Statistics**: Reference to lifetime performance
+
+### Web Interface Improvements
+- **FTBData.svelte**: New web tab for historical data visualization
+- **Enhanced App.svelte**: Better navigation and state management
+- **WebSocket Integration**: Real-time data updates via debug server
+
+## ✨ macOS UI & Media Features
 
 ### Enhanced Flows Media Player Integration (macOS)
 - **Robust AppleScript Backend**: Improved Mac media player integration with proper error handling
@@ -77,6 +124,17 @@ if sys.platform == "darwin":
 
 ## 📋 Changed Files
 
+**FTB System:**
+- **`plugins/ftb_game.py`**: Race/season hooks for historical updates (+1,756 lines)
+- **`plugins/ftb_narrative_prompts.py`**: Historical context enrichment (+122 lines)
+- **`plugins/ftb_state_db.py`**: Enhanced database schema (+927 lines)
+- **`plugins/ftb_web_server.py`**: WebSocket improvements (+207 lines)
+- **New plugins**: ftb_historical_integration, ftb_data_explorer, ftb_db_explorer, ftb_remote
+- **New tools**: ftb_historical_data_bootstrap.py
+- **Web UI**: App.svelte, FTBData.svelte
+- **Documentation**: FTB_PHASE2_QUICKSTART.md, PHASE2_EXECUTION_SUMMARY.md, LIVE_RACE_TESTING.md, and more
+
+**macOS Improvements:**
 - **`plugins/flows.py`**: Enhanced Mac media player backend with error handling
 - **`bookmark.py`**: 
   - Fixed toolbar button colors on Mac

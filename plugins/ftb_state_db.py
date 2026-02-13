@@ -475,6 +475,415 @@ def init_db(db_path: str) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_outcomes_team ON team_outcomes(team_id, season)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_outcomes_success ON team_outcomes(budget_health_score DESC, roi_score DESC)")
     
+    # ========================================================================
+    # HISTORICAL DATA SYSTEM - Phase 1 Foundation
+    # ========================================================================
+    
+    # I. TEAM HISTORICAL RECORDS
+    
+    # Team career totals (all-time stats)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_career_totals (
+            team_name TEXT PRIMARY KEY,
+            seasons_entered INTEGER DEFAULT 0,
+            races_entered INTEGER DEFAULT 0,
+            wins_total INTEGER DEFAULT 0,
+            podiums_total INTEGER DEFAULT 0,
+            poles_total INTEGER DEFAULT 0,
+            fastest_laps_total INTEGER DEFAULT 0,
+            points_total REAL DEFAULT 0.0,
+            championships_won INTEGER DEFAULT 0,
+            runner_up_finishes INTEGER DEFAULT 0,
+            constructors_titles INTEGER DEFAULT 0,
+            total_dnfs INTEGER DEFAULT 0,
+            mechanical_dnfs INTEGER DEFAULT 0,
+            crash_dnfs INTEGER DEFAULT 0,
+            win_rate REAL DEFAULT 0.0,
+            podium_rate REAL DEFAULT 0.0,
+            points_per_race_career REAL DEFAULT 0.0,
+            reliability_career REAL DEFAULT 0.0,
+            championship_conversion_rate REAL DEFAULT 0.0,
+            titles_per_top3_season REAL DEFAULT 0.0,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Team era performance
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS regulation_eras (
+            era_id TEXT PRIMARY KEY,
+            era_label TEXT NOT NULL,
+            start_season INTEGER NOT NULL,
+            end_season INTEGER,
+            major_regulation_changes TEXT,
+            description TEXT,
+            created_tick INTEGER NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_era_performance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT NOT NULL,
+            era_id TEXT NOT NULL,
+            era_label TEXT NOT NULL,
+            start_season INTEGER NOT NULL,
+            end_season INTEGER NOT NULL,
+            races_entered INTEGER DEFAULT 0,
+            avg_finish REAL DEFAULT 0.0,
+            avg_cpi REAL DEFAULT 0.0,
+            cpi_percentile REAL DEFAULT 0.0,
+            championships INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            podiums INTEGER DEFAULT 0,
+            performance_vs_previous_era REAL DEFAULT 0.0,
+            decline_after_rule_change REAL DEFAULT 0.0,
+            adaptability_score REAL DEFAULT 50.0,
+            last_updated_tick INTEGER NOT NULL,
+            UNIQUE(team_name, era_id)
+        )
+    """)
+    
+    # Team peak & valley metrics
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_peak_valley (
+            team_name TEXT PRIMARY KEY,
+            best_season_finish INTEGER,
+            best_season_finish_year INTEGER,
+            worst_season_finish INTEGER,
+            worst_season_finish_year INTEGER,
+            best_single_season_points REAL DEFAULT 0.0,
+            best_season_points_year INTEGER,
+            worst_season_points REAL DEFAULT 0.0,
+            worst_season_points_year INTEGER,
+            longest_title_drought INTEGER DEFAULT 0,
+            longest_win_drought INTEGER DEFAULT 0,
+            longest_podium_drought INTEGER DEFAULT 0,
+            current_title_drought INTEGER DEFAULT 0,
+            current_win_drought INTEGER DEFAULT 0,
+            current_podium_drought INTEGER DEFAULT 0,
+            biggest_season_overperformance REAL DEFAULT 0.0,
+            biggest_season_collapse REAL DEFAULT 0.0,
+            volatility_index REAL DEFAULT 0.0,
+            golden_era_start INTEGER,
+            golden_era_end INTEGER,
+            golden_era_avg_finish REAL,
+            consecutive_top3_seasons INTEGER DEFAULT 0,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # II. DRIVER HISTORICAL ARCHIVES
+    
+    # Driver career stats
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS driver_career_stats (
+            driver_name TEXT PRIMARY KEY,
+            career_starts INTEGER DEFAULT 0,
+            career_wins INTEGER DEFAULT 0,
+            career_podiums INTEGER DEFAULT 0,
+            career_poles INTEGER DEFAULT 0,
+            career_points REAL DEFAULT 0.0,
+            career_dnfs INTEGER DEFAULT 0,
+            career_teams_driven_for INTEGER DEFAULT 0,
+            championships_won INTEGER DEFAULT 0,
+            best_season_finish INTEGER,
+            best_season_finish_year INTEGER,
+            worst_season_finish INTEGER,
+            worst_season_finish_year INTEGER,
+            win_rate_career REAL DEFAULT 0.0,
+            podium_rate_career REAL DEFAULT 0.0,
+            points_per_race_career REAL DEFAULT 0.0,
+            reliability_career REAL DEFAULT 0.0,
+            clutch_index REAL DEFAULT 0.0,
+            debut_season INTEGER,
+            debut_team TEXT,
+            current_team TEXT,
+            seasons_active INTEGER DEFAULT 0,
+            is_retired INTEGER DEFAULT 0,
+            retirement_season INTEGER,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Driver team stints
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS driver_team_stints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_name TEXT NOT NULL,
+            team_name TEXT NOT NULL,
+            start_season INTEGER NOT NULL,
+            end_season INTEGER,
+            races INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            podiums INTEGER DEFAULT 0,
+            points REAL DEFAULT 0.0,
+            years_at_team INTEGER DEFAULT 0,
+            teammate_name TEXT,
+            performance_delta_vs_teammate REAL DEFAULT 0.0,
+            teammate_comparison_index REAL DEFAULT 0.0,
+            quali_head_to_head_wins INTEGER DEFAULT 0,
+            quali_head_to_head_losses INTEGER DEFAULT 0,
+            race_head_to_head_wins INTEGER DEFAULT 0,
+            race_head_to_head_losses INTEGER DEFAULT 0,
+            last_updated_tick INTEGER NOT NULL,
+            UNIQUE(driver_name, team_name, start_season)
+        )
+    """)
+    
+    # Driver development curve
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS driver_development_curve (
+            driver_name TEXT PRIMARY KEY,
+            peak_rating REAL DEFAULT 0.0,
+            peak_rating_age INTEGER,
+            peak_performance_season INTEGER,
+            peak_performance_metric REAL DEFAULT 0.0,
+            age_curve_json TEXT,
+            mettle_under_pressure_index REAL DEFAULT 0.0,
+            performance_when_championship_close REAL DEFAULT 0.0,
+            post_crash_recovery_performance REAL DEFAULT 0.0,
+            improvement_rate REAL DEFAULT 0.0,
+            consistency_index REAL DEFAULT 0.0,
+            volatility_score REAL DEFAULT 0.0,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # III. LEAGUE & CHAMPIONSHIP HISTORY
+    
+    # Championship history
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS championship_history (
+            season INTEGER NOT NULL,
+            league_id TEXT NOT NULL,
+            tier INTEGER NOT NULL,
+            champion_team TEXT NOT NULL,
+            champion_points REAL NOT NULL,
+            runner_up_team TEXT NOT NULL,
+            runner_up_points REAL NOT NULL,
+            third_place_team TEXT NOT NULL,
+            third_place_points REAL NOT NULL,
+            title_margin REAL NOT NULL,
+            title_decided_round INTEGER,
+            avg_points_to_win REAL DEFAULT 0.0,
+            most_dominant_season REAL DEFAULT 0.0,
+            closest_title_fight REAL DEFAULT 0.0,
+            is_repeat_champion INTEGER DEFAULT 0,
+            consecutive_titles_for_winner INTEGER DEFAULT 0,
+            parity_index REAL DEFAULT 0.0,
+            championship_compression_score REAL DEFAULT 0.0,
+            last_updated_tick INTEGER NOT NULL,
+            PRIMARY KEY (season, league_id)
+        )
+    """)
+    
+    # Tier definitions and history
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tier_definitions (
+            season INTEGER NOT NULL,
+            performance_tier TEXT NOT NULL,
+            min_percentile REAL NOT NULL,
+            max_percentile REAL NOT NULL,
+            PRIMARY KEY (season, performance_tier)
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_tier_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            performance_tier TEXT NOT NULL,
+            tier_percentile REAL DEFAULT 0.0,
+            seasons_in_tier INTEGER DEFAULT 0,
+            total_seasons_in_tier INTEGER DEFAULT 0,
+            promoted_from_tier INTEGER,
+            relegated_from_tier INTEGER,
+            tier_change_reason TEXT,
+            last_updated_tick INTEGER NOT NULL,
+            UNIQUE(team_name, season)
+        )
+    """)
+    
+    # IV. STREAK TRACKING
+    
+    # Active team streaks
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS active_streaks (
+            team_name TEXT PRIMARY KEY,
+            current_points_streak INTEGER DEFAULT 0,
+            current_podium_streak INTEGER DEFAULT 0,
+            current_dnf_streak INTEGER DEFAULT 0,
+            current_win_streak INTEGER DEFAULT 0,
+            consecutive_points_finishes INTEGER DEFAULT 0,
+            consecutive_outqualified_teammate INTEGER DEFAULT 0,
+            consecutive_mechanical_failures INTEGER DEFAULT 0,
+            consecutive_top5_finishes INTEGER DEFAULT 0,
+            consecutive_outside_top10 INTEGER DEFAULT 0,
+            longest_points_streak_ever INTEGER DEFAULT 0,
+            longest_win_streak_ever INTEGER DEFAULT 0,
+            longest_dnf_streak_ever INTEGER DEFAULT 0,
+            longest_podium_streak_ever INTEGER DEFAULT 0,
+            last_points_finish_race TEXT,
+            last_points_finish_season INTEGER,
+            last_podium_race TEXT,
+            last_podium_season INTEGER,
+            last_win_race TEXT,
+            last_win_season INTEGER,
+            last_dnf_race TEXT,
+            last_dnf_season INTEGER,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Active driver streaks
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS driver_active_streaks (
+            driver_name TEXT PRIMARY KEY,
+            current_points_streak INTEGER DEFAULT 0,
+            current_podium_streak INTEGER DEFAULT 0,
+            current_dnf_streak INTEGER DEFAULT 0,
+            current_win_streak INTEGER DEFAULT 0,
+            consecutive_outqualified_teammate INTEGER DEFAULT 0,
+            longest_points_streak_ever INTEGER DEFAULT 0,
+            longest_win_streak_ever INTEGER DEFAULT 0,
+            longest_podium_streak_ever INTEGER DEFAULT 0,
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # V. COMPOSITE METRICS
+    
+    # Team pulse metrics
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_pulse_metrics (
+            team_name TEXT PRIMARY KEY,
+            team_pulse REAL DEFAULT 50.0,
+            performance_trend_component REAL DEFAULT 0.0,
+            financial_stability_component REAL DEFAULT 0.0,
+            development_speed_component REAL DEFAULT 0.0,
+            league_percentile_component REAL DEFAULT 0.0,
+            competitive_tier TEXT DEFAULT 'midfield',
+            narrative_temperature TEXT DEFAULT 'stable',
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Team prestige
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS team_prestige (
+            team_name TEXT PRIMARY KEY,
+            prestige_index REAL DEFAULT 50.0,
+            championship_prestige REAL DEFAULT 0.0,
+            wins_prestige REAL DEFAULT 0.0,
+            longevity_prestige REAL DEFAULT 0.0,
+            era_dominance_prestige REAL DEFAULT 0.0,
+            financial_resilience_prestige REAL DEFAULT 0.0,
+            legacy_tier TEXT DEFAULT 'emerging',
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Driver legacy
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS driver_legacy (
+            driver_name TEXT PRIMARY KEY,
+            legacy_score REAL DEFAULT 50.0,
+            titles_legacy REAL DEFAULT 0.0,
+            win_rate_legacy REAL DEFAULT 0.0,
+            teammate_dominance_legacy REAL DEFAULT 0.0,
+            clutch_index_legacy REAL DEFAULT 0.0,
+            peak_rating_legacy REAL DEFAULT 0.0,
+            longevity_legacy REAL DEFAULT 0.0,
+            legacy_tier TEXT DEFAULT 'developing',
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # VI. EXPECTATION MODELS
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS expectation_models (
+            team_name TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            round_number INTEGER NOT NULL,
+            expected_finish REAL DEFAULT 0.0,
+            actual_finish INTEGER,
+            expectation_gap REAL DEFAULT 0.0,
+            historical_baseline_finish REAL DEFAULT 0.0,
+            regression_to_mean_indicator REAL DEFAULT 0.0,
+            sustainable_performance_score REAL DEFAULT 0.0,
+            overachieving_vs_history_index REAL DEFAULT 0.0,
+            strongest_start_comparison TEXT,
+            performance_vs_career_avg REAL DEFAULT 0.0,
+            created_tick INTEGER NOT NULL,
+            PRIMARY KEY (team_name, season, round_number)
+        )
+    """)
+    
+    # VII. TIME-BASED METRICS
+    
+    # Momentum metrics
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS momentum_metrics (
+            team_name TEXT PRIMARY KEY,
+            form_last_3_races REAL DEFAULT 0.0,
+            form_last_5_races REAL DEFAULT 0.0,
+            momentum_slope REAL DEFAULT 0.0,
+            momentum_state TEXT DEFAULT 'stable',
+            last_updated_tick INTEGER NOT NULL
+        )
+    """)
+    
+    # Narrative heat scores
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS narrative_heat_scores (
+            team_name TEXT NOT NULL,
+            story_type TEXT NOT NULL,
+            heat_score REAL DEFAULT 0.0,
+            peak_heat REAL DEFAULT 0.0,
+            decay_rate REAL DEFAULT 5.0,
+            story_start_tick INTEGER NOT NULL,
+            last_boosted_tick INTEGER NOT NULL,
+            days_since_last_boost INTEGER DEFAULT 0,
+            story_description TEXT,
+            key_players TEXT,
+            PRIMARY KEY (team_name, story_type)
+        )
+    """)
+    
+    # VIII. HISTORICAL INDEXES
+    
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_career_championships ON team_career_totals(championships_won DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_career_wins ON team_career_totals(wins_total DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_era_performance_team ON team_era_performance(team_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_era_performance_era ON team_era_performance(era_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_career_championships ON driver_career_stats(championships_won DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_career_wins ON driver_career_stats(career_wins DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_stints_driver ON driver_team_stints(driver_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_stints_team ON driver_team_stints(team_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_championship_history_season ON championship_history(season)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_championship_history_champion ON championship_history(champion_team)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_tier_history_team ON team_tier_history(team_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_team_tier_history_season ON team_tier_history(season)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_expectation_team_season ON expectation_models(team_name, season)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_narrative_heat_team ON narrative_heat_scores(team_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_narrative_heat_score ON narrative_heat_scores(heat_score DESC)")
+    
+    # Initialize default tier definitions
+    cursor.execute("""
+        INSERT OR IGNORE INTO tier_definitions (season, performance_tier, min_percentile, max_percentile) VALUES
+        (0, 'dominant', 0.0, 5.0),
+        (0, 'contender', 5.0, 20.0),
+        (0, 'upper_midfield', 20.0, 40.0),
+        (0, 'midfield', 40.0, 60.0),
+        (0, 'lower_midfield', 60.0, 80.0),
+        (0, 'backmarker', 80.0, 95.0),
+        (0, 'crisis', 95.0, 100.0)
+    """)
+    
     conn.commit()
     conn.close()
     
@@ -2948,6 +3357,524 @@ def query_team_outcomes(
             })
         
         return results
+
+
+# ============================================================================
+# HISTORICAL DATA UPDATES - Phase 1 Implementation
+# ============================================================================
+
+def update_team_career_totals(db_path: str, team_name: str, tick: int) -> None:
+    """Update team career totals from season summaries and race results.
+    
+    Args:
+        db_path: Path to database
+        team_name: Team to update
+        tick: Current game tick
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Aggregate from season_summaries
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as seasons,
+                SUM(races_entered) as races,
+                SUM(wins) as wins,
+                SUM(podiums) as podiums,
+                SUM(poles) as poles,
+                SUM(total_points) as points
+            FROM season_summaries
+            WHERE team_name = ?
+        """, (team_name,))
+        
+        row = cursor.fetchone()
+        if not row or row['seasons'] == 0:
+            # Initialize with zeros
+            cursor.execute("""
+                INSERT OR REPLACE INTO team_career_totals 
+                (team_name, seasons_entered, races_entered, wins_total, podiums_total, 
+                 poles_total, points_total, last_updated_tick)
+                VALUES (?, 0, 0, 0, 0, 0, 0.0, ?)
+            """, (team_name, tick))
+            return
+        
+        seasons = row['seasons'] or 0
+        races = row['races'] or 0
+        wins = row['wins'] or 0
+        podiums = row['podiums'] or 0
+        poles = row['poles'] or 0
+        points = row['points'] or 0.0
+        
+        # Calculate derived metrics
+        win_rate = (wins / races * 100.0) if races > 0 else 0.0
+        podium_rate = (podiums / races * 100.0) if races > 0 else 0.0
+        points_per_race = (points / races) if races > 0 else 0.0
+        
+        # Count championships (P1 finishes)
+        cursor.execute("""
+            SELECT COUNT(*) as titles
+            FROM season_summaries
+            WHERE team_name = ? AND championship_position = 1
+        """, (team_name,))
+        championships = cursor.fetchone()['titles']
+        
+        # Count runner-up finishes
+        cursor.execute("""
+            SELECT COUNT(*) as runner_ups
+            FROM season_summaries
+            WHERE team_name = ? AND championship_position = 2
+        """, (team_name,))
+        runner_ups = cursor.fetchone()['runner_ups']
+        
+        # Insert or update
+        cursor.execute("""
+            INSERT OR REPLACE INTO team_career_totals 
+            (team_name, seasons_entered, races_entered, wins_total, podiums_total, 
+             poles_total, points_total, championships_won, runner_up_finishes,
+             win_rate, podium_rate, points_per_race_career, last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (team_name, seasons, races, wins, podiums, poles, points,
+              championships, runner_ups, win_rate, podium_rate, points_per_race, tick))
+
+
+def update_team_peak_valley(db_path: str, team_name: str, tick: int) -> None:
+    """Update team peak and valley metrics.
+    
+    Args:
+        db_path: Path to database
+        team_name: Team to update
+        tick: Current game tick
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get best season finish
+        cursor.execute("""
+            SELECT championship_position, season, total_points
+            FROM season_summaries
+            WHERE team_name = ? AND championship_position IS NOT NULL
+            ORDER BY championship_position ASC, total_points DESC
+            LIMIT 1
+        """, (team_name,))
+        best = cursor.fetchone()
+        
+        # Get worst season finish
+        cursor.execute("""
+            SELECT championship_position, season, total_points
+            FROM season_summaries
+            WHERE team_name = ? AND championship_position IS NOT NULL
+            ORDER BY championship_position DESC, total_points ASC
+            LIMIT 1
+        """, (team_name,))
+        worst = cursor.fetchone()
+        
+        # Get best points season
+        cursor.execute("""
+            SELECT total_points, season
+            FROM season_summaries
+            WHERE team_name = ?
+            ORDER BY total_points DESC
+            LIMIT 1
+        """, (team_name,))
+        best_points = cursor.fetchone()
+        
+        # Calculate droughts
+        cursor.execute("""
+            SELECT season
+            FROM season_summaries
+            WHERE team_name = ? AND wins > 0
+            ORDER BY season DESC
+            LIMIT 1
+        """, (team_name,))
+        last_win_season = cursor.fetchone()
+        
+        cursor.execute("""
+            SELECT MAX(season) as current_season FROM season_summaries
+        """)
+        current_season = cursor.fetchone()['current_season'] or 0
+        
+        current_win_drought = 0
+        if last_win_season:
+            current_win_drought = current_season - last_win_season['season']
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) as seasons FROM season_summaries WHERE team_name = ?
+            """, (team_name,))
+            current_win_drought = cursor.fetchone()['seasons']
+        
+        # Insert or update
+        cursor.execute("""
+            INSERT OR REPLACE INTO team_peak_valley
+            (team_name, best_season_finish, best_season_finish_year,
+             worst_season_finish, worst_season_finish_year,
+             best_single_season_points, best_season_points_year,
+             current_win_drought, last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            team_name,
+            best['championship_position'] if best else None,
+            best['season'] if best else None,
+            worst['championship_position'] if worst else None,
+            worst['season'] if worst else None,
+            best_points['total_points'] if best_points else 0.0,
+            best_points['season'] if best_points else None,
+            current_win_drought,
+            tick
+        ))
+
+
+def update_active_streaks_after_race(
+    db_path: str, 
+    team_name: str, 
+    finish_position: int,
+    race_id: str,
+    season: int,
+    tick: int,
+    scored_points: bool = True,
+    was_dnf: bool = False
+) -> None:
+    """Update team active streaks after a race.
+    
+    Args:
+        db_path: Path to database
+        team_name: Team name
+        finish_position: Race finish position
+        race_id: Race identifier
+        season: Season number
+        tick: Current game tick
+        scored_points: Whether team scored points
+        was_dnf: Whether team had a DNF
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get current streaks or initialize
+        cursor.execute("""
+            SELECT * FROM active_streaks WHERE team_name = ?
+        """, (team_name,))
+        current = cursor.fetchone()
+        
+        if current:
+            points_streak = current['current_points_streak']
+            podium_streak = current['current_podium_streak']
+            win_streak = current['current_win_streak']
+            dnf_streak = current['current_dnf_streak']
+            top5_streak = current['consecutive_top5_finishes']
+            longest_points = current['longest_points_streak_ever']
+            longest_win = current['longest_win_streak_ever']
+            longest_podium = current['longest_podium_streak_ever']
+        else:
+            points_streak = podium_streak = win_streak = dnf_streak = top5_streak = 0
+            longest_points = longest_win = longest_podium = 0
+        
+        # Update streaks based on race result
+        if scored_points:
+            points_streak += 1
+            dnf_streak = 0
+            longest_points = max(longest_points, points_streak)
+        else:
+            points_streak = 0
+        
+        if finish_position == 1:
+            win_streak += 1
+            podium_streak += 1
+            longest_win = max(longest_win, win_streak)
+            longest_podium = max(longest_podium, podium_streak)
+        else:
+            win_streak = 0
+            if finish_position <= 3:
+                podium_streak += 1
+                longest_podium = max(longest_podium, podium_streak)
+            else:
+                podium_streak = 0
+        
+        if was_dnf:
+            dnf_streak += 1
+        else:
+            dnf_streak = 0
+        
+        if finish_position <= 5:
+            top5_streak += 1
+        else:
+            top5_streak = 0
+        
+        # Update database
+        cursor.execute("""
+            INSERT OR REPLACE INTO active_streaks
+            (team_name, current_points_streak, current_podium_streak, current_win_streak,
+             current_dnf_streak, consecutive_top5_finishes,
+             longest_points_streak_ever, longest_win_streak_ever, longest_podium_streak_ever,
+             last_points_finish_race, last_points_finish_season,
+             last_win_race, last_win_season,
+             last_podium_race, last_podium_season,
+             last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            team_name, points_streak, podium_streak, win_streak, dnf_streak, top5_streak,
+            longest_points, longest_win, longest_podium,
+            race_id if scored_points else (current['last_points_finish_race'] if current else None),
+            season if scored_points else (current['last_points_finish_season'] if current else None),
+            race_id if finish_position == 1 else (current['last_win_race'] if current else None),
+            season if finish_position == 1 else (current['last_win_season'] if current else None),
+            race_id if finish_position <= 3 else (current['last_podium_race'] if current else None),
+            season if finish_position <= 3 else (current['last_podium_season'] if current else None),
+            tick
+        ))
+
+
+def update_team_pulse_metrics(
+    db_path: str,
+    team_name: str,
+    tick: int,
+    performance_trend: float = 0.0,
+    financial_stability: float = 50.0,
+    development_speed: float = 50.0,
+    league_percentile: float = 50.0
+) -> None:
+    """Update team pulse composite metrics.
+    
+    Args:
+        db_path: Path to database
+        team_name: Team name
+        tick: Current game tick
+        performance_trend: Performance trend component (0-100)
+        financial_stability: Financial stability component (0-100)
+        development_speed: Development speed component (0-100)
+        league_percentile: League percentile component (0-100)
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Calculate team pulse (weighted average)
+        team_pulse = (
+            performance_trend * 0.35 +
+            financial_stability * 0.25 +
+            development_speed * 0.20 +
+            league_percentile * 0.20
+        )
+        
+        # Determine competitive tier
+        if league_percentile >= 95:
+            competitive_tier = "dominant"
+        elif league_percentile >= 80:
+            competitive_tier = "contender"
+        elif league_percentile >= 60:
+            competitive_tier = "upper_midfield"
+        elif league_percentile >= 40:
+            competitive_tier = "midfield"
+        elif league_percentile >= 20:
+            competitive_tier = "lower_midfield"
+        elif league_percentile >= 5:
+            competitive_tier = "backmarker"
+        else:
+            competitive_tier = "crisis"
+        
+        # Determine narrative temperature
+        if team_pulse >= 80:
+            narrative_temp = "surging"
+        elif team_pulse >= 65:
+            narrative_temp = "tense"
+        elif team_pulse >= 35:
+            narrative_temp = "stable"
+        elif team_pulse >= 20:
+            narrative_temp = "fragile"
+        elif team_pulse >= 10:
+            narrative_temp = "volatile"
+        else:
+            narrative_temp = "desperate"
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO team_pulse_metrics
+            (team_name, team_pulse, performance_trend_component,
+             financial_stability_component, development_speed_component,
+             league_percentile_component, competitive_tier, narrative_temperature,
+             last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            team_name, team_pulse, performance_trend, financial_stability,
+            development_speed, league_percentile, competitive_tier, narrative_temp, tick
+        ))
+
+
+def update_momentum_metrics(db_path: str, team_name: str, tick: int) -> None:
+    """Update momentum metrics based on recent race results.
+    
+    Args:
+        db_path: Path to database
+        team_name: Team name
+        tick: Current game tick
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get last 5 race finishes
+        cursor.execute("""
+            SELECT championship_position_after, round_number
+            FROM race_results_archive
+            WHERE player_team_name = ?
+            ORDER BY season DESC, round_number DESC
+            LIMIT 5
+        """, (team_name,))
+        
+        recent_finishes = [row['championship_position_after'] for row in cursor.fetchall() if row['championship_position_after']]
+        
+        if len(recent_finishes) < 2:
+            # Not enough data
+            return
+        
+        # Calculate form (inverse of average finish position, normalized)
+        form_last_3 = 100.0 - (sum(recent_finishes[:3]) / len(recent_finishes[:3]) * 5) if len(recent_finishes) >= 3 else 50.0
+        form_last_5 = 100.0 - (sum(recent_finishes) / len(recent_finishes) * 5) if len(recent_finishes) >= 5 else 50.0
+        
+        # Calculate momentum slope (simple linear regression)
+        if len(recent_finishes) >= 3:
+            # Reverse order for time series (oldest to newest)
+            finishes_reversed = list(reversed(recent_finishes))
+            n = len(finishes_reversed)
+            x_mean = (n - 1) / 2
+            y_mean = sum(finishes_reversed) / n
+            
+            numerator = sum((i - x_mean) * (finishes_reversed[i] - y_mean) for i in range(n))
+            denominator = sum((i - x_mean) ** 2 for i in range(n))
+            
+            slope = numerator / denominator if denominator != 0 else 0.0
+            
+            # Negative slope = improving (lower positions), positive = declining
+            momentum_slope = -slope  # Invert so positive = improving
+        else:
+            momentum_slope = 0.0
+        
+        # Determine momentum state
+        if momentum_slope > 2.0:
+            momentum_state = "surging"
+        elif momentum_slope > 0.5:
+            momentum_state = "rising"
+        elif momentum_slope < -2.0:
+            momentum_state = "collapsing"
+        elif momentum_slope < -0.5:
+            momentum_state = "declining"
+        else:
+            momentum_state = "stable"
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO momentum_metrics
+            (team_name, form_last_3_races, form_last_5_races, momentum_slope,
+             momentum_state, last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (team_name, form_last_3, form_last_5, momentum_slope, momentum_state, tick))
+
+
+def update_driver_career_stats(db_path: str, driver_name: str, tick: int) -> None:
+    """Update driver career statistics.
+    
+    Args:
+        db_path: Path to database
+        driver_name: Driver name
+        tick: Current game tick
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get driver's race results from race_results_archive
+        cursor.execute("""
+            SELECT season, finish_positions_json
+            FROM race_results_archive
+            ORDER BY season, round_number
+        """)
+        
+        career_starts = 0
+        career_wins = 0
+        career_podiums = 0
+        career_points = 0.0
+        seasons_active = set()
+        teams_driven = set()
+        
+        for row in cursor.fetchall():
+            try:
+                finishes = json.loads(row['finish_positions_json'])
+                for result in finishes:
+                    if result.get('driver_name') == driver_name:
+                        career_starts += 1
+                        position = result.get('position', 99)
+                        seasons_active.add(row['season'])
+                        
+                        if result.get('team'):
+                            teams_driven.add(result['team'])
+                        
+                        if position == 1:
+                            career_wins += 1
+                        if position <= 3:
+                            career_podiums += 1
+                        
+                        # Simplified points (you may want actual points from data)
+                        if position <= 10:
+                            career_points += max(0, 25 - (position - 1) * 2)
+            except (json.JSONDecodeError, KeyError):
+                continue
+        
+        if career_starts == 0:
+            return
+        
+        win_rate = (career_wins / career_starts * 100.0) if career_starts > 0 else 0.0
+        podium_rate = (career_podiums / career_starts * 100.0) if career_starts > 0 else 0.0
+        points_per_race = (career_points / career_starts) if career_starts > 0 else 0.0
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO driver_career_stats
+            (driver_name, career_starts, career_wins, career_podiums, career_points,
+             career_teams_driven_for, win_rate_career, podium_rate_career,
+             points_per_race_career, seasons_active, last_updated_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            driver_name, career_starts, career_wins, career_podiums, career_points,
+            len(teams_driven), win_rate, podium_rate, points_per_race,
+            len(seasons_active), tick
+        ))
+
+
+def bulk_update_historical_data(db_path: str, tick: int) -> None:
+    """Bulk update all historical data tables.
+    
+    Should be called after significant game events (race completion, season end).
+    
+    Args:
+        db_path: Path to database
+        tick: Current game tick
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get all teams that have season summaries
+        cursor.execute("""
+            SELECT DISTINCT team_name FROM season_summaries
+        """)
+        teams = [row['team_name'] for row in cursor.fetchall()]
+        
+        print(f"[FTB Historical] Updating {len(teams)} teams...")
+        
+        for team in teams:
+            try:
+                update_team_career_totals(db_path, team, tick)
+                update_team_peak_valley(db_path, team, tick)
+                update_momentum_metrics(db_path, team, tick)
+            except Exception as e:
+                print(f"[FTB Historical] Error updating {team}: {e}")
+        
+        # Get all drivers from entities
+        cursor.execute("""
+            SELECT DISTINCT name FROM entities WHERE entity_type = 'driver'
+        """)
+        drivers = [row['name'] for row in cursor.fetchall()]
+        
+        print(f"[FTB Historical] Updating {len(drivers)} drivers...")
+        
+        for driver in drivers:
+            try:
+                update_driver_career_stats(db_path, driver, tick)
+            except Exception as e:
+                print(f"[FTB Historical] Error updating driver {driver}: {e}")
+        
+        print("[FTB Historical] Bulk update complete")
 
 
 # ============================================================================

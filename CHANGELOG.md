@@ -74,6 +74,13 @@
 - Reduced eye strain on dark backgrounds
 - Applied to theme editor, media editor, prompt editor, and queue buttons
 
+**Station Launch Improvements**
+- Added debug logging for station launch process tracking
+- Explicit UTF-8 encoding on subprocess with `errors='replace'`
+- Platform-specific Unicode error handling (Windows vs Mac/Linux)
+- Better handling of emoji and special characters in runtime output
+- Prevents UnicodeDecodeError crashes when logging
+
 ### 🔧 Technical Changes
 
 - Enhanced `MacAppleScriptBackend` error handling in `plugins/flows.py`

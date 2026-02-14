@@ -8,8 +8,8 @@ llm:
   provider: openai
   api_key_env: OPENAI_API_KEY
 models:
-  producer: gpt-5.2
-  host: gpt-5.2
+  producer: gpt-4o
+  host: gpt-4o
 scheduler:
   source_quotas:
     bluesky: 2

@@ -193,6 +193,12 @@ class OpenAIProvider(ModelProvider):
             headers=headers,
             timeout=(3, max(4, int(timeout))),
         )
+        if r.status_code != 200:
+            try:
+                err_body = r.json()
+            except Exception:
+                err_body = r.text[:500]
+            print(f"[OpenAI ERROR] status={r.status_code} model={payload.get('model')} body={err_body}")
         r.raise_for_status()
 
         data = r.json()

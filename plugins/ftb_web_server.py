@@ -1301,7 +1301,7 @@ def start_web_server(stop_event: threading.Event, shared_runtime: Dict[str, Any]
     bridge = get_bridge()
     shared_runtime["web_bridge"] = bridge
 
-    app = create_full_app(shared_runtime, bridge)
+    app = create_app(shared_runtime, bridge)
 
     local_ip = _get_local_ip()
     log_fn("web", f"╔══════════════════════════════════════════════╗")
@@ -1316,7 +1316,6 @@ def start_web_server(stop_event: threading.Event, shared_runtime: Dict[str, Any]
         port=WEB_SERVER_PORT,
         log_level="warning",
         access_log=False,
-        ws="wsproto",  # Force wsproto backend — websockets v16 is incompatible with uvicorn
     )
     server = uvicorn.Server(config)
 

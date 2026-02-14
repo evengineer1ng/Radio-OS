@@ -59,3 +59,112 @@ export async function healthCheck(): Promise<boolean> {
     return false
   }
 }
+
+// ─── Race Day ───
+export async function fetchRaceDay(): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day`)
+  return res.json()
+}
+
+export async function raceDayRespond(watchLive: boolean): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ watch_live: watchLive }),
+  })
+  return res.json()
+}
+
+export async function raceDayStartLive(speed: number = 10): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day/start_live`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ speed }),
+  })
+  return res.json()
+}
+
+export async function raceDayPause(): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day/pause`, { method: 'POST' })
+  return res.json()
+}
+
+export async function raceDayComplete(): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day/complete`, { method: 'POST' })
+  return res.json()
+}
+
+// ─── Sponsors ───
+export async function acceptSponsor(offerIndex: number): Promise<any> {
+  const res = await fetch(`${BASE}/api/sponsor/accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offer_index: offerIndex }),
+  })
+  return res.json()
+}
+
+export async function declineSponsor(offerIndex: number): Promise<any> {
+  const res = await fetch(`${BASE}/api/sponsor/decline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offer_index: offerIndex }),
+  })
+  return res.json()
+}
+
+// ─── Parts ───
+export async function buyPart(partId: string, cost: number): Promise<any> {
+  const res = await fetch(`${BASE}/api/parts/buy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ part_id: partId, cost }),
+  })
+  return res.json()
+}
+
+export async function sellPart(partId: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/parts/sell`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ part_id: partId }),
+  })
+  return res.json()
+}
+
+export async function equipPart(partId: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/parts/equip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ part_id: partId }),
+  })
+  return res.json()
+}
+
+// ─── Staff / Job Board ───
+export async function hireFreeAgent(entityName: string, freeAgentId?: number): Promise<any> {
+  const res = await fetch(`${BASE}/api/staff/hire`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entity_name: entityName, free_agent_id: freeAgentId ?? 0 }),
+  })
+  return res.json()
+}
+
+export async function fireStaff(entityName: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/staff/fire`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entity_name: entityName }),
+  })
+  return res.json()
+}
+
+export async function applyForJob(listingId: number): Promise<any> {
+  const res = await fetch(`${BASE}/api/staff/apply_job`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ listing_id: listingId }),
+  })
+  return res.json()
+}

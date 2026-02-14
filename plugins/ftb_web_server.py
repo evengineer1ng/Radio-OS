@@ -424,6 +424,108 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     out["current_meta"] = getattr(state, "current_meta", {})
     out["economic_state"] = getattr(state, "economic_state", {})
 
+    # ─── Race Day State ────────────────────────────────────────────
+    rds = getattr(state, "race_day_state", None)
+    if rds:
+        phase_val = rds.phase.value if hasattr(rds.phase, "value") else str(rds.phase)
+        out["race_day"] = {
+            "phase": phase_val,
+            "race_tick": getattr(rds, "race_tick", None),
+            "league_id": getattr(rds, "league_id", None),
+            "track_id": getattr(rds, "track_id", None),
+            "player_wants_live_race": getattr(rds, "player_wants_live_race", False),
+            "live_race_active": getattr(rds, "live_race_active", False),
+            "current_lap": getattr(rds, "current_lap", 0),
+            "total_laps": getattr(rds, "total_laps", 0),
+            "broadcast_active": getattr(rds, "broadcast_active", False),
+        }
+
+        # Qualifying grid
+        quali_grid = getattr(rds, "quali_grid", [])
+        out["race_day"]["quali_grid"] = []
+        for entry in (quali_grid or []):
+            if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                team_obj, driver_obj = entry[0], entry[1]
+                score = entry[2] if len(entry) > 2 else 0
+                out["race_day"]["quali_grid"].append({
+                    "team": getattr(team_obj, "name", str(team_obj)),
+                    "driver": getattr(driver_obj, "name", str(driver_obj)),
+                    "score": round(float(score), 3) if score else 0,
+                    "is_player": getattr(team_obj, "name", "") == (state.player_team.name if state.player_team else ""),
+                })
+
+        # Live standings
+        live_standings = getattr(rds, "live_standings", [])
+        out["race_day"]["standings"] = []
+        for s in (live_standings or []):
+            if isinstance(s, dict):
+                out["race_day"]["standings"].append(s)
+            else:
+                out["race_day"]["standings"].append({
+                    "driver": getattr(s, "driver_name", getattr(s, "name", str(s))),
+                    "team": getattr(s, "team_name", ""),
+                    "gap": getattr(s, "gap", 0),
+                    "is_player": getattr(s, "is_player", False),
+                })
+
+        # Live events
+        live_events = getattr(rds, "live_events", [])
+        out["race_day"]["events"] = []
+        for evt in (live_events or [])[-100:]:
+            if isinstance(evt, dict):
+                out["race_day"]["events"].append(evt)
+            else:
+                out["race_day"]["events"].append({
+                    "text": str(evt),
+                    "lap": getattr(evt, "lap", 0),
+                })
+
+        # Race result summary
+        race_result = getattr(rds, "race_result", None)
+        if race_result:
+            out["race_day"]["result"] = {
+                "winner_driver": getattr(race_result, "winner_driver", ""),
+                "winner_team": getattr(race_result, "winner_team", ""),
+                "final_standings": getattr(race_result, "final_standings", []),
+                "player_finish": getattr(race_result, "player_finish", None),
+            }
+    else:
+        out["race_day"] = {"phase": "idle"}
+
+    # ─── Pending Sponsor Offers (richer data) ─────────────────────
+    out["pending_sponsor_offers"] = {}
+    for team_name, offers in (state.pending_sponsor_offers or {}).items():
+        out["pending_sponsor_offers"][team_name] = []
+        for idx, sp in enumerate(offers or []):
+            out["pending_sponsor_offers"][team_name].append({
+                "index": idx,
+                "name": getattr(sp, "sponsor_name", getattr(sp, "name", "")),
+                "value": getattr(sp, "annual_value", 0),
+                "seasons_remaining": getattr(sp, "seasons_remaining", 0),
+                "confidence": getattr(sp, "confidence", 100),
+                "sponsor_id": getattr(sp, "sponsor_id", ""),
+            })
+
+    # ─── Play-by-Play data (built from race_day_state) ────────────
+    out["play_by_play"] = {
+        "is_live": rds is not None and getattr(rds, "live_race_active", False),
+        "lap_info": {
+            "current": getattr(rds, "current_lap", 0) if rds else 0,
+            "total": getattr(rds, "total_laps", 0) if rds else 0,
+        },
+        "standings": out.get("race_day", {}).get("standings", []),
+        "live_events": out.get("race_day", {}).get("events", []),
+    }
+
+    # ─── Tracks for marketplace reference ─────────────────────────
+    out["tracks"] = {}
+    for tid, track in (getattr(state, "tracks", {}) or {}).items():
+        out["tracks"][tid] = {
+            "name": getattr(track, "name", tid),
+            "length_km": getattr(track, "length_km", 0),
+            "laps": getattr(track, "laps", 0),
+        }
+
     return out
 
 
@@ -540,6 +642,127 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         except Exception:
             pass
         return {"notifications": []}
+
+    # ──── REST: Race Day State (detailed) ────
+    @app.get("/api/race_day")
+    async def get_race_day():
+        controller = shared_runtime.get("ftb_controller")
+        if not controller or not controller.state:
+            return JSONResponse({"phase": "idle"}, 200)
+        try:
+            with controller.state_lock:
+                data = serialize_game_state(controller)
+            return {"race_day": data.get("race_day", {"phase": "idle"}),
+                    "play_by_play": data.get("play_by_play", {})}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    # ──── REST: Race Day Actions ────
+    @app.post("/api/race_day/respond")
+    async def race_day_respond(payload: Dict[str, Any]):
+        """Handle pre-race prompt (watch live vs instant sim)."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        watch_live = payload.get("watch_live", False)
+        ftb_cmd_q.put({"cmd": "ftb_pre_race_response", "watch_live": watch_live})
+        return {"status": "queued", "watch_live": watch_live}
+
+    @app.post("/api/race_day/start_live")
+    async def race_day_start_live(payload: Dict[str, Any]):
+        """Start live race playback."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        speed = payload.get("speed", 10.0)
+        ftb_cmd_q.put({"cmd": "ftb_start_live_race", "speed": speed})
+        return {"status": "queued", "speed": speed}
+
+    @app.post("/api/race_day/pause")
+    async def race_day_pause():
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_pause_live_race"})
+        return {"status": "queued"}
+
+    @app.post("/api/race_day/complete")
+    async def race_day_complete():
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_complete_race_day"})
+        return {"status": "queued"}
+
+    # ──── REST: Sponsor Actions ────
+    @app.post("/api/sponsor/accept")
+    async def accept_sponsor(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        idx = payload.get("offer_index", 0)
+        ftb_cmd_q.put({"cmd": "ftb_action", "action": "accept_sponsor", "target": idx})
+        return {"status": "queued", "offer_index": idx}
+
+    @app.post("/api/sponsor/decline")
+    async def decline_sponsor(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        idx = payload.get("offer_index", 0)
+        ftb_cmd_q.put({"cmd": "ftb_action", "action": "reject_sponsor", "target": idx})
+        return {"status": "queued", "offer_index": idx}
+
+    # ──── REST: Parts Marketplace Actions ────
+    @app.post("/api/parts/buy")
+    async def buy_part(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_purchase_part", "part_id": payload.get("part_id", ""), "cost": payload.get("cost", 0)})
+        return {"status": "queued"}
+
+    @app.post("/api/parts/sell")
+    async def sell_part(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_sell_part", "part_id": payload.get("part_id", "")})
+        return {"status": "queued"}
+
+    @app.post("/api/parts/equip")
+    async def equip_part(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_equip_part", "part_id": payload.get("part_id", "")})
+        return {"status": "queued"}
+
+    # ──── REST: Staff / Job Board Actions ────
+    @app.post("/api/staff/hire")
+    async def hire_free_agent(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_hire_free_agent", "entity_name": payload.get("entity_name", ""),
+                       "free_agent_id": payload.get("free_agent_id", 0)})
+        return {"status": "queued"}
+
+    @app.post("/api/staff/fire")
+    async def fire_entity(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_fire_entity", "entity_name": payload.get("entity_name", ""), "confirmed": True})
+        return {"status": "queued"}
+
+    @app.post("/api/staff/apply_job")
+    async def apply_job(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({"cmd": "ftb_apply_job", "listing_id": payload.get("listing_id", 0)})
+        return {"status": "queued"}
 
     # ──── WebSocket: Live stream ────
     @app.websocket("/ws/live")

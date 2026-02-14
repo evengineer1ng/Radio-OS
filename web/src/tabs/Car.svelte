@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { buyPart, sellPart, equipPart, fetchState } from '../lib/api'
   import { formatCurrency } from '../lib/utils'
   import StatBar from '../components/StatBar.svelte'
 
@@ -17,9 +17,22 @@
 
   $: partTypes = ['All Types', ...new Set(marketplace.map((p: any) => p.type).filter(Boolean))]
 
-  function equipPart(id: string) { sendCommand({ cmd: 'ftb_equip_part', part_id: id }) }
-  function sellPart(id: string) { sendCommand({ cmd: 'ftb_sell_part', part_id: id }) }
-  function buyPart(id: string, cost: number) { sendCommand({ cmd: 'ftb_purchase_part', part_id: id, cost }) }
+  let working = false
+  async function handleEquip(id: string) {
+    if (working) return; working = true
+    try { await equipPart(id); gameState.set(await fetchState()) } catch (e) { console.error('equip', e) }
+    working = false
+  }
+  async function handleSell(id: string) {
+    if (working) return; working = true
+    try { await sellPart(id); gameState.set(await fetchState()) } catch (e) { console.error('sell', e) }
+    working = false
+  }
+  async function handleBuy(id: string, cost: number) {
+    if (working) return; working = true
+    try { await buyPart(id, cost); gameState.set(await fetchState()) } catch (e) { console.error('buy', e) }
+    working = false
+  }
 </script>
 
 <div class="car-view">
@@ -63,8 +76,8 @@
             </div>
             <div class="part-actions">
               <span class="part-quality">Q{Math.round(part.quality)}</span>
-              <button class="btn btn-primary btn-sm" on:click={() => equipPart(part.id)}>Equip</button>
-              <button class="btn btn-ghost btn-sm" on:click={() => sellPart(part.id)}>Sell</button>
+              <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleEquip(part.id)}>Equip</button>
+              <button class="btn btn-ghost btn-sm" disabled={working} on:click={() => handleSell(part.id)}>Sell</button>
             </div>
           </div>
         {:else}
@@ -93,7 +106,7 @@
           </div>
           <div class="part-actions">
             <span class="part-cost">{formatCurrency(part.cost)}</span>
-            <button class="btn btn-primary btn-sm" on:click={() => buyPart(part.id, part.cost)}>Buy</button>
+            <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleBuy(part.id, part.cost)}>Buy</button>
           </div>
         </div>
       {:else}

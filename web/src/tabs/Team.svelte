@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { hireFreeAgent, fireStaff, applyForJob, fetchState } from '../lib/api'
   import EntityCard from '../components/EntityCard.svelte'
   import { formatCurrency } from '../lib/utils'
 
@@ -12,19 +12,28 @@
   $: aiTeams = $gameState.ai_teams || []
 
   let marketTab: string = 'free_drivers'
+  let working = false
 
-  function fireEntity(name: string) {
-    if (confirm(`Fire ${name}? This cannot be undone.`)) {
-      sendCommand({ cmd: 'ftb_fire_entity', entity_name: name, confirmed: true })
-    }
+  async function handleFire(name: string) {
+    if (working) return
+    if (!confirm(`Fire ${name}? This cannot be undone.`)) return
+    working = true
+    try { await fireStaff(name); gameState.set(await fetchState()) } catch (e) { console.error('fire', e) }
+    working = false
   }
 
-  function hireAgent(agentId: number) {
-    sendCommand({ cmd: 'ftb_hire_free_agent', free_agent_id: agentId })
+  async function handleHire(name: string, agentId: number) {
+    if (working) return
+    working = true
+    try { await hireFreeAgent(name, agentId); gameState.set(await fetchState()) } catch (e) { console.error('hire', e) }
+    working = false
   }
 
-  function applyJob(listingId: number) {
-    sendCommand({ cmd: 'ftb_apply_job', listing_id: listingId })
+  async function handleApply(listingId: number) {
+    if (working) return
+    working = true
+    try { await applyForJob(listingId); gameState.set(await fetchState()) } catch (e) { console.error('apply', e) }
+    working = false
   }
 
   // Split free agents by type
@@ -55,29 +64,29 @@
       {#if roster.drivers}
         {#each (Array.isArray(roster.drivers) ? roster.drivers : [roster.drivers]) as driver}
           {#if driver}
-            <EntityCard entity={driver} onFire={() => fireEntity(driver.name)} />
+            <EntityCard entity={driver} onFire={() => handleFire(driver.name)} />
           {/if}
         {/each}
       {/if}
       {#if roster.engineers}
         {#each (Array.isArray(roster.engineers) ? roster.engineers : [roster.engineers]) as eng}
           {#if eng}
-            <EntityCard entity={eng} onFire={() => fireEntity(eng.name)} />
+            <EntityCard entity={eng} onFire={() => handleFire(eng.name)} />
           {/if}
         {/each}
       {/if}
       {#if roster.mechanics}
         {#each (Array.isArray(roster.mechanics) ? roster.mechanics : [roster.mechanics]) as mech}
           {#if mech}
-            <EntityCard entity={mech} compact onFire={() => fireEntity(mech.name)} />
+            <EntityCard entity={mech} compact onFire={() => handleFire(mech.name)} />
           {/if}
         {/each}
       {/if}
       {#if roster.strategist}
-        <EntityCard entity={roster.strategist} compact onFire={() => fireEntity(roster.strategist.name)} />
+        <EntityCard entity={roster.strategist} compact onFire={() => handleFire(roster.strategist.name)} />
       {/if}
       {#if roster.principal}
-        <EntityCard entity={roster.principal} compact onFire={() => fireEntity(roster.principal.name)} />
+        <EntityCard entity={roster.principal} compact onFire={() => handleFire(roster.principal.name)} />
       {/if}
     </div>
   </div>
@@ -100,7 +109,7 @@
               <div class="market-name">{job.team_name}</div>
               <div class="market-meta">{job.role}</div>
             </div>
-            <button class="btn btn-primary btn-sm" on:click={() => applyJob(job.id)}>Apply</button>
+            <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleApply(job.id)}>Apply</button>
           </div>
         {:else}
           <div class="empty-state">No openings</div>
@@ -111,7 +120,11 @@
                          marketTab === 'free_mechanics' ? faMechanics :
                          marketTab === 'free_strategists' ? faStrategists : faPrincipals}
         {#each agents.slice(0, 30) as agent}
-          <EntityCard entity={agent} compact />
+          <div class="agent-row">
+            <EntityCard entity={agent} compact />
+            <button class="btn btn-primary btn-sm hire-btn" disabled={working}
+              on:click={() => handleHire(agent.name, agent.id)}>Hire</button>
+          </div>
         {:else}
           <div class="empty-state">No free agents</div>
         {/each}
@@ -160,4 +173,7 @@
   .team-item summary { font-size: 13px; cursor: pointer; padding: 4px; }
   .team-details { padding: 8px 0; display: flex; flex-direction: column; gap: 6px; }
   .empty-state { text-align: center; color: var(--c-text-muted); padding: 20px; font-size: 13px; }
+  .agent-row { display: flex; align-items: center; gap: 8px; }
+  .agent-row :global(.entity-card) { flex: 1; }
+  .hire-btn { flex-shrink: 0; }
 </style>

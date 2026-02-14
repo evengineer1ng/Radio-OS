@@ -884,6 +884,17 @@ def init_db(db_path: str) -> None:
         (0, 'crisis', 95.0, 100.0)
     """)
     
+    # Generic key-value store for streaming state (race day, etc.)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS game_state_kv (
+            game_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            updated_ts REAL,
+            PRIMARY KEY (game_id, key)
+        )
+    """)
+    
     conn.commit()
     conn.close()
     
@@ -1259,6 +1270,36 @@ def get_connection(db_path: str):
 # ============================================================================
 # WRITE OPERATIONS (Called by ftb_game.py)
 # ============================================================================
+
+
+def upsert_game_state(cursor, game_id: str, key: str, value: str) -> None:
+    """Insert or update a key-value pair in the game_state_kv table.
+
+    Designed to be called within an existing cursor/transaction so race-day
+    writes can batch many keys in a single commit.
+
+    Args:
+        cursor: An open sqlite3.Cursor
+        game_id: Current game UUID
+        key: State key (e.g. 'race_day_phase')
+        value: String value to store
+    """
+    import time as _time
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS game_state_kv (
+            game_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            updated_ts REAL,
+            PRIMARY KEY (game_id, key)
+        )
+    """)
+    cursor.execute(
+        """INSERT OR REPLACE INTO game_state_kv (game_id, key, value, updated_ts)
+           VALUES (?, ?, ?, ?)""",
+        (game_id, key, value, _time.time()),
+    )
+
 
 def write_game_snapshot(db_path: str, state: Any) -> None:
     """Write complete game state snapshot after tick.

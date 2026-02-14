@@ -63,6 +63,7 @@ class FTBTheme:
     
     # Button hover colors - Pre-defined for consistency
     BUTTON_PRIMARY_HOVER = "#00b8e6"
+    BUTTON_SECONDARY = "#1a1f2e"       # Same as CARD for secondary buttons
     BUTTON_SECONDARY_HOVER = "#1e2533"
     BUTTON_DANGER_HOVER = "#e6194d"
     BUTTON_SUCCESS_HOVER = "#00e673"

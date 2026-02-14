@@ -3,11 +3,13 @@ station:
   host: Evan
   category: Welcome to Radio OS!
   logo: logos/welcomefm.png
+  meta_plugin: radio_station
 llm:
-  endpoint: http://127.0.0.1:11434/api/generate
+  provider: openai
+  api_key_env: OPENAI_API_KEY
 models:
-  producer: rnj-1:8b
-  host: rnj-1:8b
+  producer: gpt-5.2
+  host: gpt-5.2
   navigator: ''
   embedding: ''
 embedding:

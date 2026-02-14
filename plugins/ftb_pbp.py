@@ -17,6 +17,7 @@ import customtkinter as ctk
 from typing import Any, Dict, List, Optional, Tuple
 import sys
 import time
+import os
 
 # Import game state structures
 try:
@@ -40,6 +41,14 @@ PLUGIN_NAME = "FTB Play-by-Play"
 PLUGIN_DESC = "Live race action with lap-by-lap updates, overtakes, and telemetry"
 IS_FEED = False  # UI widget, not feed
 
+# ── Debug gate ──────────────────────────────────────────────
+FTB_DEBUG: bool = os.environ.get("FTB_DEBUG", "").strip() in ("1", "true", "yes")
+
+def _dbg(*args, **kwargs):
+    if FTB_DEBUG:
+        print(*args, **kwargs)
+# ────────────────────────────────────────────────────────────
+
 
 # ============================================================================
 # RACE DATA CACHE
@@ -57,15 +66,50 @@ LIVE_FEED_INTERVAL: float = 1.5
 LIVE_FEED_LAST_TS: float = 0.0
 
 
+def _is_player_race(race_result: Any, state: Any) -> bool:
+    """Check if this race belongs to the player's league.
+    
+    CRITICAL FIX: Without this, every AI race overwrites CURRENT_RACE,
+    making it impossible to view your own races after the first one.
+    """
+    if not race_result or not state:
+        return False
+    
+    if not state.player_team:
+        return False
+    
+    player_league_id = state.player_team.league_id
+    if not player_league_id:
+        return False
+    
+    # Check if race's league matches player's league by name
+    # (league_id may not be stored in race_result)
+    for league in state.leagues.values():
+        if league.league_id == player_league_id and league.name == race_result.league_name:
+            return True
+    
+    return False
+
+
 def update_race_data(race_result: Any, state: Any):
     """
     Called when a race completes to cache data for display.
     This would be called from the simulation or event hook.
+    
+    CRITICAL FIX: Only caches PLAYER races, not AI races.
+    Otherwise every AI league race overwrites the player's race.
     """
     global CURRENT_RACE, RACE_HISTORY
     
     if not race_result:
         return
+    
+    # CRITICAL FIX: Only track player's races
+    if not _is_player_race(race_result, state):
+        # Don't spam logs for every AI race
+        return
+    
+    _dbg(f"[FTB PBP] ✅ Caching player race: {race_result.league_name} at {race_result.track_name}")
     
     # Package race data
     race_data = {
@@ -92,12 +136,21 @@ def update_race_data(race_result: Any, state: Any):
 
 
 def start_live_feed(race_result: Any, state: Any, interval_sec: float = 1.5):
-    """Start a drip-feed play-by-play session for a completed race sim."""
+    """Start a drip-feed play-by-play session for a completed race sim.
+    
+    CRITICAL FIX: Only starts live feed for PLAYER races.
+    """
     global CURRENT_RACE, RACE_HISTORY
     global LIVE_FEED_EVENTS, LIVE_FEED_CURSOR, LIVE_FEED_ACTIVE, LIVE_FEED_INTERVAL, LIVE_FEED_LAST_TS
 
     if not race_result:
         return
+    
+    # CRITICAL FIX: Only track player's races
+    if not _is_player_race(race_result, state):
+        return
+    
+    _dbg(f"[FTB PBP] ▶️ Starting live feed for player race: {race_result.league_name}")
 
     race_data = {
         'race_id': race_result.race_id,
@@ -396,10 +449,24 @@ class FTBPlayByPlayWidget(ctk.CTkFrame):
         
         # Show control panel if quali complete and not already streaming
         if phase == ftb_race_day.RaceDayPhase.QUALI_COMPLETE and not self._race_streaming:
+            # CRITICAL FIX: Reset widget state for new race
+            # If control panel was hidden from previous race, reset everything
             if not self.race_control_panel.winfo_ismapped():
-                print(f"[FTB PBP] 🎮 Packing race control panel (phase={phase.name})...")
+                _dbg(f"[FTB PBP] 🔄 Resetting widget state for new race...")
+                self._race_streaming = False
+                self._race_paused = False
+                self.play_btn.configure(
+                    state="normal",
+                    text="▶️ Play Live Race",
+                    fg_color="#00aa44"
+                )
+                self.pause_btn.configure(state="disabled", fg_color="#666666", text="⏸️ Pause")
+                self.progress_bar.set(0.0)
+                _dbg(f"[FTB PBP] ✅ Widget state reset complete")
+                
+                _dbg(f"[FTB PBP] 🎮 Packing race control panel (phase={phase.name})...")
                 self.race_control_panel.pack(fill="x", padx=8, pady=4)
-                print(f"[FTB PBP] 🎮 Race control panel shown")
+                _dbg(f"[FTB PBP] 🎮 Race control panel shown")
             return True
         
         # Hide control panel if not in ready state
@@ -424,17 +491,17 @@ class FTBPlayByPlayWidget(ctk.CTkFrame):
     
     def _on_play_race(self):
         """Start live race playback"""
-        print("[FTB PBP] ▶️ _on_play_race CALLED")
+        _dbg("[FTB PBP] ▶️ _on_play_race CALLED")
         self.log("[FTB PBP] ▶️ Starting live race playback...")
         
         # Get race info from state
         state = self._get_state()
-        print(f"[FTB PBP] State found: {state is not None}")
+        _dbg(f"[FTB PBP] State found: {state is not None}")
         if state and hasattr(state, 'race_day_state') and state.race_day_state:
             rds = state.race_day_state
             self._total_laps = rds.total_laps if hasattr(rds, 'total_laps') else 0
             self._current_lap = rds.current_lap if hasattr(rds, 'current_lap') else 0
-            print(f"[FTB PBP] Race day state: phase={rds.phase}, total_laps={self._total_laps}, current_lap={self._current_lap}")
+            _dbg(f"[FTB PBP] Race day state: phase={rds.phase}, total_laps={self._total_laps}, current_lap={self._current_lap}")
         
         # Switch to live view tab within PBP widget immediately
         self._switch_tab("live")
@@ -443,19 +510,19 @@ class FTBPlayByPlayWidget(ctk.CTkFrame):
         ui_q = self.runtime.get('ui_q')
         if ui_q:
             ui_q.put(("activate_widget_tab", {"widget_key": "ftb_pbp"}))
-            print("[FTB PBP] 📺 Sent activate_widget_tab for ftb_pbp to ui_q")
+            _dbg("[FTB PBP] 📺 Sent activate_widget_tab for ftb_pbp to ui_q")
         
         # Send command to game controller
         ftb_cmd_q = self.runtime.get('ftb_cmd_q')
-        print(f"[FTB PBP] ftb_cmd_q found: {ftb_cmd_q is not None}, runtime keys: {[k for k in self.runtime.keys() if 'ftb' in k.lower()]}")
+        _dbg(f"[FTB PBP] ftb_cmd_q found: {ftb_cmd_q is not None}, runtime keys: {[k for k in self.runtime.keys() if 'ftb' in k.lower()]}")
         if ftb_cmd_q:
             ftb_cmd_q.put({
                 'cmd': 'ftb_start_live_race',
                 'speed': self._race_speed
             })
-            print(f"[FTB PBP] ✅ Sent ftb_start_live_race command (speed={self._race_speed})")
+            _dbg(f"[FTB PBP] ✅ Sent ftb_start_live_race command (speed={self._race_speed})")
         else:
-            print("[FTB PBP] ❌ NO ftb_cmd_q - command NOT sent!")
+            _dbg("[FTB PBP] ❌ NO ftb_cmd_q - command NOT sent!")
         
         # Update UI state
         self._race_streaming = True
@@ -566,7 +633,7 @@ class FTBPlayByPlayWidget(ctk.CTkFrame):
             if _advance_live_feed():
                 self._refresh_content()
         except Exception as e:
-            print(f"[FTB PBP] ❌ _refresh_loop error: {e}")
+            _dbg(f"[FTB PBP] ❌ _refresh_loop error: {e}")
             import traceback
             traceback.print_exc()
         
@@ -1488,4 +1555,4 @@ def register_widgets(registry, runtime_stub):
         widget_factory
     )
     
-    print(f"[{PLUGIN_NAME}] Widget registered")
+    _dbg(f"[{PLUGIN_NAME}] Widget registered")

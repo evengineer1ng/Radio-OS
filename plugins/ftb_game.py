@@ -34,6 +34,16 @@ from enum import Enum
 from PIL import Image, ImageDraw
 import numpy as np
 
+# ── Debug gate ──────────────────────────────────────────────
+# Set to True (or set env var FTB_DEBUG=1) to re-enable verbose prints.
+FTB_DEBUG: bool = os.environ.get("FTB_DEBUG", "").strip() in ("1", "true", "yes")
+
+def _dbg(*args, **kwargs):
+    """Guarded print — only emits output when FTB_DEBUG is enabled."""
+    if FTB_DEBUG:
+        print(*args, **kwargs)
+# ────────────────────────────────────────────────────────────
+
 
 def _coerce_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
     """Coerce a value to float with a safe fallback."""
@@ -55,7 +65,7 @@ def _coerce_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]
 try:
     from plugins.ftb_names import generate_name, generate_team_name, generate_sponsor_name, generate_league_name
 except ImportError:
-    print("[FTB] Warning: Could not import ftb_names")
+    _dbg("[FTB] Warning: Could not import ftb_names")
     generate_name = None
     generate_team_name = None
     generate_sponsor_name = None
@@ -65,35 +75,35 @@ except ImportError:
 try:
     from plugins import ftb_sponsors
 except ImportError:
-    print("[FTB] Warning: Could not import ftb_sponsors")
+    _dbg("[FTB] Warning: Could not import ftb_sponsors")
     ftb_sponsors = None
 
 # Import state database for narrator/delegate interface
 try:
     from plugins import ftb_state_db
 except ImportError:
-    print("[FTB] Warning: Could not import ftb_state_db")
+    _dbg("[FTB] Warning: Could not import ftb_state_db")
     ftb_state_db = None
 
 # Import race day management system
 try:
     from plugins import ftb_race_day
 except ImportError:
-    print("[FTB] Warning: Could not import ftb_race_day")
+    _dbg("[FTB] Warning: Could not import ftb_race_day")
     ftb_race_day = None
 
 # Import broadcast commentary generator
 try:
     from plugins import ftb_broadcast_commentary
 except ImportError:
-    print("[FTB] Warning: Could not import ftb_broadcast_commentary")
+    _dbg("[FTB] Warning: Could not import ftb_broadcast_commentary")
     ftb_broadcast_commentary = None
 
 # Import customtkinter for UI widgets (optional for headless mode)
 try:
     import customtkinter as ctk
 except ImportError:
-    print("[FTB] Warning: Could not import customtkinter - UI widgets disabled")
+    _dbg("[FTB] Warning: Could not import customtkinter - UI widgets disabled")
     ctk = None
 
 # ============================================================
@@ -262,7 +272,7 @@ PENALTY_CONFIG = {
 
 # Morale System Configuration (Phase 1 - Stabilization)
 MORALE_CONFIG = {
-    'daily_reversion_factor': 0.08,      # 8% daily pull toward baseline
+    'daily_reversion_factor': 0.03,      # 3% daily pull toward baseline (was 8% - too aggressive)
     'baseline_range': (40.0, 60.0),      # Min/max personality baselines
     'diminishing_returns_threshold': 20,  # Distance from 50 before diminishing returns
     'extreme_morale_cap': 0.2,           # Max 20% effectiveness at extremes (>40 from 50)
@@ -1486,20 +1496,20 @@ class Entity:
         """Calculate personality-driven morale baseline
         
         Factors:
-        - Mettle: Higher mettle = higher baseline resilience
-        - Composure: Emotional stability
-        - Discipline: Self-management ability
+        - Mettle: Higher mettle = higher baseline resilience (primary)
+        - Discipline: Self-management ability (secondary)
+        - Pressure_handling: Mental fortitude under stress (tertiary)
         
         Returns baseline between 40-60
         """
         mettle = self.current_ratings.get('mettle', 55.0)
-        composure = self.current_ratings.get('composure', 50.0)
         discipline = self.current_ratings.get('discipline', 50.0)
+        pressure_handling = self.current_ratings.get('pressure_handling', 50.0)
         
         # Baseline ranges from 40-60 based on personality
         # Mettle is primary factor (weight 0.5)
-        # Composure and discipline secondary (weight 0.25 each)
-        baseline = 40.0 + (mettle / 10.0) * 0.5 + (composure / 20.0) * 0.25 + (discipline / 20.0) * 0.25
+        # Discipline and pressure_handling secondary (weight 0.25 each)
+        baseline = 40.0 + (mettle / 10.0) * 0.5 + (discipline / 20.0) * 0.25 + (pressure_handling / 20.0) * 0.25
         return max(40.0, min(60.0, baseline))
 
     def __getattr__(self, name: str) -> Any:
@@ -1803,6 +1813,10 @@ class Car(Entity):
     version: int = 1
     
     # Stats definitions removed - canonicalized in Entity.current_ratings
+    
+    # Base ratings - tier-specific ratings without parts applied
+    # This preserves the car's original performance profile when parts are changed
+    base_ratings: Dict[str, float] = field(default_factory=dict)
     
     # Car-specific derived metrics
     @property
@@ -3408,6 +3422,7 @@ class JobBoard:
         return sorted(filtered, key=lambda fa: fa.overall_rating, reverse=True)
 
 
+
 @dataclass
 class FreeAgent:
     """Wrapper for entities in the free agent pool"""
@@ -3415,6 +3430,13 @@ class FreeAgent:
     asking_salary: int  # Annual salary expectation
     time_in_pool_days: int = 0  # Days since entering free agency
     exit_reason: str = ""  # "fired", "contract_expired", "world_generation", etc.
+    
+    # Additional attributes for serialization compatibility
+    contract_length_preference: int = 2  # Preferred contract length in seasons
+    entered_market_tick: int = 0  # Tick when entered free agency
+    entered_market_day: int = 0  # Day of year when entered free agency
+    interested_in_tier: int = 1  # Tier they're interested in
+    reputation_threshold: float = 0.0  # Minimum team reputation they'll accept
     
     @property
     def entity_type(self) -> str:
@@ -3461,10 +3483,24 @@ class SimState:
         self.prompted_race_ticks: Set[Tuple[str, int]] = set()  # Tracks which (league_id, race_tick) have already shown pre-race prompt
         
         # NEW: Interactive race day state machine
+        # CRITICAL: Always create a race_day_state, even if ftb_race_day isn't imported
+        # This prevents races from being blocked
         if ftb_race_day:
             self.race_day_state = ftb_race_day.RaceDayState()
         else:
-            self.race_day_state = None
+            # Create minimal stub that won't block races
+            class _MinimalPhase:
+                value = "idle"
+                name = "IDLE"
+            
+            class _MinimalRaceDayState:
+                def __init__(self):
+                    self.phase = _MinimalPhase()
+                    self.race_tick = None
+                    self.league_id = None
+                    self.track_id = None
+            
+            self.race_day_state = _MinimalRaceDayState()
         
         # Live race viewing prompt state (NEW)
         self.watch_race_live_response: Optional[bool] = None  # None = waiting for answer, True = watch live, False = skip
@@ -3651,7 +3687,7 @@ class SimState:
             
             ftb_state_db.write_financial_transaction(self.state_db_path, transaction)
         except Exception as e:
-            print(f"[FTB] Warning: Could not log transaction: {e}")
+            _dbg(f"[FTB] Warning: Could not log transaction: {e}")
     
     def get_rng(self, stream: str, context: Any = None) -> random.Random:
         """Get a deterministic RNG seeded by (master_seed + tick + stream + context)."""
@@ -3754,7 +3790,7 @@ class SimState:
                                 db_path=self.state_db_path if hasattr(self, 'state_db_path') else None
                             )
                         except Exception as e:
-                            print(f"[FTB] Failed to create contract expiration notification: {e}")
+                            _dbg(f"[FTB] Failed to create contract expiration notification: {e}")
                     
                     events.append(SimEvent(
                         event_type="structural",
@@ -3837,7 +3873,7 @@ class SimState:
                                 db_path=self.state_db_path if hasattr(self, 'state_db_path') else None
                             )
                         except Exception as e:
-                            print(f"[FTB] Failed to create contract warning notification: {e}")
+                            _dbg(f"[FTB] Failed to create contract warning notification: {e}")
         
         # Remove expired contracts
         for entity_id in expired_ids:
@@ -3845,7 +3881,7 @@ class SimState:
             entity_name = entity.display_name if entity and hasattr(entity, 'display_name') else (entity.name if entity else "Unknown")
             contract = self.contracts.get(entity_id)
             team_name = contract.team_name if contract else "Unknown"
-            print(f"[FTB CONTRACT_EXPIRY] Removing expired contract: {entity_name} from team '{team_name}' (entity stays on roster)")
+            _dbg(f"[FTB CONTRACT_EXPIRY] Removing expired contract: {entity_name} from team '{team_name}' (entity stays on roster)")
             del self.contracts[entity_id]
         
         return events
@@ -4606,7 +4642,7 @@ class SimState:
                 continue
             
             # Execute AI poaching transaction
-            print(f"[FTB AI POACH] {acquiring_team.name} attempting to poach {driver.name} from {original_team.name} for ${buyout:,}")
+            _dbg(f"[FTB AI POACH] {acquiring_team.name} attempting to poach {driver.name} from {original_team.name} for ${buyout:,}")
             
             # 1. Pay buyout
             acquiring_team.budget.cash -= buyout
@@ -4667,7 +4703,7 @@ class SimState:
                 }
             ))
             
-            print(f"[FTB AI POACH] ✅ Success: {driver.name} -> {acquiring_team.name}")
+            _dbg(f"[FTB AI POACH] ✅ Success: {driver.name} -> {acquiring_team.name}")
             
             # Only one poaching per team per month to avoid chaos
             break
@@ -4981,11 +5017,11 @@ class SimState:
                     player_league = league
                     break
             if not player_league:
-                print(f"[FTB] CALENDAR_DEBUG: Player team '{self.player_team.name}' exists but is not in any league!")
-                print(f"[FTB] CALENDAR_DEBUG: Available leagues: {list(self.leagues.keys())}")
+                _dbg(f"[FTB] CALENDAR_DEBUG: Player team '{self.player_team.name}' exists but is not in any league!")
+                _dbg(f"[FTB] CALENDAR_DEBUG: Available leagues: {list(self.leagues.keys())}")
         else:
-            print(f"[FTB] CALENDAR_DEBUG: No player_team set! Cannot show calendar events.")
-            print(f"[FTB] CALENDAR_DEBUG: Available leagues: {list(self.leagues.keys())}")
+            _dbg(f"[FTB] CALENDAR_DEBUG: No player_team set! Cannot show calendar events.")
+            _dbg(f"[FTB] CALENDAR_DEBUG: Available leagues: {list(self.leagues.keys())}")
         
         for league_id, league in self.leagues.items():
             # Check if this is the player's league (for travel events)
@@ -5435,6 +5471,160 @@ class SimState:
         
         return part
     
+    def _serialize_free_agent(self, fa: 'FreeAgent') -> Dict[str, Any]:
+        """Serialize a free agent"""
+        return {
+            'entity': self._serialize_entity(fa.entity),
+            'entity_type': fa.entity_type,
+            'asking_salary': fa.asking_salary,
+            'contract_length_preference': fa.contract_length_preference,
+            'entered_market_tick': fa.entered_market_tick,
+            'entered_market_day': fa.entered_market_day,
+            'interested_in_tier': fa.interested_in_tier,
+            'reputation_threshold': fa.reputation_threshold,
+        }
+    
+    def _deserialize_free_agent(self, data: Dict[str, Any]) -> 'FreeAgent':
+        """Deserialize a free agent"""
+        entity_data = data.get('entity', {})
+        entity_type = data.get('entity_type', 'driver')
+        
+        # Map entity_type to entity class
+        entity_class_map = {
+            'driver': Driver,
+            'engineer': Engineer,
+            'mechanic': Mechanic,
+            'strategist': Strategist
+        }
+        entity_class = entity_class_map.get(entity_type, Driver)
+        entity = self._deserialize_entity(entity_data, entity_class)
+        
+        fa = FreeAgent(
+            entity=entity,
+            entity_type=entity_type,
+            asking_salary=data.get('asking_salary', 50000.0),
+            contract_length_preference=data.get('contract_length_preference', 2)
+        )
+        fa.entered_market_tick = data.get('entered_market_tick', 0)
+        fa.entered_market_day = data.get('entered_market_day', 0)
+        fa.interested_in_tier = data.get('interested_in_tier', 1)
+        fa.reputation_threshold = data.get('reputation_threshold', 0.0)
+        return fa
+    
+    def _serialize_job_listing(self, listing: JobListing) -> Dict[str, Any]:
+        """Serialize a job listing"""
+        return {
+            'team_name': listing.team_name,
+            'role': listing.role,
+            'expectation_band': listing.expectation_band,
+            'salary_offer': listing.salary_offer,
+            'contract_duration_seasons': listing.contract_duration_seasons,
+            'created_tick': listing.created_tick,
+            'visibility_threshold': listing.visibility_threshold,
+        }
+    
+    def _deserialize_job_listing(self, data: Dict[str, Any]) -> JobListing:
+        """Deserialize a job listing"""
+        return JobListing(
+            team_name=data.get('team_name', 'Unknown Team'),
+            role=data.get('role', 'driver'),
+            expectation_band=data.get('expectation_band', (50.0, 70.0)),
+            salary_offer=data.get('salary_offer', 50000.0),
+            contract_duration_seasons=data.get('contract_duration_seasons', 2),
+            created_tick=data.get('created_tick', 0),
+            visibility_threshold=data.get('visibility_threshold', 0.0)
+        )
+    
+    def _serialize_race_result(self, result: 'RaceResult') -> Dict[str, Any]:
+        """Serialize a race result with full lap data"""
+        return {
+            'race_id': result.race_id,
+            'league_id': result.league_id,
+            'league_name': result.league_name,
+            'track_id': result.track_id,
+            'track_name': result.track_name,
+            'season': result.season,
+            'round_number': result.round_number,
+            'laps': [
+                {
+                    'lap_number': lap.lap_number,
+                    'driver_name': lap.driver_name,
+                    'team_name': lap.team_name,
+                    'lap_time': lap.lap_time,
+                    'position': lap.position,
+                    'tire_compound': lap.tire_compound,
+                    'tire_age': lap.tire_age,
+                    'gap_to_leader': lap.gap_to_leader,
+                    'gap_to_ahead': lap.gap_to_ahead,
+                    'sector_1': lap.sector_1,
+                    'sector_2': lap.sector_2,
+                    'sector_3': lap.sector_3,
+                }
+                for lap in result.laps
+            ],
+            'race_events': [
+                {
+                    'lap_number': evt.lap_number,
+                    'event_type': evt.event_type,
+                    'involved_drivers': evt.involved_drivers,
+                    'description': evt.description,
+                    'position_change': evt.position_change,
+                    'metadata': evt.metadata,
+                }
+                for evt in result.race_events
+            ],
+            'final_positions': result.final_positions,
+            'fastest_lap': result.fastest_lap,
+            'telemetry': result.telemetry,
+        }
+    
+    def _deserialize_race_result(self, data: Dict[str, Any]) -> 'RaceResult':
+        """Deserialize a race result"""
+        laps = [
+            LapData(
+                lap_number=lap['lap_number'],
+                driver_name=lap['driver_name'],
+                team_name=lap['team_name'],
+                lap_time=lap['lap_time'],
+                position=lap['position'],
+                tire_compound=lap['tire_compound'],
+                tire_age=lap['tire_age'],
+                gap_to_leader=lap['gap_to_leader'],
+                gap_to_ahead=lap['gap_to_ahead'],
+                sector_1=lap['sector_1'],
+                sector_2=lap['sector_2'],
+                sector_3=lap['sector_3'],
+            )
+            for lap in data.get('laps', [])
+        ]
+        
+        race_events = [
+            RaceEventRecord(
+                lap_number=evt['lap_number'],
+                event_type=evt['event_type'],
+                involved_drivers=evt['involved_drivers'],
+                description=evt['description'],
+                position_change=evt.get('position_change', {}),
+                metadata=evt.get('metadata', {}),
+            )
+            for evt in data.get('race_events', [])
+        ]
+        
+        return RaceResult(
+            race_id=data.get('race_id', ''),
+            league_id=data.get('league_id', ''),
+            league_name=data.get('league_name', ''),
+            track_id=data.get('track_id', ''),
+            track_name=data.get('track_name', ''),
+            season=data.get('season', 1),
+            round_number=data.get('round_number', 1),
+            laps=laps,
+            race_events=race_events,
+            final_positions=[tuple(pos) for pos in data.get('final_positions', [])],
+            fastest_lap=tuple(data['fastest_lap']) if data.get('fastest_lap') else None,
+            telemetry=data.get('telemetry', {}),
+        )
+    
     def save_to_json(self, path: str) -> None:
         """Serialize state to JSON with full entity persistence"""
         def serialize_team(team: Team) -> Dict[str, Any]:
@@ -5652,6 +5842,17 @@ class SimState:
                 ]
                 for team_name, offers in self.pending_sponsor_offers.items()
             },
+            # CRITICAL FIX: Save free agents and job board
+            'free_agents': [self._serialize_free_agent(fa) for fa in self.free_agents],
+            'job_board': {
+                'vacancies': [self._serialize_job_listing(v) for v in self.job_board.vacancies]
+            },
+            # CRITICAL FIX: Save race results for quali/race result display
+            '_last_race_results': {
+                league_id: self._serialize_race_result(result)
+                for league_id, result in self._last_race_results.items()
+            },
+            '_last_race_contexts': self._last_race_contexts,
         }
         # Ensure parent directory exists
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -5676,7 +5877,7 @@ class SimState:
         
         # V2 → V3 migration: player team now has principal
         if version == 2:
-            print("[FTB] Migrating save from v2 to v3 (AI Delegate System)...")
+            _dbg("[FTB] Migrating save from v2 to v3 (AI Delegate System)...")
             # Migration happens during team deserialization:
             # - If player team has no principal, create one from player_identity
             # - If delegation_focus is missing, set to None (already default)
@@ -5695,10 +5896,72 @@ class SimState:
         state.race_day_duration_sec = int(data.get('race_day_duration_sec', 300))
         state.race_day_started_ts = None
         state._live_pbp_interval = None
+        
+        # CRITICAL FIX: Always reset race_day_active on load to prevent stale state
         if state.race_day_active:
             state.race_day_active = False
+        
+        # Load race tracking sets (handle old saves that don't have these)
         state.completed_race_ticks = set(tuple(entry) for entry in data.get('completed_race_ticks', []))
         state.prompted_race_ticks = set(tuple(entry) for entry in data.get('prompted_race_ticks', []))
+        
+        # CRITICAL FIX: Ensure race_day_state exists and is properly reset
+        # Old saves won't have this field, so we need to initialize it
+        # ALWAYS create race_day_state even if ftb_race_day import failed
+        if ftb_race_day:
+            from plugins.ftb_race_day import RaceDayState, RaceDayPhase
+            
+            # Try to load from save data
+            if 'race_day_state' in data and data['race_day_state']:
+                # Has race day state in save - but always reset to IDLE on load
+                # to prevent stale "RACE_RUNNING" or other active states
+                state.race_day_state = RaceDayState()
+                state.race_day_state.phase = RaceDayPhase.IDLE
+                # Preserve completed/prompted tracking from loaded state if present
+                # (These fields are loaded separately above)
+            else:
+                # Old save without race_day_state - create fresh
+                state.race_day_state = RaceDayState()
+                state.race_day_state.phase = RaceDayPhase.IDLE
+        else:
+            # ftb_race_day module not available - create minimal stub
+            # This prevents races from being blocked
+            class _MinimalPhase:
+                value = "idle"
+                name = "IDLE"
+            
+            class _MinimalRaceDayState:
+                def __init__(self):
+                    self.phase = _MinimalPhase()
+                    self.race_tick = None
+                    self.league_id = None
+                    self.track_id = None
+            
+            state.race_day_state = _MinimalRaceDayState()
+            _dbg(f"[FTB LOAD] ⚠️  ftb_race_day not available - using minimal stub")
+        
+        _dbg(f"[FTB LOAD] ✅ Race day state reset to IDLE (completed_races={len(state.completed_race_ticks)}, prompted={len(state.prompted_race_ticks)})")
+        
+        # CRITICAL FIX: For old saves, infer completed races from league race counters
+        # This prevents re-running already completed races
+        if len(state.completed_race_ticks) == 0 and state.leagues:
+            _dbg(f"[FTB LOAD] 🔧 Old save detected - reconstructing race history...")
+            for league_id, league in state.leagues.items():
+                # If league has completed races but no completed_race_ticks,
+                # mark those early race ticks as completed
+                if league.races_this_season > 0 and league.schedule:
+                    for i in range(min(league.races_this_season, len(league.schedule))):
+                        entry = league.schedule[i]
+                        if isinstance(entry, (tuple, list)) and len(entry) >= 1:
+                            race_tick = entry[0]
+                        else:
+                            race_tick = entry
+                        
+                        state.completed_race_ticks.add((league_id, int(race_tick)))
+            
+            if state.completed_race_ticks:
+                _dbg(f"[FTB LOAD] ✅ Reconstructed {len(state.completed_race_ticks)} completed races from league history")
+        
         state.time_mode = data.get('time_mode', 'paused')
         state.control_mode = data.get('control_mode', 'human')
         state.delegation_settings = data.get('delegation_settings', {
@@ -5821,6 +6084,13 @@ class SimState:
             car_data = team_data.get('car')
             team.car = state._deserialize_entity(car_data, Car) if car_data else Car(name=f"{team.name} Car")
             
+            # Backward compatibility: Initialize base_ratings if missing (old saves)
+            if team.car and (not hasattr(team.car, 'base_ratings') or not team.car.base_ratings):
+                # For old saves, use current_ratings as base (best approximation)
+                # This prevents jumping to schema defaults (50s) when equipping parts
+                team.car.base_ratings = team.car.current_ratings.copy()
+                _dbg(f"[FTB LOAD] Migrated car base_ratings for {team.name}")
+            
             team.infrastructure = team_data.get('infrastructure', {})
             team.standing_metrics = team_data.get('standing_metrics', {})
             
@@ -5871,7 +6141,7 @@ class SimState:
         
         # V2 → V3 MIGRATION: Create player principal if missing
         if version == 2 and state.player_team and not state.player_team.principal:
-            print("[FTB] Migrating: Creating player manager principal from identity...")
+            _dbg("[FTB] Migrating: Creating player manager principal from identity...")
             
             # Create principal from player_identity or use neutral stats
             player_manager_stats = translate_player_identity_to_stats(state.player_identity)
@@ -5887,7 +6157,7 @@ class SimState:
             player_principal.current_ratings = player_manager_stats
             
             state.player_team.principal = player_principal
-            print(f"[FTB]   - Created: {manager_display_name} (avg rating: {player_principal.overall_rating:.1f})")
+            _dbg(f"[FTB]   - Created: {manager_display_name} (avg rating: {player_principal.overall_rating:.1f})")
         
         state.ai_teams = [deserialize_team(t) for t in data.get('ai_teams', [])]
         
@@ -5897,13 +6167,13 @@ class SimState:
             before_count = len(state.ai_teams)
             state.ai_teams = [t for t in state.ai_teams if t.name != state.player_team.name]
             after_count = len(state.ai_teams)
-            print(f"[FTB LOAD] Player team: '{state.player_team.name}', AI teams: {after_count} (filtered: {before_count - after_count})")
+            _dbg(f"[FTB LOAD] Player team: '{state.player_team.name}', AI teams: {after_count} (filtered: {before_count - after_count})")
             # Verify player team is not in ai_teams
             player_in_ai = any(t.name == state.player_team.name for t in state.ai_teams)
             if player_in_ai:
-                print(f"[FTB LOAD] ❌ ERROR: Player team '{state.player_team.name}' is STILL in ai_teams after filtering!")
+                _dbg(f"[FTB LOAD] ❌ ERROR: Player team '{state.player_team.name}' is STILL in ai_teams after filtering!")
             else:
-                print(f"[FTB LOAD] ✓ Verified: Player team NOT in ai_teams")
+                _dbg(f"[FTB LOAD] ✓ Verified: Player team NOT in ai_teams")
         
         # MIGRATION: Convert old pending_developments to active_rd_projects (after teams loaded!)
         if state.pending_developments and state.player_team:
@@ -6117,6 +6387,30 @@ class SimState:
                     exclusivity_clauses=s.get('exclusivity_clauses', [])
                 )
                 state.pending_sponsor_offers[team_name].append(offer)
+
+        # CRITICAL FIX: Restore free agents and job board
+        # These were initialized but never loaded from save data, causing empty markets on loads
+        free_agents_data = data.get('free_agents', [])
+        state.free_agents = [state._deserialize_free_agent(fa) for fa in free_agents_data]
+        _dbg(f"[FTB LOAD] ✅ Loaded {len(state.free_agents)} free agents from save")
+        
+        job_board_data = data.get('job_board', {})
+        vacancies_data = job_board_data.get('vacancies', [])
+        state.job_board = JobBoard()
+        state.job_board.vacancies = [state._deserialize_job_listing(v) for v in vacancies_data]
+        _dbg(f"[FTB LOAD] ✅ Loaded {len(state.job_board.vacancies)} job listings from save")
+
+        # CRITICAL FIX: Restore race results for quali/race result display
+        # These were never saved/loaded, causing results to not display on loaded saves
+        race_results_data = data.get('_last_race_results', {})
+        state._last_race_results = {
+            league_id: state._deserialize_race_result(result_data)
+            for league_id, result_data in race_results_data.items()
+        }
+        _dbg(f"[FTB LOAD] ✅ Loaded {len(state._last_race_results)} race results from save")
+        
+        state._last_race_contexts = data.get('_last_race_contexts', {})
+        _dbg(f"[FTB LOAD] ✅ Loaded {len(state._last_race_contexts)} race contexts from save")
 
         # Ensure tracks exist for loaded saves and schedules reference valid tracks
         if not state.tracks:
@@ -6441,7 +6735,7 @@ class WorldBuilder:
                 # Fallback if all attempts failed
                 if team_name is None:
                     team_name = f"{league.name.split(' ')[0]} Team {i+1}"
-                    print(f"[FTB] Warning: Could not generate unique name for team {i} in {league.name}, using fallback: {team_name}")
+                    _dbg(f"[FTB] Warning: Could not generate unique name for team {i} in {league.name}, using fallback: {team_name}")
             else:
                 team_name = f"{league.name.split(' ')[0]} Team {i+1}"
             
@@ -6615,6 +6909,10 @@ class WorldBuilder:
             c = Car(f"{team_name} Chassis")
             for k in STATS_SCHEMAS['Car']:
                 c.current_ratings[k] = float(max(1, min(99, rng.gauss(stat_mean, stat_stddev - 2))))
+            
+            # Store base ratings (without parts) for accurate part calculations
+            c.base_ratings = c.current_ratings.copy()
+            
             team.car = c
             
             # Set tier attributes (Phase 0 fix)
@@ -6687,10 +6985,8 @@ class WorldBuilder:
             team.parts_inventory = []  # Start with empty inventory beyond equipped
             
             # Update car ratings with part bonuses
-            base_ratings = STATS_SCHEMAS['Car'].copy()
-            for stat in base_ratings:
-                base_ratings[stat] = c.current_ratings.get(stat, 50.0)
-            c.update_ratings(base_ratings, team.equipped_parts)
+            # Use the car's stored base_ratings (tier-specific stats without parts)
+            c.update_ratings(c.base_ratings, team.equipped_parts)
             
             # Add initial upgrades for higher tier teams (Phase 5.7)
             if league.tier >= 3 and rng.random() < 0.30:  # Tier 3: 30% chance for 1 upgrade
@@ -6847,7 +7143,7 @@ class WorldBuilder:
             state.add_to_free_agent_pool(mechanic, "world_generation", asking_salary)
             free_agents_created += 1
         
-        print(f"[FTB] WORLD_GEN: Generated {free_agents_created} free agents ({num_drivers} drivers, {num_engineers} engineers, {num_mechanics} mechanics)")
+        _dbg(f"[FTB] WORLD_GEN: Generated {free_agents_created} free agents ({num_drivers} drivers, {num_engineers} engineers, {num_mechanics} mechanics)")
     
     @staticmethod
     def _generate_tracks(state: SimState) -> None:
@@ -6924,7 +7220,7 @@ class WorldBuilder:
             
             state.tracks[track_id] = track
         
-        print(f"[FTB] WORLD_GEN: Generated {len(state.tracks)} tracks")
+        _dbg(f"[FTB] WORLD_GEN: Generated {len(state.tracks)} tracks")
     
     @staticmethod
     def _generate_manufacturers_and_parts(state: SimState) -> None:
@@ -6933,7 +7229,7 @@ class WorldBuilder:
             from plugins.ftb_heritage_templates import HERITAGE_TEMPLATES, get_weighted_template
             from plugins.ftb_names import generate_manufacturer_name, generate_part_model_name
         except ImportError as e:
-            print(f"[FTB] ERROR: Could not import heritage templates: {e}")
+            _dbg(f"[FTB] ERROR: Could not import heritage templates: {e}")
             return
         
         rng = state.get_rng("world", "manufacturers")
@@ -7001,7 +7297,7 @@ class WorldBuilder:
             state.manufacturers[manufacturer_id] = manufacturer
             manufacturers_created.append((manufacturer_id, manufacturer))
             
-        print(f"[FTB] WORLD_GEN: Generated {len(manufacturers_created)} manufacturers")
+        _dbg(f"[FTB] WORLD_GEN: Generated {len(manufacturers_created)} manufacturers")
         
         # Generate initial parts catalog with tier-based scaling
         # Dynamic scaling: more manufacturers and generations unlock as tiers progress
@@ -7151,7 +7447,7 @@ class WorldBuilder:
                     if generation > state.parts_generation_counter.get(part_type, 0):
                         state.parts_generation_counter[part_type] = generation
         
-        print(f"[FTB] WORLD_GEN: Generated {parts_created} parts across {len(PART_TYPES)} part types (tier-scaled)")
+        _dbg(f"[FTB] WORLD_GEN: Generated {parts_created} parts across {len(PART_TYPES)} part types (tier-scaled)")
     
     @staticmethod
     def _assign_tracks_to_schedule(state: SimState, league: League, num_races: int, start_week: int) -> None:
@@ -7165,7 +7461,7 @@ class WorldBuilder:
         ]
         
         if not available_tracks:
-            print(f"[FTB] WARNING: No tracks available for {league.name} (tier {league.tier})")
+            _dbg(f"[FTB] WARNING: No tracks available for {league.name} (tier {league.tier})")
             # Fallback to simple schedule without tracks
             league.schedule = [start_week + idx*2 for idx in range(num_races)]
             return
@@ -7192,7 +7488,7 @@ class WorldBuilder:
         spacing = race_spacing.get(league.tier, 10)
         league.schedule = [(start_week + idx*spacing, selected_track_ids[idx]) for idx in range(num_races)]
         
-        print(f"[FTB] WORLD_GEN: Assigned {num_races} tracks to {league.name} schedule (every {spacing} days)")
+        _dbg(f"[FTB] WORLD_GEN: Assigned {num_races} tracks to {league.name} schedule (every {spacing} days)")
 
     @staticmethod
     def _ensure_schedule_tracks(state: SimState, league: League) -> None:
@@ -7207,7 +7503,7 @@ class WorldBuilder:
         ]
 
         if not available_tracks:
-            print(f"[FTB] ERROR: No tracks available to repair schedule for {league.name} (tier {league.tier})")
+            _dbg(f"[FTB] ERROR: No tracks available to repair schedule for {league.name} (tier {league.tier})")
             return
 
         available_track_ids = [track.track_id for track in available_tracks]
@@ -7231,7 +7527,7 @@ class WorldBuilder:
 
         if fixes > 0 or old_format:
             league.schedule = fixed_schedule
-            print(f"[FTB] SCHEDULE_FIX: {league.name} updated {fixes} entries to include valid track IDs")
+            _dbg(f"[FTB] SCHEDULE_FIX: {league.name} updated {fixes} entries to include valid track IDs")
 
 
 # ============================================================
@@ -7809,7 +8105,7 @@ def apply_sponsor_payment(state: SimState, team: Team, sponsor: Sponsorship) -> 
     sponsor.total_paid_this_season += actual_payment
     sponsor.last_payment_tick = state.tick
     
-    print(f"[FTB SPONSOR] 💰 {sponsor.sponsor_name} → {team.name}: ${actual_payment:,} (base: ${monthly_payment:,}, conf: {sponsor.confidence:.0f}%, mult: {perf_multiplier:.2f}x)")
+    _dbg(f"[FTB SPONSOR] 💰 {sponsor.sponsor_name} → {team.name}: ${actual_payment:,} (base: ${monthly_payment:,}, conf: {sponsor.confidence:.0f}%, mult: {perf_multiplier:.2f}x)")
     
     # Log sponsor payment transaction (only for player team)
     if team == state.player_team:
@@ -7883,7 +8179,7 @@ def process_sponsor_lifecycle(state: SimState, team: Team, rng: random.Random) -
         # 4. Apply monthly payments (every 30 ticks ~ 1 month)
         ticks_since_payment = state.tick - sponsor.last_payment_tick
         if ticks_since_payment >= 30:
-            print(f"[FTB SPONSOR] Paying {sponsor.sponsor_name} to {team.name} (ticks since last: {ticks_since_payment})")
+            _dbg(f"[FTB SPONSOR] Paying {sponsor.sponsor_name} to {team.name} (ticks since last: {ticks_since_payment})")
             payment_event = apply_sponsor_payment(state, team, sponsor)
             if payment_event:
                 events.append(payment_event)
@@ -8094,7 +8390,7 @@ class FTBSimulation:
         # Find target league
         target_leagues = [l for l in state.leagues.values() if l.tier == to_tier]
         if not target_leagues:
-            print(f"[FTB] ERROR: No league found for tier {to_tier} promotion")
+            _dbg(f"[FTB] ERROR: No league found for tier {to_tier} promotion")
             return events
         
         target_league = target_leagues[0]
@@ -8171,7 +8467,7 @@ class FTBSimulation:
             ))
         
         state.mark_dirty('standings')
-        print(f"[FTB] PROMOTION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name}")
+        _dbg(f"[FTB] PROMOTION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name}")
         return events
     
     @staticmethod
@@ -8186,7 +8482,7 @@ class FTBSimulation:
         # Find target league
         target_leagues = [l for l in state.leagues.values() if l.tier == to_tier]
         if not target_leagues:
-            print(f"[FTB] ERROR: No league found for tier {to_tier} relegation")
+            _dbg(f"[FTB] ERROR: No league found for tier {to_tier} relegation")
             return events
         
         target_league = target_leagues[0]
@@ -8247,7 +8543,7 @@ class FTBSimulation:
             ))
         
         state.mark_dirty('standings')
-        print(f"[FTB] RELEGATION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name} (forced={forced})")
+        _dbg(f"[FTB] RELEGATION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name} (forced={forced})")
         return events
 
     @staticmethod
@@ -8255,8 +8551,8 @@ class FTBSimulation:
         """
         Main tick loop - advance simulation and return events for narration.
         """
-        print(f"[FTB TICK] tick_simulation ENTRY: current_tick={state.tick}, advancing to {state.tick + 1}")
-        print(f"[FTB TICK] State before tick: player_team={state.player_team.name if state.player_team else 'None'}, leagues={len(state.leagues)}, day={state.sim_day_of_year}")
+        _dbg(f"[FTB TICK] tick_simulation ENTRY: current_tick={state.tick}, advancing to {state.tick + 1}")
+        _dbg(f"[FTB TICK] State before tick: player_team={state.player_team.name if state.player_team else 'None'}, leagues={len(state.leagues)}, day={state.sim_day_of_year}")
         events = []
         
         # ============================================================================
@@ -8270,7 +8566,7 @@ class FTBSimulation:
             # BLOCK tick advancement when in an active race day flow
             # Any phase that isn't IDLE means a race day is in progress
             if state.race_day_state.phase != RaceDayPhase.IDLE:
-                print(f"[FTB RACE DAY] ⏸️  Tick blocked - race day active (phase={state.race_day_state.phase.name})")
+                _dbg(f"[FTB RACE DAY] ⏸️  Tick blocked - race day active (phase={state.race_day_state.phase.name})")
                 return events
             
             # Only check if we're in IDLE phase (not already in a race day flow)
@@ -8282,7 +8578,7 @@ class FTBSimulation:
                     track = state.tracks.get(track_id) if track_id else None
                     track_name = track.name if track else "Unknown Circuit"
                     
-                    print(f"[FTB RACE DAY] 🏁 Pre-race prompt triggered for tick {race_tick}: {league.name} at {track_name}")
+                    _dbg(f"[FTB RACE DAY] 🏁 Pre-race prompt triggered for tick {race_tick}: {league.name} at {track_name}")
                     
                     # Set race day state to PRE_RACE_PROMPT
                     state.race_day_state.phase = RaceDayPhase.PRE_RACE_PROMPT
@@ -8312,7 +8608,7 @@ class FTBSimulation:
                         }
                     ))
                     
-                    print(f"[FTB RACE DAY] ⏸️  PAUSING tick advance - waiting for player response")
+                    _dbg(f"[FTB RACE DAY] ⏸️  PAUSING tick advance - waiting for player response")
                     # Return immediately without advancing tick
                     # Tick will resume after player responds to prompt
                     return events
@@ -8324,17 +8620,36 @@ class FTBSimulation:
         # Advance time
         old_tick = state.tick
         state.tick += 1
-        print(f"[FTB TICK] Tick advanced: {old_tick} -> {state.tick}")
+        _dbg(f"[FTB TICK] Tick advanced: {old_tick} -> {state.tick}")
         
         # Advance calendar and age entities
         birthday_events = state.advance_calendar()
         events.extend(birthday_events)
         
         # Apply morale mean reversion (daily pull toward personality baseline)
+        # Skip on race days to let race performance changes dominate
+        is_race_day = False
         for league in state.leagues.values():
-            for team in league.teams:
-                morale_reversion_events = state.apply_morale_mean_reversion(team)
-                events.extend(morale_reversion_events)
+            for entry in (league.schedule or []):
+                race_tick = entry[0] if isinstance(entry, (tuple, list)) else entry
+                if race_tick == state.tick:
+                    is_race_day = True
+                    break
+            if is_race_day:
+                break
+        
+        if not is_race_day:
+            morale_changed = False
+            for league in state.leagues.values():
+                for team in league.teams:
+                    morale_reversion_events = state.apply_morale_mean_reversion(team)
+                    if morale_reversion_events:
+                        morale_changed = True
+                    events.extend(morale_reversion_events)
+            
+            # Mark roster dirty if any morale changes occurred
+            if morale_changed:
+                state.mark_dirty('roster')
         
         # Update contract openness flags (driver poaching system)
         state.update_contract_openness_flags()
@@ -8424,14 +8739,14 @@ class FTBSimulation:
                                 }
                             ))
         
-        print(f"[FTB TICK] Processing sponsors for tick {state.tick}")
+        _dbg(f"[FTB TICK] Processing sponsors for tick {state.tick}")
         # Process sponsor lifecycle (payments, evaluations, warnings, terminations)
         rng = random.Random(state.seed + state.tick)
         all_teams = ([state.player_team] if state.player_team else []) + state.ai_teams
         for team in all_teams:
             sponsor_events = process_sponsor_lifecycle(state, team, rng)
             if sponsor_events:
-                print(f"[FTB SPONSOR] Team {team.name}: {len(sponsor_events)} sponsor events (types: {[e.category for e in sponsor_events]})")
+                _dbg(f"[FTB SPONSOR] Team {team.name}: {len(sponsor_events)} sponsor events (types: {[e.category for e in sponsor_events]})")
             events.extend(sponsor_events)
             if sponsor_events:
                 state.mark_dirty('finance')
@@ -8570,7 +8885,7 @@ class FTBSimulation:
             # Check if schedule needs migration
             # Note: JSON deserialization converts tuples to lists
             if league.schedule and not isinstance(league.schedule[0], (tuple, list)):
-                print(f"[FTB] WARNING: {league.name} schedule uses old format (tick-only). Track assignments missing.")
+                _dbg(f"[FTB] WARNING: {league.name} schedule uses old format (tick-only). Track assignments missing.")
             
             for entry in league.schedule:
                 if isinstance(entry, (tuple, list)) and len(entry) == 2:
@@ -8589,7 +8904,7 @@ class FTBSimulation:
             if race_entry is not None:
                 # CRITICAL FIX: Skip if this race was already completed (via live race day system)
                 if (league.league_id, state.tick) in state.completed_race_ticks:
-                    print(f"[FTB] RACE_SKIP: {league.name} race at tick {state.tick} already completed (live race day)")
+                    _dbg(f"[FTB] RACE_SKIP: {league.name} race at tick {state.tick} already completed (live race day)")
                     continue
                 
                 # CRITICAL FIX: Skip player's league if the interactive race day system
@@ -8598,7 +8913,7 @@ class FTBSimulation:
                     from plugins.ftb_race_day import RaceDayPhase as _RDP
                     if (state.race_day_state.phase not in (_RDP.IDLE, _RDP.POST_RACE_ADVANCE)
                             and state.race_day_state.league_id == league.league_id):
-                        print(f"[FTB] RACE_SKIP: {league.name} race at tick {state.tick} handled by interactive race day (phase={state.race_day_state.phase.name})")
+                        _dbg(f"[FTB] RACE_SKIP: {league.name} race at tick {state.tick} handled by interactive race day (phase={state.race_day_state.phase.name})")
                         continue
                 
                 races_this_tick += 1
@@ -8618,7 +8933,7 @@ class FTBSimulation:
                                       if t.min_tier <= league.tier <= t.max_tier), None)
                         track_id = track.track_id if track else None
                         if not track:
-                            print(f"[FTB] ERROR: No valid track found for {league.name} at tick {state.tick}")
+                            _dbg(f"[FTB] ERROR: No valid track found for {league.name} at tick {state.tick}")
                             continue
                 track_name = track.name if track else "Unknown Circuit"
                 
@@ -8634,8 +8949,8 @@ class FTBSimulation:
                     # Clear the flag after checking
                     state._watch_current_race_live = False
                 
-                print(f"[FTB] RACE_START: Tick {state.tick} - {league.name} (Tier {league.tier}) Round {league.races_this_season + 1} at {track_name}")
-                print(f"[FTB] Live viewing mode: {'ENABLED' if should_watch_live else 'DISABLED'}")
+                _dbg(f"[FTB] RACE_START: Tick {state.tick} - {league.name} (Tier {league.tier}) Round {league.races_this_season + 1} at {track_name}")
+                _dbg(f"[FTB] Live viewing mode: {'ENABLED' if should_watch_live else 'DISABLED'}")
                 
                 # Update phase to race_weekend
                 state.phase = "race_weekend"
@@ -8677,7 +8992,7 @@ class FTBSimulation:
                 
                 # If should_watch_live, we need to stream these events over time instead of dumping them all at once
                 if should_watch_live:
-                    print(f"[FTB] 🎥 Live race mode activated - will stream {len(race_events)} events")
+                    _dbg(f"[FTB] 🎥 Live race mode activated - will stream {len(race_events)} events")
                     state._live_pbp_mode = True
                     state._live_pbp_events = race_events  # Store for streaming
                     state._live_pbp_cursor = 0
@@ -8690,9 +9005,9 @@ class FTBSimulation:
                         try:
                             import plugins.ftb_pbp as ftb_pbp
                             ftb_pbp.start_live_feed(race_result, state, interval_sec=2.0)
-                            print(f"[FTB] 📺 ftb_pbp live feed started")
+                            _dbg(f"[FTB] 📺 ftb_pbp live feed started")
                         except Exception as e:
-                            print(f"[FTB] Warning: Could not start ftb_pbp live feed: {e}")
+                            _dbg(f"[FTB] Warning: Could not start ftb_pbp live feed: {e}")
                     
                     # Don't add race_events to main events list yet - they'll be streamed
                     # Instead, return a special event that tells the controller to enter streaming mode
@@ -8715,6 +9030,15 @@ class FTBSimulation:
                 state.pending_race_day = False
                 state.pending_race_info = None
                 state.pending_race_tick = None
+                
+                # CRITICAL FIX: Reset race_day_state to IDLE after race completes
+                # This prevents the state from getting stuck in non-IDLE phases
+                if ftb_race_day and hasattr(state, 'race_day_state') and state.race_day_state:
+                    from plugins.ftb_race_day import RaceDayPhase
+                    state.race_day_state.phase = RaceDayPhase.IDLE
+                    state.race_day_state.player_wants_live_race = False
+                    state.race_day_state.live_race_active = False
+                    _dbg(f"[FTB] 🔄 Reset race_day_state to IDLE after race completion")
                 
                 # Create notification for player team race result
                 if state.player_team and not state.race_day_active:
@@ -8755,9 +9079,9 @@ class FTBSimulation:
                                 metadata={'position': pos, 'points': points, 'track': track_name},
                                 db_path=getattr(state, 'state_db_path', None)
                             )
-                            print(f"[FTB] ✅ Created race result notification: {title}")
+                            _dbg(f"[FTB] ✅ Created race result notification: {title}")
                     except Exception as e:
-                        print(f"[FTB] Failed to create race result notification: {e}")
+                        _dbg(f"[FTB] Failed to create race result notification: {e}")
                         import traceback
                         traceback.print_exc()
                 
@@ -8767,7 +9091,7 @@ class FTBSimulation:
                 # Return to development phase after race weekend
                 state.phase = "development"
                 
-                print(f"[FTB] RACE_COMPLETE: {league.name} Round {league.races_this_season} - {len(race_events)} events generated")
+                _dbg(f"[FTB] RACE_COMPLETE: {league.name} Round {league.races_this_season} - {len(race_events)} events generated")
                 
                 # Emit audio event: stop engine audio
                 events.append(SimEvent(
@@ -8786,7 +9110,7 @@ class FTBSimulation:
             # Check if season is complete for this league
             expected_races = FTBSimulation._get_expected_races(league)
             if league.races_this_season >= expected_races:
-                print(f"[FTB] SEASON_END: {league.name} completed {league.races_this_season} races")
+                _dbg(f"[FTB] SEASON_END: {league.name} completed {league.races_this_season} races")
                 season_end_events = FTBSimulation.process_season_end_for_league(state, league)
                 events.extend(season_end_events)
         
@@ -8934,13 +9258,13 @@ class FTBSimulation:
                 data=summary_data
             ))
         
-        print(f"[FTB TICK] tick_simulation COMPLETE: generated {len(events)} events for tick {state.tick}")
-        print(f"[FTB TICK] Final state: player_team={state.player_team.name if state.player_team else 'None'}, leagues={len(state.leagues)}, phase={state.phase}")
+        _dbg(f"[FTB TICK] tick_simulation COMPLETE: generated {len(events)} events for tick {state.tick}")
+        _dbg(f"[FTB TICK] Final state: player_team={state.player_team.name if state.player_team else 'None'}, leagues={len(state.leagues)}, phase={state.phase}")
         if events:
             event_categories = [e.category for e in events]
-            print(f"[FTB TICK] 📋 Event categories: {event_categories}")
+            _dbg(f"[FTB TICK] 📋 Event categories: {event_categories}")
         else:
-            print(f"[FTB TICK] ⚠️ No events generated this tick!")
+            _dbg(f"[FTB TICK] ⚠️ No events generated this tick!")
         
         return events
     
@@ -9316,14 +9640,14 @@ class FTBSimulation:
                 )
                 
                 if milestones:
-                    print(f"[FTB] 🏆 Milestones achieved: {len(milestones)}")
+                    _dbg(f"[FTB] 🏆 Milestones achieved: {len(milestones)}")
                     for milestone in milestones[:3]:  # Log first 3
-                        print(f"[FTB]    • {milestone['type']}: {milestone['description']}")
+                        _dbg(f"[FTB]    • {milestone['type']}: {milestone['description']}")
                         
             except Exception as e:
-                print(f"[FTB] Warning: Could not update historical data after race: {e}")
+                _dbg(f"[FTB] Warning: Could not update historical data after race: {e}")
         except Exception as e:
-            print(f"[FTB] Warning: Could not archive race result: {e}")
+            _dbg(f"[FTB] Warning: Could not archive race result: {e}")
 
     @staticmethod
     def _process_race_results(state: SimState, league: League, track: Optional[Track], 
@@ -9476,7 +9800,7 @@ class FTBSimulation:
         # Increment race counter
         league.races_this_season += 1
         
-        print(f"[FTB] _process_race_results: League {league.name} race #{league.races_this_season} complete")
+        _dbg(f"[FTB] _process_race_results: League {league.name} race #{league.races_this_season} complete")
         
         return events
 
@@ -9490,11 +9814,11 @@ class FTBSimulation:
         teams_with_drivers = [t for t in league.teams if t and t.drivers]
         
         if not teams_with_drivers:
-            print(f"[FTB] WARNING: No teams with drivers in {league.name}")
+            _dbg(f"[FTB] WARNING: No teams with drivers in {league.name}")
             return events
         
         track_name = track.name if track else "Unknown Circuit"
-        print(f"[FTB] RACE_SIM: {len(teams_with_drivers)} teams competing in {league.name} at {track_name}")
+        _dbg(f"[FTB] RACE_SIM: {len(teams_with_drivers)} teams competing in {league.name} at {track_name}")
         
         # Get track-specific stat modifiers if track is provided
         track_modifiers = track.get_stat_modifiers() if track else {}
@@ -9674,7 +9998,7 @@ class FTBSimulation:
                                 db_path=getattr(state, 'state_db_path', None)
                             )
                         except Exception as e:
-                            print(f"[FTB] Failed to create penalty notification: {e}")
+                            _dbg(f"[FTB] Failed to create penalty notification: {e}")
                     
                     # Emit penalty event for narrator
                     events.append(SimEvent(
@@ -9718,7 +10042,7 @@ class FTBSimulation:
                         db_path=getattr(state, 'state_db_path', None)
                     )
                 except Exception as e:
-                    print(f"[FTB] Failed to create track limits notification: {e}")
+                    _dbg(f"[FTB] Failed to create track limits notification: {e}")
             
             # Emit penalty event
             events.append(SimEvent(
@@ -9764,20 +10088,20 @@ class FTBSimulation:
         if hype_delta > 0:
             league.hype = min(3.0, league.hype + hype_delta)  # Cap at 3x
             league.hype_events_this_season += 1
-            print(f"[FTB] HYPE: {league.name} gained +{hype_delta:.3f} hype (now {league.hype:.2f}x) - exciting race!")
+            _dbg(f"[FTB] HYPE: {league.name} gained +{hype_delta:.3f} hype (now {league.hype:.2f}x) - exciting race!")
         
         # Award points and prizes based on final positions
         points_awarded_count = 0
         loop_iterations = 0
-        print(f"[FTB] POINTS_DEBUG: Processing {len(race_result.final_positions)} positions, points_table={points_table[:5]}... (first 5)")
+        _dbg(f"[FTB] POINTS_DEBUG: Processing {len(race_result.final_positions)} positions, points_table={points_table[:5]}... (first 5)")
         if len(race_result.final_positions) > 0:
-            print(f"[FTB] POINTS_DEBUG: Sample position data - P1: {race_result.final_positions[0]}")
+            _dbg(f"[FTB] POINTS_DEBUG: Sample position data - P1: {race_result.final_positions[0]}")
         for position, (driver_name, team_name, status) in enumerate(race_result.final_positions, 1):
             loop_iterations += 1
             # Find team and driver objects
             team = next((t for t in teams_with_drivers if t.name == team_name), None)
             if not team:
-                print(f"[FTB] ERROR: Team '{team_name}' (P{position}, {driver_name}) not found in league.teams with drivers - skipping points/events!")
+                _dbg(f"[FTB] ERROR: Team '{team_name}' (P{position}, {driver_name}) not found in league.teams with drivers - skipping points/events!")
                 continue
             
             # Safely iterate through all drivers (team may have fewer than 2)
@@ -9787,9 +10111,9 @@ class FTBSimulation:
             points = 0
             if status == 'finished' and position <= len(points_table):
                 points = points_table[position - 1]
-                print(f"[FTB] POINTS_DEBUG: P{position} {driver_name} status='{status}' pos<={len(points_table)} → {points} pts")
+                _dbg(f"[FTB] POINTS_DEBUG: P{position} {driver_name} status='{status}' pos<={len(points_table)} → {points} pts")
             else:
-                print(f"[FTB] POINTS_DEBUG: P{position} {driver_name} status='{status}' pos>{len(points_table)}? {position > len(points_table)} → 0 pts (FAILED)")
+                _dbg(f"[FTB] POINTS_DEBUG: P{position} {driver_name} status='{status}' pos>{len(points_table)}? {position > len(points_table)} → 0 pts (FAILED)")
             
             # Update championship table (always, whether points > 0 or not)
             if team.name not in league.championship_table:
@@ -9802,12 +10126,12 @@ class FTBSimulation:
             is_player = state.player_team and team.name == state.player_team.name
             if is_player:
                 state.player_team.standing_metrics['points'] = league.championship_table[team.name]
-                print(f"[FTB] PLAYER_FINISH: P{position} {driver_name} = {points} pts (Total: {league.championship_table[team.name]:.0f} pts)")
+                _dbg(f"[FTB] PLAYER_FINISH: P{position} {driver_name} = {points} pts (Total: {league.championship_table[team.name]:.0f} pts)")
             
             # Log all point-scoring finishes
             if points > 0:
                 points_awarded_count += 1
-                print(f"[FTB] POINTS_AWARDED: P{position}={driver_name} ({team_name}) {points} pts")
+                _dbg(f"[FTB] POINTS_AWARDED: P{position}={driver_name} ({team_name}) {points} pts")
             
             # Award driver championship points
             if driver:
@@ -9871,7 +10195,7 @@ class FTBSimulation:
             ))
         
         # Log points summary
-        print(f"[FTB] POINTS_SUMMARY: {points_awarded_count} positions scored points (table size: {len(points_table)}, loop ran {loop_iterations} times)")
+        _dbg(f"[FTB] POINTS_SUMMARY: {points_awarded_count} positions scored points (table size: {len(points_table)}, loop ran {loop_iterations} times)")
         
         # Award fastest lap bonus point (if enabled and driver finished in top 10)
         if fastest_lap_bonus_enabled and fastest_lap_driver and fastest_lap_team and fastest_lap_position and fastest_lap_position <= 10:
@@ -9895,7 +10219,7 @@ class FTBSimulation:
                         league.driver_championship[fl_driver.name] = 0.0
                     league.driver_championship[fl_driver.name] += 1.0
                     
-                    print(f"[FTB] FASTEST_LAP_BONUS: {fastest_lap_driver} ({fastest_lap_team}) P{fastest_lap_position} +1 pt (lap: {race_result.fastest_lap[1]:.3f}s)")
+                    _dbg(f"[FTB] FASTEST_LAP_BONUS: {fastest_lap_driver} ({fastest_lap_team}) P{fastest_lap_position} +1 pt (lap: {race_result.fastest_lap[1]:.3f}s)")
                     
                     # Emit fastest lap bonus event for narrator
                     events.append(SimEvent(
@@ -9959,7 +10283,7 @@ class FTBSimulation:
                     }
                 ))
                 
-                print(f"[FTB] PENALTY_FINE: {penalty.team_name} fined ${fine_amount:,} - {penalty.reason}")
+                _dbg(f"[FTB] PENALTY_FINE: {penalty.team_name} fined ${fine_amount:,} - {penalty.reason}")
             
             elif penalty.penalty_type == 'points_deduction':
                 # Deduct championship points
@@ -9984,7 +10308,7 @@ class FTBSimulation:
                         }
                     ))
                     
-                    print(f"[FTB] PENALTY_POINTS: {penalty.team_name} lost {penalty.magnitude} pts ({points_before:.0f} → {points_after:.0f}) - {penalty.reason}")
+                    _dbg(f"[FTB] PENALTY_POINTS: {penalty.team_name} lost {penalty.magnitude} pts ({points_before:.0f} → {points_after:.0f}) - {penalty.reason}")
         
         # Increment race counter for this league
         league.races_this_season += 1
@@ -9993,7 +10317,7 @@ class FTBSimulation:
         # Log race completion
         winner_name = race_result.final_positions[0][0] if race_result.final_positions else "Unknown"
         winner_points = points_table[0] if race_result.final_positions else 0
-        print(f"[FTB] RACE_COMPLETE: {race_result.track_name}, Winner={winner_name} ({winner_points} pts), {len(race_result.laps)} lap records, {len(race_result.race_events)} events")
+        _dbg(f"[FTB] RACE_COMPLETE: {race_result.track_name}, Winner={winner_name} ({winner_points} pts), {len(race_result.laps)} lap records, {len(race_result.race_events)} events")
         
         # Update manager career stats (if player team participated)
         if state.player_team and state.manager_career_stats:
@@ -10488,7 +10812,7 @@ class FTBSimulation:
                     'tire_management': 100.0 - (driver_data['tire_age'] * 0.5)  # Simplified
                 }
         
-        print(f"[FTB] LAP_SIM: Completed {total_laps} laps, {len(result.race_events)} events, {len(result.final_positions)} finishers")
+        _dbg(f"[FTB] LAP_SIM: Completed {total_laps} laps, {len(result.race_events)} events, {len(result.final_positions)} finishers")
         
         return result
     
@@ -10713,7 +11037,7 @@ class FTBSimulation:
             # Mark penalty as applied
             penalty.applied = True
             
-            print(f"[FTB] GRID_PENALTY: {affected_entry[1].name} moved from P{original_pos+1} to P{new_pos+1} ({grid_penalty}-place penalty)")
+            _dbg(f"[FTB] GRID_PENALTY: {affected_entry[1].name} moved from P{original_pos+1} to P{new_pos+1} ({grid_penalty}-place penalty)")
         
         return race_grid
     
@@ -10732,7 +11056,7 @@ class FTBSimulation:
         )
         
         if not teams_sorted:
-            print(f"[FTB] WARNING: No standings for {league.name} at season end")
+            _dbg(f"[FTB] WARNING: No standings for {league.name} at season end")
             return events
         
         # Emit championship standings event
@@ -10752,7 +11076,7 @@ class FTBSimulation:
             }
         ))
         
-        print(f"[FTB] SEASON_CHAMPION: {teams_sorted[0][0]} wins {league.name} with {teams_sorted[0][1]} points")
+        _dbg(f"[FTB] SEASON_CHAMPION: {teams_sorted[0][0]} wins {league.name} with {teams_sorted[0][1]} points")
         
         # Write season summary for player team (if they participated in this league)
         if state.player_team and state.player_team.league_id == league.league_id and state.state_db_path:
@@ -10830,7 +11154,7 @@ class FTBSimulation:
                 }
                 
                 ftb_state_db.write_season_summary(state.state_db_path, season_summary)
-                print(f"[FTB] Wrote season {state.season_number} summary for {state.player_team.name}")
+                _dbg(f"[FTB] Wrote season {state.season_number} summary for {state.player_team.name}")
                 
                 # ═══════════════════════════════════════════════════════════════
                 # PHASE 2: UPDATE HISTORICAL DATA AT SEASON END
@@ -10860,13 +11184,13 @@ class FTBSimulation:
                         season_data
                     )
                     
-                    print(f"[FTB] ✓ Historical data updated for season {state.season_number}")
+                    _dbg(f"[FTB] ✓ Historical data updated for season {state.season_number}")
                     
                 except Exception as e:
-                    print(f"[FTB] Warning: Could not update historical data at season end: {e}")
+                    _dbg(f"[FTB] Warning: Could not update historical data at season end: {e}")
                     
             except Exception as e:
-                print(f"[FTB] Warning: Could not write season summary: {e}")
+                _dbg(f"[FTB] Warning: Could not write season summary: {e}")
         
         # Apply infrastructure decay at season end
         for team_name in league.championship_table.keys():
@@ -11490,7 +11814,7 @@ class FTBSimulation:
                         # Track starting budget for next season
                         team_obj._season_start_budget = ending_budget
                 except Exception as e:
-                    print(f"[FTB ML] Warning: Failed to log season outcomes for {league_id}: {e}")
+                    _dbg(f"[FTB ML] Warning: Failed to log season outcomes for {league_id}: {e}")
             
             # ============================================================
             # PER-LEAGUE SEASON ROLLOVER
@@ -11510,7 +11834,7 @@ class FTBSimulation:
                 state.in_offseason = True
                 state.offseason_ticks_remaining = 56  # 8 weeks
                 state.phase = "offseason"
-                print(f"[FTB] PLAYER_SEASON_ROLLOVER: {league.name} complete, advancing to Season {state.season_number}")
+                _dbg(f"[FTB] PLAYER_SEASON_ROLLOVER: {league.name} complete, advancing to Season {state.season_number}")
                 
                 events.append(SimEvent(
                     event_type="time",
@@ -11525,7 +11849,7 @@ class FTBSimulation:
                     }
                 ))
             else:
-                print(f"[FTB] LEAGUE_SEASON_COMPLETE: {league.name} finished season {league.season_number - 1}, starting season {league.season_number}")
+                _dbg(f"[FTB] LEAGUE_SEASON_COMPLETE: {league.name} finished season {league.season_number - 1}, starting season {league.season_number}")
             
             # Reset championship table for new season
             league.championship_table = {}
@@ -11535,7 +11859,7 @@ class FTBSimulation:
             if league.hype > 1.0:
                 decay_factor = 0.3  # Lose 30% of excess hype per season
                 league.hype = 1.0 + (league.hype - 1.0) * (1.0 - decay_factor)
-                print(f"[FTB] HYPE_DECAY: {league.name} hype decayed to {league.hype:.2f}x")
+                _dbg(f"[FTB] HYPE_DECAY: {league.name} hype decayed to {league.hype:.2f}x")
             league.hype_events_this_season = 0
             
             # Soft reset team morale - move 35% toward neutral (50) for off-season refresh
@@ -11674,7 +11998,11 @@ class FTBSimulation:
     
     @staticmethod
     def apply_financial_flows(state: SimState) -> List[SimEvent]:
-        """Budget ticks, income, expenses, salaries, and infrastructure upkeep"""
+        """Budget ticks: per-tick income and infrastructure upkeep.
+        
+        NOTE: Payroll is handled separately by process_salary_payouts() every 14 ticks.
+        Do NOT deduct payroll here to avoid double-charging.
+        """
         events = []
         all_teams = [state.player_team] + state.ai_teams if state.player_team else state.ai_teams
         
@@ -11691,10 +12019,8 @@ class FTBSimulation:
             for income_stream in team.budget.income_streams:
                 tick_income += income_stream.amount / 112.0  # Distribute across season
             
-            # Calculate costs for this tick
-            payroll_cost = team.budget.calculate_staff_payroll()
-            
             # Infrastructure upkeep costs (only for unlocked facilities)
+            # NOTE: Payroll is NOT included here — it is paid bi-weekly via process_salary_payouts()
             infrastructure_cost = 0.0
             for facility, quality in team.infrastructure.items():
                 # Skip if this is an unlock flag (e.g., 'factory_unlocked')
@@ -11706,12 +12032,9 @@ class FTBSimulation:
                 if is_unlocked and facility in INFRASTRUCTURE_UPKEEP_COST:
                     infrastructure_cost += INFRASTRUCTURE_UPKEEP_COST[facility](quality)
             
-            # Total operational cost
-            total_operational_cost = payroll_cost + infrastructure_cost
-            
-            # Apply income and costs
+            # Apply income and infrastructure costs (no payroll — that's bi-weekly)
             team.budget.cash += tick_income
-            team.budget.cash -= total_operational_cost
+            team.budget.cash -= infrastructure_cost
             
             # Log operational expenses (only for player team)
             if team == state.player_team and infrastructure_cost > 0:
@@ -11719,7 +12042,7 @@ class FTBSimulation:
                     type="expense",
                     category="infrastructure_upkeep",
                     amount=infrastructure_cost,
-                    description=f"Infrastructure maintenance ({payroll_cost:.0f} payroll + {infrastructure_cost:.0f} upkeep)",
+                    description=f"Infrastructure upkeep: ${infrastructure_cost:.0f}",
                     balance_after=team.budget.cash
                 )
             
@@ -11864,7 +12187,7 @@ class FTBSimulation:
                                                 bailout_sponsor = sponsor
                                                 break
                     except Exception as e:
-                        print(f"[FTB] Error checking bailout savior: {e}")
+                        _dbg(f"[FTB] Error checking bailout savior: {e}")
                         continue
             
             if bailout_sponsor:
@@ -11942,7 +12265,7 @@ class FTBSimulation:
                         db_path=getattr(state, 'state_db_path', None)
                     )
                 except Exception as e:
-                    print(f"[FTB] Failed to create financial warning notification: {e}")
+                    _dbg(f"[FTB] Failed to create financial warning notification: {e}")
             
             events.append(SimEvent(
                 event_type="pressure",
@@ -11975,7 +12298,7 @@ class FTBSimulation:
                         db_path=getattr(state, 'state_db_path', None)
                     )
                 except Exception as e:
-                    print(f"[FTB] Failed to create critical financial notification: {e}")
+                    _dbg(f"[FTB] Failed to create critical financial notification: {e}")
             
             events.append(SimEvent(
                 event_type="consequence",
@@ -12028,7 +12351,7 @@ class FTBSimulation:
             # SAFETY CHECK: Skip auto-decisions for player team in human control mode
             is_player_team = state.player_team and team.name == state.player_team.name
             if is_player_team and state.control_mode == 'human':
-                print(f"[FTB CASH_CRISIS] ⚠️ BLOCKED: Fire sale decision skipped for player team '{team.name}' in human control mode")
+                _dbg(f"[FTB CASH_CRISIS] ⚠️ BLOCKED: Fire sale decision skipped for player team '{team.name}' in human control mode")
                 events.append(SimEvent(
                     event_type="pressure",
                     category="cash_crisis",
@@ -12245,7 +12568,7 @@ class FTBSimulation:
         
         # Prevent folding the player team (this would be game over)
         if team == state.player_team:
-            print(f"[FTB] Player team {team.name} reached fold condition - triggering game over state")
+            _dbg(f"[FTB] Player team {team.name} reached fold condition - triggering game over state")
             # TODO: Implement proper game over handling
             return SimEvent(
                 event_type="outcome",
@@ -12285,7 +12608,7 @@ class FTBSimulation:
                     seasons_survived=seasons_active
                 )
             except Exception as e:
-                print(f"[FTB ML] Warning: Failed to log team fold outcome: {e}")
+                _dbg(f"[FTB ML] Warning: Failed to log team fold outcome: {e}")
         
         try:
             db_path = getattr(state, 'state_db_path', None)
@@ -12321,9 +12644,9 @@ class FTBSimulation:
                 
                 conn.commit()
                 conn.close()
-                print(f"[FTB] Team {team.name} archived to folded_teams table")
+                _dbg(f"[FTB] Team {team.name} archived to folded_teams table")
         except Exception as e:
-            print(f"[FTB] Error archiving folded team: {e}")
+            _dbg(f"[FTB] Error archiving folded team: {e}")
         
         # Release staff and drivers to market
         released_staff = []
@@ -12384,7 +12707,7 @@ class FTBSimulation:
             }
         )
         
-        print(f"[FTB] Team {team.name} (Tier {team.tier}) has folded: {fold_reason}")
+        _dbg(f"[FTB] Team {team.name} (Tier {team.tier}) has folded: {fold_reason}")
         return fold_event
     
     @staticmethod
@@ -12405,7 +12728,7 @@ class FTBSimulation:
             new_name = generate_team_name(state.seed + seed_offset, tier)
             attempts += 1
             if attempts > 100:
-                print(f"[FTB] Failed to generate unique team name after 100 attempts")
+                _dbg(f"[FTB] Failed to generate unique team name after 100 attempts")
                 return None
         
         # Create new team
@@ -12465,7 +12788,7 @@ class FTBSimulation:
                 break
         
         if not target_league:
-            print(f"[FTB] Could not find league for tier {tier}, cannot spawn team")
+            _dbg(f"[FTB] Could not find league for tier {tier}, cannot spawn team")
             return None
         
         new_team.league_id = target_league.league_id
@@ -12492,7 +12815,7 @@ class FTBSimulation:
         # Add to league
         target_league.teams.append(new_team)
         
-        print(f"[FTB] Spawned new team: {new_name} (Tier {tier}, {new_team.ownership_type}, ${new_team.budget.cash:,})")
+        _dbg(f"[FTB] Spawned new team: {new_name} (Tier {tier}, {new_team.ownership_type}, ${new_team.budget.cash:,})")
         
         return new_team
     
@@ -13008,7 +13331,7 @@ class FTBSimulation:
                 
                 ftb_state_db.write_decision_history(state.state_db_path, decision_record)
             except Exception as e:
-                print(f"[FTB] Warning: Could not log decision to history: {e}")
+                _dbg(f"[FTB] Warning: Could not log decision to history: {e}")
         
         # Apply costs
         if state.player_team and chosen_option.cost > 0:
@@ -13110,7 +13433,7 @@ class FTBSimulation:
                 ))
             else:
                 # Unknown fire sale option
-                print(f"[FTB] Unknown fire sale option: {option_id}")
+                _dbg(f"[FTB] Unknown fire sale option: {option_id}")
         
         # Sponsor Bailout
         elif category == "sponsor_bailout":
@@ -13197,7 +13520,7 @@ class FTBSimulation:
                 if (state.control_mode == 'human' and 
                     decision.category in ['fire_sale', 'ownership_ultimatum'] and
                     state.player_team):
-                    print(f"[FTB DECISIONS] ⚠️ BLOCKED: Auto-resolution of {decision.category} decision blocked for player team in human control mode")
+                    _dbg(f"[FTB DECISIONS] ⚠️ BLOCKED: Auto-resolution of {decision.category} decision blocked for player team in human control mode")
                     # Mark as resolved but don't apply consequences
                     decision.resolved = True
                     events.append(SimEvent(
@@ -13824,7 +14147,7 @@ class FTBSimulation:
                     action_scores_dict[action.name] = float(score)
             
             except Exception as e:
-                print(f"[FTB ML] Warning: ML policy failed, falling back to rule-based: {e}")
+                _dbg(f"[FTB ML] Warning: ML policy failed, falling back to rule-based: {e}")
                 use_ml_policy = False  # Fall back to rule-based
         
         if not use_ml_policy:
@@ -13892,7 +14215,7 @@ class FTBSimulation:
                 )
             except Exception as e:
                 # Don't break simulation if logging fails
-                print(f"[FTB ML] Warning: Failed to log AI decision: {e}")
+                _dbg(f"[FTB ML] Warning: Failed to log AI decision: {e}")
         
         return best_action
     
@@ -14047,11 +14370,11 @@ class FTBSimulation:
         # 1. Generate Full World
         WorldBuilder.generate_world(state)
         
-        print(f"[FTB] WORLD_GEN: Created {len(state.leagues)} leagues, {len(state.ai_teams)} teams, {len(state.tracks)} tracks")
+        _dbg(f"[FTB] WORLD_GEN: Created {len(state.leagues)} leagues, {len(state.ai_teams)} teams, {len(state.tracks)} tracks")
         
         # 1.5 Initialize starting sponsors for all teams
         FTBSimulation._initialize_starting_sponsors(state)
-        print(f"[FTB] SPONSOR_INIT: All teams now have initial sponsors and offers")
+        _dbg(f"[FTB] SPONSOR_INIT: All teams now have initial sponsors and offers")
         
         # 1.6 Initialize income streams for all teams based on tier (FINANCE FIX)
         all_teams = state.ai_teams + ([state.player_team] if state.player_team else [])
@@ -14073,7 +14396,7 @@ class FTBSimulation:
             team.budget.income_streams.append(
                IncomeSource(name="Media Rights", amount=base_media_income, frequency="season")
             )
-        print(f"[FTB] FINANCE_INIT: Media broadcasting rights initialized for all teams")
+        _dbg(f"[FTB] FINANCE_INIT: Media broadcasting rights initialized for all teams")
         
         # 2. Assign Player (Take over team in specified tier)
         # Map tier parameter to league tier name
@@ -14087,21 +14410,21 @@ class FTBSimulation:
         tier_name_str = tier_map.get(tier.lower(), 'grassroots')
         target_league_id = f'{tier_name_str}_1'
         
-        print(f"[FTB] Player starting in tier: {tier} → league: {target_league_id}")
+        _dbg(f"[FTB] Player starting in tier: {tier} → league: {target_league_id}")
         
         if target_league_id in state.leagues:
             league = state.leagues[target_league_id]
-            print(f"[FTB] Found league '{league.name}' with {len(league.teams)} teams")
+            _dbg(f"[FTB] Found league '{league.name}' with {len(league.teams)} teams")
             if league.teams:
                 p_team = league.teams[0]
                 
-                print(f"[FTB] Taking over team: {p_team.name}")
-                print(f"[FTB]   - Budget: ${p_team.budget.cash:,.0f}")
-                print(f"[FTB]   - Drivers: {len(p_team.drivers)}")
-                print(f"[FTB]   - Engineers: {len(p_team.engineers)}")
-                print(f"[FTB]   - Mechanics: {len(p_team.mechanics)}")
-                print(f"[FTB]   - Strategist: {'Yes' if p_team.strategist else 'No'}")
-                print(f"[FTB]   - Principal: {p_team.principal.name if p_team.principal else 'None'}")
+                _dbg(f"[FTB] Taking over team: {p_team.name}")
+                _dbg(f"[FTB]   - Budget: ${p_team.budget.cash:,.0f}")
+                _dbg(f"[FTB]   - Drivers: {len(p_team.drivers)}")
+                _dbg(f"[FTB]   - Engineers: {len(p_team.engineers)}")
+                _dbg(f"[FTB]   - Mechanics: {len(p_team.mechanics)}")
+                _dbg(f"[FTB]   - Strategist: {'Yes' if p_team.strategist else 'No'}")
+                _dbg(f"[FTB]   - Principal: {p_team.principal.name if p_team.principal else 'None'}")
                 
                 # Apply custom team name if provided, otherwise generate
                 old_team_name = p_team.name  # Save old name for unregistering
@@ -14122,7 +14445,7 @@ class FTBSimulation:
                 # Create player's manager entity from their identity
                 # This creates an AIPrincipal that represents the player's management style
                 # The LLM translates personality → stats ONCE here, then all decisions use simulation
-                print(f"[FTB] Creating player manager profile from identity...")
+                _dbg(f"[FTB] Creating player manager profile from identity...")
                 player_manager_stats = translate_player_identity_to_stats(player_identity)
                 
                 # Create the player's AIPrincipal entity
@@ -14142,9 +14465,9 @@ class FTBSimulation:
                 # No contract for player principal (doesn't pay themselves, can't be fired)
                 # No salary entry created
                 
-                print(f"[FTB]   - Player manager created: {manager_display_name}")
-                print(f"[FTB]   - Manager stats avg: {player_principal.overall_rating:.1f}")
-                print(f"[FTB]   - Ownership: {ownership}")
+                _dbg(f"[FTB]   - Player manager created: {manager_display_name}")
+                _dbg(f"[FTB]   - Manager stats avg: {player_principal.overall_rating:.1f}")
+                _dbg(f"[FTB]   - Ownership: {ownership}")
                 
                 state.player_team = p_team
                 # Remove player team from ai_teams by name to ensure it works even if object references differ
@@ -14153,7 +14476,7 @@ class FTBSimulation:
                 # Initialize career stats with first team
                 state.manager_career_stats.teams_managed.append(p_team.name)
             else:
-                print(f"[FTB] ERROR: League '{league.name}' has no teams!")
+                _dbg(f"[FTB] ERROR: League '{league.name}' has no teams!")
                 # Fallback
                 fallback_name = team_name if team_name and team_name.strip() else "Player Racing"
                 state.player_team = Team(fallback_name)
@@ -14173,7 +14496,7 @@ class FTBSimulation:
                 
                 state.manager_career_stats.teams_managed.append(fallback_name)
         else:
-             print(f"[FTB] ERROR: League '{target_league_id}' not found in {list(state.leagues.keys())[:5]}")
+             _dbg(f"[FTB] ERROR: League '{target_league_id}' not found in {list(state.leagues.keys())[:5]}")
              # Fallback
              fallback_name = team_name if team_name and team_name.strip() else "Player Racing"
              state.player_team = Team(fallback_name)
@@ -14214,16 +14537,16 @@ class FTBSimulation:
             offers = generate_sponsor_offers(state, state.player_team, rng_player, count=2)
             state.pending_sponsor_offers[state.player_team.name].extend(offers)
             
-            print(f"[FTB] PLAYER_SPONSORS: Generated {len(starting_sponsors)} starting sponsors and {len(offers)} pending offers")
+            _dbg(f"[FTB] PLAYER_SPONSORS: Generated {len(starting_sponsors)} starting sponsors and {len(offers)} pending offers")
         
-        print(f"[FTB] After origin modifiers:")
-        print(f"[FTB]   - Budget: ${state.player_team.budget.cash:,.0f}")
-        print(f"[FTB]   - Drivers: {[d.name for d in state.player_team.drivers]}")
-        print(f"[FTB]   - Engineers: {[e.name for e in state.player_team.engineers]}")
-        print(f"[FTB]   - Mechanics: {[m.name for m in state.player_team.mechanics]}")
-        print(f"[FTB]   - Car: {state.player_team.car.overall_rating if state.player_team.car else 'None'}")
-        print(f"[FTB]   - Morale: {state.player_team.standing_metrics.get('morale', 0):.1f}")
-        print(f"[FTB]   - Is same object as in league? {state.player_team in state.leagues.get('grassroots_1', type('', (), {'teams': []})()).teams}")
+        _dbg(f"[FTB] After origin modifiers:")
+        _dbg(f"[FTB]   - Budget: ${state.player_team.budget.cash:,.0f}")
+        _dbg(f"[FTB]   - Drivers: {[d.name for d in state.player_team.drivers]}")
+        _dbg(f"[FTB]   - Engineers: {[e.name for e in state.player_team.engineers]}")
+        _dbg(f"[FTB]   - Mechanics: {[m.name for m in state.player_team.mechanics]}")
+        _dbg(f"[FTB]   - Car: {state.player_team.car.overall_rating if state.player_team.car else 'None'}")
+        _dbg(f"[FTB]   - Morale: {state.player_team.standing_metrics.get('morale', 0):.1f}")
+        _dbg(f"[FTB]   - Is same object as in league? {state.player_team in state.leagues.get('grassroots_1', type('', (), {'teams': []})()).teams}")
         
         # Initialize game phase - start at day 0
         state.tick = 0  # Starting fresh at day 0
@@ -14234,9 +14557,9 @@ class FTBSimulation:
         state.races_completed_this_season = 0  # Season just starting
         
         # Debug log
-        print(f"[FTB] Career initialized: team={state.player_team.name if state.player_team else 'None'}")
-        print(f"[FTB] Initial state: phase={state.phase}, in_offseason={state.in_offseason}, tick={state.tick}")
-        print(f"[FTB] Starting at day 0 - first race will trigger in ~7-14 days")
+        _dbg(f"[FTB] Career initialized: team={state.player_team.name if state.player_team else 'None'}")
+        _dbg(f"[FTB] Initial state: phase={state.phase}, in_offseason={state.in_offseason}, tick={state.tick}")
+        _dbg(f"[FTB] Starting at day 0 - first race will trigger in ~7-14 days")
         
         return state
     
@@ -14278,7 +14601,7 @@ class FTBSimulation:
         
         total_active = sum(len(sponsors) for sponsors in state.sponsorships.values())
         total_pending = sum(len(offers) for offers in state.pending_sponsor_offers.values())
-        print(f"[FTB] Initialized {total_active} active sponsors and {total_pending} pending offers across {len(all_teams)} teams")
+        _dbg(f"[FTB] Initialized {total_active} active sponsors and {total_pending} pending offers across {len(all_teams)} teams")
     
     @staticmethod
     def _generate_event_id(state: SimState) -> int:
@@ -15047,7 +15370,12 @@ class FTBSimulation:
         team.equipped_parts[part.part_type] = part
         
         # Update car ratings with new parts configuration
-        base_ratings = STATS_SCHEMAS['Car'].copy()
+        # Use car's base_ratings (tier-specific), not schema defaults!
+        if hasattr(team.car, 'base_ratings') and team.car.base_ratings:
+            base_ratings = team.car.base_ratings.copy()
+        else:
+            # Fallback for old saves or initialization issues
+            base_ratings = team.car.current_ratings.copy()
         team.car.update_ratings(base_ratings, team.equipped_parts)
         
         # Create equip event
@@ -15480,7 +15808,7 @@ class FTBSimulation:
                                 db_path=getattr(state, 'state_db_path', None)
                             )
                         except Exception as e:
-                            print(f"[FTB] Failed to create dev completion notification: {e}")
+                            _dbg(f"[FTB] Failed to create dev completion notification: {e}")
                     
                     # Roll for success
                     rng = state.get_rng("rd_project", f"{project.project_id}_{project.started_tick}")
@@ -16502,7 +16830,7 @@ class FTBSimulation:
                         'multiplier_restored': 1.0
                     }
                 ))
-                print(f"[FTB] Economic downturn ended at tick {state.tick}")
+                _dbg(f"[FTB] Economic downturn ended at tick {state.tick}")
             return events
         
         # Check for new downturn trigger (very rare)
@@ -16541,7 +16869,7 @@ class FTBSimulation:
                     }
                 ))
                 
-                print(f"[FTB] Economic downturn triggered: {multiplier:.2f}x multiplier for {duration_seasons} seasons")
+                _dbg(f"[FTB] Economic downturn triggered: {multiplier:.2f}x multiplier for {duration_seasons} seasons")
         
         return events
     
@@ -16813,10 +17141,10 @@ class FTBSimulation:
             # SAFETY CHECK: Never process player team in AI team actions
             # Compare by name since team_id changes across save/load cycles
             if state.player_team and team.name == state.player_team.name:
-                print(f"[FTB AI_ACTIONS] ✓ Skipping player team '{team.name}' from AI actions (safety check passed)")
+                _dbg(f"[FTB AI_ACTIONS] ✓ Skipping player team '{team.name}' from AI actions (safety check passed)")
                 continue
             if rng.random() < 0.10:  # 10% chance per tick
-                print(f"[FTB AI_ACTIONS] AI team '{team.name}' executing action (player team is '{state.player_team.name if state.player_team else 'None'}')")
+                _dbg(f"[FTB AI_ACTIONS] AI team '{team.name}' executing action (player team is '{state.player_team.name if state.player_team else 'None'}')")
                 # Determine action type (Phase 4.9: add R&D for tier 4+, Phase 5.9: add upgrades for tier 2+)
                 team_features = TIER_FEATURES.get(team.tier, TIER_FEATURES[1])
                 
@@ -16867,12 +17195,12 @@ class FTBSimulation:
                 
                 # FIRING: Remove underperforming staff
                 elif action_type == 'fire':
-                    print(f"[FTB AI_ACTIONS] Team '{team.name}' considering firing action (player team: '{state.player_team.name if state.player_team else 'None'}')")
+                    _dbg(f"[FTB AI_ACTIONS] Team '{team.name}' considering firing action (player team: '{state.player_team.name if state.player_team else 'None'}')")
                     # Find worst performing driver (if have multiple)
                     if len(team.drivers) > 1:
                         worst_driver = min(team.drivers, key=lambda d: d.overall_rating)
                         if worst_driver.overall_rating < 40:  # Only fire if truly bad
-                            print(f"[FTB AI_ACTIONS] Team '{team.name}' firing driver '{worst_driver.name}' (rating: {worst_driver.overall_rating})")
+                            _dbg(f"[FTB AI_ACTIONS] Team '{team.name}' firing driver '{worst_driver.name}' (rating: {worst_driver.overall_rating})")
                             action = Action('fire_driver', cost=0, target=worst_driver.name)
                             action_events = FTBSimulation.apply_action(action, team, state)
                             events.extend(action_events)
@@ -17423,7 +17751,7 @@ class FTBSimulation:
         
         # Apply the chosen action
         try:
-            print(f"[FTB DELEGATION] Player team '{state.player_team.name}' applying action: {chosen_action.name} (target: {chosen_action.target}, score: {chosen_score:.1f})")
+            _dbg(f"[FTB DELEGATION] Player team '{state.player_team.name}' applying action: {chosen_action.name} (target: {chosen_action.target}, score: {chosen_score:.1f})")
             action_events = FTBSimulation.apply_action(chosen_action, state.player_team, state)
             events.extend(action_events)
             
@@ -17797,18 +18125,18 @@ try:
             
             # Unique widget ID for debugging
             self.widget_id = str(id(self))[-6:]
-            print(f"[FTB WIDGET {self.widget_id}] Creating new widget instance")
+            _dbg(f"[FTB WIDGET {self.widget_id}] Creating new widget instance")
             
             # Unique widget ID for debugging
             self.widget_id = str(id(self))[-6:]
-            print(f"[FTB WIDGET {self.widget_id}] Creating new widget instance")
+            _dbg(f"[FTB WIDGET {self.widget_id}] Creating new widget instance")
             
             # Queue is created in register_widgets - just log that we're using it
             cmd_q = self.runtime.get("ftb_cmd_q")
             controller = self.runtime.get("ftb_controller")
-            print(f"[FTB WIDGET INIT] queue exists={cmd_q is not None}, controller exists={controller is not None}")
-            print(f"[FTB WIDGET INIT] controller.state exists={controller.state is not None if controller else 'no controller'}")
-            print(f"[FTB WIDGET INIT] Using queue id={id(cmd_q)}, runtime dict id={id(self.runtime)}")
+            _dbg(f"[FTB WIDGET INIT] queue exists={cmd_q is not None}, controller exists={controller is not None}")
+            _dbg(f"[FTB WIDGET INIT] controller.state exists={controller.state is not None if controller else 'no controller'}")
+            _dbg(f"[FTB WIDGET INIT] Using queue id={id(cmd_q)}, runtime dict id={id(self.runtime)}")
             
             # Wizard Variables
             self.wiz_seed = tk.StringVar(value=str(int(time.time())))
@@ -17823,9 +18151,10 @@ try:
             self.container = ctk.CTkFrame(self, fg_color="transparent")
             self.container.pack(fill=tk.BOTH, expand=True)
             
-            # Always show wizard first to let user choose Continue or New Game
-            # This prevents auto-loading stale autosaves and gives explicit control
-            self.show_wizard()
+            # Show start menu with Continue Save / Load Game / New Game options
+            # Check for autosave and pass it to start menu
+            autosave_path = self._get_autosave_path()
+            self.show_start_menu(autosave_path)
             
             # Start polling for controller state updates
             self.after(500, self._poll)
@@ -17851,24 +18180,31 @@ try:
                 self._detach_entry_traces(child)
         
         def _get_autosave_path(self):
-            """Get path to autosave file"""
-            workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
-            return os.path.join(workspace_root, "ftb_autosave.json")
+            """Get path to autosave file - MUST match controller's path"""
+            # CRITICAL FIX: Use STATION_DIR to match controller, not RADIO_OS_ROOT
+            station_dir = self.runtime.get("STATION_DIR", ".")
+            return os.path.join(station_dir, "ftb_autosave.json")
         
         def _has_autosave(self):
             """Check if autosave file exists"""
-            return os.path.exists(self._get_autosave_path())
+            path = self._get_autosave_path()
+            exists = os.path.exists(path)
+            _dbg(f"[FTB WIDGET] _has_autosave: path={path}, exists={exists}")
+            return exists
         
         def show_start_menu(self, save_path: str = None):
             """Show start menu with New Game / Load Save options"""
             # Allow redrawing the menu (removed early return check)
-            print(f"[FTB] show_start_menu called with save_path={save_path}")
+            _dbg(f"[FTB START MENU] ========================================")
+            _dbg(f"[FTB START MENU] show_start_menu called with save_path={save_path}")
+            _dbg(f"[FTB START MENU] ========================================")
             self.clear_ui()
             self.current_view = "start_menu"
             
             # Main container
             main = ctk.CTkFrame(self.container, fg_color="transparent")
             main.pack(expand=True)
+            _dbg(f"[FTB START MENU] Main container created")
             
             # Title
             title = ctk.CTkLabel(
@@ -17878,6 +18214,7 @@ try:
                 text_color=FTBTheme.ACCENT
             )
             title.pack(pady=(40, 10))
+            _dbg(f"[FTB START MENU] Title created")
             
             subtitle = ctk.CTkLabel(
                 main,
@@ -17886,32 +18223,40 @@ try:
                 text_color=FTBTheme.TEXT_MUTED
             )
             subtitle.pack(pady=(0, 60))
+            _dbg(f"[FTB START MENU] Subtitle created")
             
             # Button container
             btn_frame = ctk.CTkFrame(main, fg_color="transparent")
             btn_frame.pack()
+            _dbg(f"[FTB START MENU] Button frame created")
             
             # Continue Save button (only if autosave exists)
             if save_path and os.path.exists(save_path):
-                print(f"[FTB] Adding 'Continue Save' button for {save_path}")
-                load_btn = ctk.CTkButton(
-                    btn_frame,
-                    text="Continue Save",
-                    command=lambda: self._load_and_start(save_path),
-                    fg_color=FTBTheme.SUCCESS,
-                    hover_color=FTBTheme.SUCCESS_HOVER,
-                    width=300,
-                    height=60,
-                    font=("Arial", 16, "bold"),
-                    corner_radius=12
-                )
-                load_btn.pack(pady=10)
+                _dbg(f"[FTB START MENU] ✅ Autosave exists at: {save_path}")
+                try:
+                    load_btn = ctk.CTkButton(
+                        btn_frame,
+                        text="Continue Save",
+                        command=lambda: self._load_and_start(save_path),
+                        fg_color=FTBTheme.SUCCESS,
+                        hover_color=FTBTheme.SUCCESS_HOVER,
+                        width=300,
+                        height=60,
+                        font=("Arial", 16, "bold"),
+                        corner_radius=12
+                    )
+                    load_btn.pack(pady=10)
+                    _dbg(f"[FTB START MENU] ✅ 'Continue Save' button created and packed")
+                except Exception as e:
+                    _dbg(f"[FTB START MENU] ❌ Error creating 'Continue Save' button: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
-                print(f"[FTB] Skipping 'Continue Save' button (save_path={save_path}, exists={os.path.exists(save_path) if save_path else False})")
+                _dbg(f"[FTB START MENU] ⏭️  No autosave (save_path={save_path}, exists={os.path.exists(save_path) if save_path else False})")
             
-            # Load Game button (opens file picker)
+            # Load Game button (opens file picker) - ALWAYS SHOW THIS
             try:
-                print(f"[FTB] Adding 'Load Game' button")
+                _dbg(f"[FTB START MENU] Creating 'Load Game' button...")
                 load_any_btn = ctk.CTkButton(
                     btn_frame,
                     text="Load Game",
@@ -17923,27 +18268,34 @@ try:
                     font=("Arial", 16, "bold"),
                     corner_radius=12
                 )
+                _dbg(f"[FTB START MENU] 'Load Game' button object created, now packing...")
                 load_any_btn.pack(pady=10)
-                print(f"[FTB] 'Load Game' button created and packed successfully")
+                _dbg(f"[FTB START MENU] ✅ 'Load Game' button packed successfully!")
             except Exception as e:
-                print(f"[FTB] ERROR creating 'Load Game' button: {e}")
+                _dbg(f"[FTB START MENU] ❌ ERROR creating 'Load Game' button: {e}")
                 import traceback
                 traceback.print_exc()
             
             # New Game button
-            print(f"[FTB] Adding 'New Game' button")
-            new_btn = ctk.CTkButton(
-                btn_frame,
-                text="New Game",
-                command=self.show_wizard,
-                fg_color=FTBTheme.CARD,
-                hover_color=FTBTheme.CARD_HOVER,
-                width=300,
-                height=60,
-                font=("Arial", 16, "bold"),
-                corner_radius=12
-            )
-            new_btn.pack(pady=10)
+            try:
+                _dbg(f"[FTB START MENU] Creating 'New Game' button...")
+                new_btn = ctk.CTkButton(
+                    btn_frame,
+                    text="New Game",
+                    command=self.show_wizard,
+                    fg_color=FTBTheme.CARD,
+                    hover_color=FTBTheme.CARD_HOVER,
+                    width=300,
+                    height=60,
+                    font=("Arial", 16, "bold"),
+                    corner_radius=12
+                )
+                new_btn.pack(pady=10)
+                _dbg(f"[FTB START MENU] ✅ 'New Game' button created and packed")
+            except Exception as e:
+                _dbg(f"[FTB START MENU] ❌ ERROR creating 'New Game' button: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Save info (only if autosave exists)
             if save_path and os.path.exists(save_path):
@@ -17958,8 +18310,14 @@ try:
                         text_color=FTBTheme.TEXT_DIM
                     )
                     info.pack(pady=(40, 0))
-                except:
-                    pass
+                    _dbg(f"[FTB START MENU] ✅ Autosave info displayed: {time_str}")
+                except Exception as e:
+                    _dbg(f"[FTB START MENU] ⚠️  Error displaying autosave info: {e}")
+            
+            _dbg(f"[FTB START MENU] ========================================"
+)
+            _dbg(f"[FTB START MENU] Start menu setup complete!")
+            _dbg(f"[FTB START MENU] ========================================")
         
         def _load_and_start(self, save_path: str):
             """Load save file and show game UI"""
@@ -17971,17 +18329,17 @@ try:
         
         def _browse_and_load(self):
             """Open file browser to select a save file"""
-            print("[FTB] _browse_and_load called")
+            _dbg("[FTB] _browse_and_load called")
             workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
             saves_dir = os.path.join(workspace_root, "saves")
-            print(f"[FTB] Looking for saves in: {saves_dir}")
+            _dbg(f"[FTB] Looking for saves in: {saves_dir}")
             
             # Ensure saves directory exists
             if not os.path.exists(saves_dir):
-                print(f"[FTB] Creating saves directory: {saves_dir}")
+                _dbg(f"[FTB] Creating saves directory: {saves_dir}")
                 os.makedirs(saves_dir)
             
-            print("[FTB] Opening file dialog...")
+            _dbg("[FTB] Opening file dialog...")
             filename = filedialog.askopenfilename(
                 initialdir=saves_dir,
                 title="Select save file",
@@ -17989,12 +18347,12 @@ try:
                 parent=self
             )
             
-            print(f"[FTB] User selected: {filename}")
+            _dbg(f"[FTB] User selected: {filename}")
             if filename and os.path.exists(filename):
-                print(f"[FTB] Loading save from: {filename}")
+                _dbg(f"[FTB] Loading save from: {filename}")
                 self._load_and_start(filename)
             else:
-                print(f"[FTB] No file selected or file doesn't exist")
+                _dbg(f"[FTB] No file selected or file doesn't exist")
         
         def _show_welcome_choice(self):
             """Show Continue/New Game choice screen when autosave exists"""
@@ -18469,7 +18827,7 @@ try:
         
         def confirm_and_submit_wizard(self):
             """Show confirmation dialog before starting game"""
-            print("[FTB] confirm_and_submit_wizard called")  # Debug log
+            _dbg("[FTB] confirm_and_submit_wizard called")  # Debug log
             
             # Check if autosave exists and warn about overwrite
             if self._has_autosave():
@@ -18479,10 +18837,10 @@ Starting a new game will OVERWRITE the existing autosave.
 
 Do you want to overwrite it and start a new game?"""
                 overwrite_confirmed = messagebox.askyesno("Overwrite Autosave?", overwrite_msg, parent=self, icon='warning')
-                print(f"[FTB] Overwrite confirmed: {overwrite_confirmed}")
+                _dbg(f"[FTB] Overwrite confirmed: {overwrite_confirmed}")
                 
                 if not overwrite_confirmed:
-                    print("[FTB] User cancelled new game to preserve autosave")
+                    _dbg("[FTB] User cancelled new game to preserve autosave")
                     return  # User cancelled, keep autosave
             
             try:
@@ -18500,7 +18858,7 @@ Do you want to overwrite it and start a new game?"""
             manager_first_name = self.wiz_manager_first_name.get().strip()
             manager_last_name = self.wiz_manager_last_name.get().strip()
             
-            print(f"[FTB] Showing confirmation: seed={seed}, mode={save_mode}, origin={origin}, manager_age={manager_age}, manager_name={manager_first_name} {manager_last_name}")  # Debug log
+            _dbg(f"[FTB] Showing confirmation: seed={seed}, mode={save_mode}, origin={origin}, manager_age={manager_age}, manager_name={manager_first_name} {manager_last_name}")  # Debug log
             
             # Build confirmation message
             ownership_display = "Self-Owned Team" if ownership == "self_owned" else "Hired Manager"
@@ -18522,7 +18880,7 @@ Only way to modify is by editing the save file directly.
 Start game with these settings?"""
             
             confirmed = messagebox.askyesno("Confirm New Game", msg, parent=self)
-            print(f"[FTB] User confirmed: {confirmed}")  # Debug log
+            _dbg(f"[FTB] User confirmed: {confirmed}")  # Debug log
             
             if confirmed:
                 # Clear wizard UI and show loading state to prevent double-clicks
@@ -18551,7 +18909,7 @@ Start game with these settings?"""
                 self.update_idletasks()
                 
                 q = self.runtime["ftb_cmd_q"]
-                print(f"[FTB BUTTON] Putting command in queue id={id(q)}, runtime dict id={id(self.runtime)}")
+                _dbg(f"[FTB BUTTON] Putting command in queue id={id(q)}, runtime dict id={id(self.runtime)}")
                 q.put({
                     "cmd": "ftb_new_save",
                     "origin": origin,
@@ -18565,7 +18923,7 @@ Start game with these settings?"""
                     "manager_first_name": manager_first_name,
                     "manager_last_name": manager_last_name
                 })
-                print(f"[FTB BUTTON] Command queued successfully! Queue size now: {q.qsize()}")
+                _dbg(f"[FTB BUTTON] Command queued successfully! Queue size now: {q.qsize()}")
         
         def submit_wizard(self):
             """Send setup command to controller"""
@@ -18854,12 +19212,28 @@ Start game with these settings?"""
             pressure_panel = ctk.CTkFrame(left, fg_color=FTBTheme.CARD, corner_radius=8)
             pressure_panel.pack(fill=tk.X, pady=(0, 10))
             
+            # Header row with title and refresh button
+            header_row = ctk.CTkFrame(pressure_panel, fg_color="transparent")
+            header_row.pack(fill=tk.X, padx=15, pady=(15, 10))
+            
             ctk.CTkLabel(
-                pressure_panel,
+                header_row,
                 text="⚠️ Pressure Indicators",
                 font=("Arial", 14, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=(15, 10), anchor="w")
+            ).pack(side=tk.LEFT)
+            
+            # Refresh button
+            ctk.CTkButton(
+                header_row,
+                text="🔄 Refresh",
+                command=self._force_dashboard_refresh,
+                fg_color=FTBTheme.BUTTON_SECONDARY,
+                hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                width=100,
+                height=28,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
             
             indicators_grid = ctk.CTkFrame(pressure_panel, fg_color="transparent")
             indicators_grid.pack(fill=tk.X, padx=15, pady=(0, 15))
@@ -19742,7 +20116,7 @@ Typical Budget Range: {tier_info['range']}"""
                     )
                     sprite_label.pack(side=tk.LEFT, padx=(0, 10))
                 except Exception as e:
-                    print(f"[FTB] Error displaying sprite in entity card: {e}")
+                    _dbg(f"[FTB] Error displaying sprite in entity card: {e}")
             
             # Name and age
             name_label = ctk.CTkLabel(
@@ -20222,7 +20596,7 @@ Typical Budget Range: {tier_info['range']}"""
                     )
                     sprite_label.pack(pady=(20, 10))
                 except Exception as e:
-                    print(f"[FTB] Error displaying sprite in profile: {e}")
+                    _dbg(f"[FTB] Error displaying sprite in profile: {e}")
             
             ctk.CTkLabel(
                 header,
@@ -20876,7 +21250,7 @@ Proceed with buyout?"""
                     on_confirm=on_confirm
                 )
             except Exception as e:
-                print(f"[FTB] ERROR launching FireEntityWizard: {e}")
+                _dbg(f"[FTB] ERROR launching FireEntityWizard: {e}")
                 import traceback
                 traceback.print_exc()
                 messagebox.showerror("Error", f"Failed to open wizard: {e}", parent=self)
@@ -21362,7 +21736,7 @@ Requirements:
             try:
                 team.normalize_roster()
             except Exception as e:
-                print(f"[FTB] Error normalizing roster: {e}")
+                _dbg(f"[FTB] Error normalizing roster: {e}")
 
             # Scrollable container
             container = ctk.CTkScrollableFrame(popup, fg_color="transparent")
@@ -21560,7 +21934,7 @@ Weekly Expenses: {format_currency(sum(team.budget.staff_salaries.values()))}"""
                     wraplength=650
                 ).pack(padx=15, pady=(0, 15), anchor="w")
                 
-                print(f"[FTB] Error showing team detail for {team.name}: {e}")
+                _dbg(f"[FTB] Error showing team detail for {team.name}: {e}")
                 import traceback
                 traceback.print_exc()
             
@@ -21967,6 +22341,17 @@ Teams Managed: {len(stats.teams_managed)}"""
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
             ).pack(side=tk.LEFT)
+            
+            ctk.CTkButton(
+                header_top,
+                text="🔄 Refresh",
+                command=self._force_parts_marketplace_refresh,
+                fg_color=FTBTheme.BUTTON_SECONDARY,
+                hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                width=100,
+                height=28,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
             
             # Market controls
             controls_frame = ctk.CTkFrame(marketplace_header, fg_color="transparent")
@@ -22398,10 +22783,10 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             team = self.sim_state.player_team
             inventory = team.parts_inventory
-            print(f"[FTB WIDGET] _refresh_parts_inventory called: inventory has {len(inventory)} parts")
+            _dbg(f"[FTB WIDGET] _refresh_parts_inventory called: inventory has {len(inventory)} parts")
             if inventory:
                 for part in inventory[:3]:  # Show first 3
-                    print(f"[FTB WIDGET]   - {part.name} ({part.part_type})")
+                    _dbg(f"[FTB WIDGET]   - {part.name} ({part.part_type})")
             
             if not inventory:
                 # Empty state
@@ -23664,7 +24049,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     on_submit=on_submit
                 )
             except Exception as e:
-                print(f"[FTB] ERROR launching UpgradeWizard: {e}")
+                _dbg(f"[FTB] ERROR launching UpgradeWizard: {e}")
                 import traceback
                 traceback.print_exc()
                 messagebox.showerror("Error", f"Failed to open upgrade wizard: {e}", parent=self)
@@ -24108,7 +24493,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     if rds.phase == RaceDayPhase.QUALI_COMPLETE:
                         if not self.live_race_btn.winfo_ismapped():
                             self.live_race_btn.pack(padx=15, pady=(0, 15), fill=tk.X)
-                            print(f"[FTB] ▶️  Live race button SHOWN (phase=QUALI_COMPLETE)")
+                            _dbg(f"[FTB] ▶️  Live race button SHOWN (phase=QUALI_COMPLETE)")
                     elif rds.phase == RaceDayPhase.RACE_RUNNING:
                         if self.live_race_btn.winfo_ismapped():
                             self.live_race_btn.configure(text="🔴 Race In Progress...", state="disabled", fg_color="#555555")
@@ -24120,7 +24505,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     if self.live_race_btn.winfo_ismapped():
                         self.live_race_btn.pack_forget()
             except Exception as e:
-                print(f"[FTB] Warning: live race button update error: {e}")
+                _dbg(f"[FTB] Warning: live race button update error: {e}")
             
             # Update phase indicator
             phase = self.sim_state.phase
@@ -24252,10 +24637,10 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             # Debug logging if no results found despite races completed
             if not race_results and self.sim_state.races_completed_this_season > 0:
-                print(f"[FTB Debug] No race results found despite {self.sim_state.races_completed_this_season} races completed")
-                print(f"[FTB Debug] Event history size: {len(self.sim_state.event_history)}")
+                _dbg(f"[FTB Debug] No race results found despite {self.sim_state.races_completed_this_season} races completed")
+                _dbg(f"[FTB Debug] Event history size: {len(self.sim_state.event_history)}")
                 if self.sim_state.event_history:
-                    print(f"[FTB Debug] Sample categories: {[getattr(e, 'category', getattr(e, 'event_type', 'unknown')) for e in self.sim_state.event_history[-10:]]}")
+                    _dbg(f"[FTB Debug] Sample categories: {[getattr(e, 'category', getattr(e, 'event_type', 'unknown')) for e in self.sim_state.event_history[-10:]]}")
             
             if not race_results:
                 ctk.CTkLabel(
@@ -24355,12 +24740,12 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def _on_play_live_race(self):
             """Handle Play Live Race button click from Race Operations tab."""
-            print(f"[FTB] ▶️  _on_play_live_race CLICKED")
+            _dbg(f"[FTB] ▶️  _on_play_live_race CLICKED")
             try:
                 cmd_q = self.runtime.get("ftb_cmd_q")
                 if cmd_q:
                     cmd_q.put({"cmd": "ftb_start_live_race", "speed": 10.0})
-                    print(f"[FTB] ▶️  ftb_start_live_race command SENT to queue")
+                    _dbg(f"[FTB] ▶️  ftb_start_live_race command SENT to queue")
                     # Update button immediately to prevent double-click
                     self.live_race_btn.configure(
                         text="🔴 Starting race...",
@@ -24371,11 +24756,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                     ui_q = self.runtime.get('ui_q')
                     if ui_q:
                         ui_q.put(("activate_widget_tab", {"widget_key": "ftb_pbp"}))
-                        print("[FTB] 📺 Sent activate_widget_tab for ftb_pbp")
+                        _dbg("[FTB] 📺 Sent activate_widget_tab for ftb_pbp")
                 else:
-                    print(f"[FTB] ⚠️  ftb_cmd_q not found in runtime!")
+                    _dbg(f"[FTB] ⚠️  ftb_cmd_q not found in runtime!")
             except Exception as e:
-                print(f"[FTB] ❌ _on_play_live_race error: {e}")
+                _dbg(f"[FTB] ❌ _on_play_live_race error: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -24516,14 +24901,14 @@ Teams Managed: {len(stats.teams_managed)}"""
         def _on_tier_changed(self):
             """Handle tier dropdown change - update league dropdown options"""
             if not self.sim_state:
-                print("[FTB] _on_tier_changed: No state available")
+                _dbg("[FTB] _on_tier_changed: No state available")
                 self._stats_league_dropdown.configure(values=["No game loaded"])
                 self._stats_league_var.set("No game loaded")
                 return
             
             # Check if leagues exist
             if not hasattr(self.sim_state, 'leagues') or not self.sim_state.leagues:
-                print("[FTB] _on_tier_changed: No leagues found in state")
+                _dbg("[FTB] _on_tier_changed: No leagues found in state")
                 self._stats_league_dropdown.configure(values=["No leagues available"])
                 self._stats_league_var.set("No leagues available")
                 return
@@ -24531,8 +24916,8 @@ Teams Managed: {len(stats.teams_managed)}"""
             selected_tier = self._stats_tier_var.get()
             tier_map = {"Grassroots": 1, "Formula V": 2, "Formula X": 3, "Formula Y": 4, "Formula Z": 5}
             
-            print(f"[FTB] _on_tier_changed: Selected tier = {selected_tier}")
-            print(f"[FTB] _on_tier_changed: Total leagues = {len(self.sim_state.leagues)}")
+            _dbg(f"[FTB] _on_tier_changed: Selected tier = {selected_tier}")
+            _dbg(f"[FTB] _on_tier_changed: Total leagues = {len(self.sim_state.leagues)}")
             
             # Filter leagues by tier - NO "All Leagues" option
             league_options = []
@@ -24542,14 +24927,14 @@ Teams Managed: {len(stats.teams_managed)}"""
                         league_options.append(f"{lg.name} (T{lg.tier})")
             elif selected_tier in tier_map:
                 tier_num = tier_map[selected_tier]
-                print(f"[FTB] _on_tier_changed: Filtering for tier {tier_num}")
+                _dbg(f"[FTB] _on_tier_changed: Filtering for tier {tier_num}")
                 for lg in self.sim_state.leagues.values():
                     if lg and hasattr(lg, 'name') and hasattr(lg, 'tier') and lg.name:
-                        print(f"[FTB]   League: {lg.name}, Tier: {lg.tier}")
+                        _dbg(f"[FTB]   League: {lg.name}, Tier: {lg.tier}")
                         if lg.tier == tier_num:  # Safety check
                             league_options.append(f"{lg.name} (T{lg.tier})")
             
-            print(f"[FTB] _on_tier_changed: Found {len(league_options)} leagues for selected tier")
+            _dbg(f"[FTB] _on_tier_changed: Found {len(league_options)} leagues for selected tier")
             
             # Fallback if no leagues found
             if not league_options:
@@ -24568,14 +24953,14 @@ Teams Managed: {len(stats.teams_managed)}"""
                             player_league_option = f"{lg.name} (T{lg.tier})"
                             if player_league_option in league_options:
                                 self._stats_league_var.set(player_league_option)
-                                print(f"[FTB] _on_tier_changed: Set to player's league: {player_league_option}")
+                                _dbg(f"[FTB] _on_tier_changed: Set to player's league: {player_league_option}")
                                 self._refresh_racing_stats()
                                 return
             
             # Fallback to first option if player league not found
             if league_options:
                 self._stats_league_var.set(league_options[0])
-                print(f"[FTB] _on_tier_changed: Set to first option: {league_options[0]}")
+                _dbg(f"[FTB] _on_tier_changed: Set to first option: {league_options[0]}")
             
             # Refresh display
             self._refresh_racing_stats()
@@ -24618,7 +25003,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     cache['last_tier'] == selected_tier_name and 
                     cache['last_league'] == selected_league_display and 
                     cache['last_tick'] == current_tick):
-                    print(f"[FTB STATS] Cache hit - skipping refresh (tier={selected_tier_name}, league={selected_league_display}, tick={current_tick})")
+                    _dbg(f"[FTB STATS] Cache hit - skipping refresh (tier={selected_tier_name}, league={selected_league_display}, tick={current_tick})")
                     return
                 
                 # Update cache
@@ -24626,11 +25011,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                 cache['last_league'] = selected_league_display
                 cache['last_tick'] = current_tick
                 
-                print(f"[FTB STATS] Cache miss - performing refresh (tier={selected_tier_name}, league={selected_league_display}, tick={current_tick})")
+                _dbg(f"[FTB STATS] Cache miss - performing refresh (tier={selected_tier_name}, league={selected_league_display}, tick={current_tick})")
                 
                 selected_league = None
                 
-                print(f"[FTB] _refresh_racing_stats: Selected league display = {selected_league_display}")
+                _dbg(f"[FTB] _refresh_racing_stats: Selected league display = {selected_league_display}")
                 
                 # Find the selected league - check if leagues exist and are valid
                 if hasattr(self.sim_state, 'leagues') and self.sim_state.leagues:
@@ -24640,11 +25025,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                             league_display_name = f"{lg.name} (T{lg.tier})"
                             if selected_league_display == league_display_name:
                                 selected_league = lg
-                                print(f"[FTB] _refresh_racing_stats: Found league: {lg.name}")
+                                _dbg(f"[FTB] _refresh_racing_stats: Found league: {lg.name}")
                                 break
                 
                 if not selected_league:
-                    print(f"[FTB] _refresh_racing_stats: No league match found for '{selected_league_display}'")
+                    _dbg(f"[FTB] _refresh_racing_stats: No league match found for '{selected_league_display}'")
             
                 # Clear all containers safely
                 for container in [self.teams_latest_race_container, self.teams_standings_container, self.teams_history_container,
@@ -24660,7 +25045,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                 self._build_drivers_tab(selected_league, selected_tier)
                 
             except Exception as e:
-                print(f"[FTB] ERROR in _refresh_racing_stats: {e}")
+                _dbg(f"[FTB] ERROR in _refresh_racing_stats: {e}")
                 import traceback
                 traceback.print_exc()
                 
@@ -24688,7 +25073,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             # Use cached results if available and tick hasn't changed
             if (cache['archive_results'] is not None and 
                 cache['archive_timestamp'] == current_tick):
-                print(f"[FTB STATS] Using cached archive results for tick {current_tick}")
+                _dbg(f"[FTB STATS] Using cached archive results for tick {current_tick}")
                 results = cache['archive_results']
             else:
                 # Query database for fresh results
@@ -24704,9 +25089,9 @@ Teams Managed: {len(stats.teams_managed)}"""
                     # Update cache
                     cache['archive_results'] = results
                     cache['archive_timestamp'] = current_tick
-                    print(f"[FTB STATS] Loaded {len(results)} archive results from DB for tick {current_tick}")
+                    _dbg(f"[FTB STATS] Loaded {len(results)} archive results from DB for tick {current_tick}")
                 except Exception as e:
-                    print(f"[FTB] _get_archive_results_for_leagues: {e}")
+                    _dbg(f"[FTB] _get_archive_results_for_leagues: {e}")
                     return []
 
             league_ids = {
@@ -24756,10 +25141,10 @@ Teams Managed: {len(stats.teams_managed)}"""
                 # Debug logging
                 if use_archive:
                     race_result_count = sum(len(results) for results in archive_by_league.values())
-                    print(f"[FTB STATS] Building teams tab: {len(leagues_to_show)} leagues, {race_result_count} archived races")
+                    _dbg(f"[FTB STATS] Building teams tab: {len(leagues_to_show)} leagues, {race_result_count} archived races")
                 else:
                     race_result_count = sum(1 for e in self.sim_state.event_history if e.category == "race_result")
-                    print(f"[FTB STATS] Building teams tab: {len(leagues_to_show)} leagues, {race_result_count} race results in event_history")
+                    _dbg(f"[FTB STATS] Building teams tab: {len(leagues_to_show)} leagues, {race_result_count} race results in event_history")
             
                 # === LATEST RACE RESULTS ===
                 latest_race_events = []
@@ -24774,7 +25159,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                                 key=lambda r: (r.get('season', 0), r.get('round_number', 0), r.get('tick', 0))
                             )
                             latest_race_events.append((lg, latest_race))
-                            print(f"[FTB STATS] League {lg.name}: {len(league_results)} archived races")
+                            _dbg(f"[FTB STATS] League {lg.name}: {len(league_results)} archived races")
                 else:
                     for lg in leagues_to_show:
                         if not lg or not hasattr(lg, 'league_id'):
@@ -24782,13 +25167,13 @@ Teams Managed: {len(stats.teams_managed)}"""
                         lg_races = [e for e in self.sim_state.event_history if e.category == "race_result" and e.data.get('league_id') == lg.league_id]
                         if lg_races:
                             latest_race_events.append((lg, lg_races[-1]))
-                            print(f"[FTB STATS] League {lg.name}: {len(lg_races)} races found")
+                            _dbg(f"[FTB STATS] League {lg.name}: {len(lg_races)} races found")
                 
                 if not latest_race_events:
                     if use_archive:
-                        print("[FTB STATS] No archived race results found")
+                        _dbg("[FTB STATS] No archived race results found")
                     else:
-                        print(f"[FTB STATS] No race events found in event_history")
+                        _dbg(f"[FTB STATS] No race events found in event_history")
                     total_races_completed = sum(lg.races_this_season for lg in leagues_to_show if hasattr(lg, 'races_this_season'))
                     if total_races_completed > 0:
                         warning_text = "Race data should appear after next race."
@@ -25026,7 +25411,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     ctk.CTkLabel(history_card, text="Historical data coming soon...", font=("Arial", 10), text_color=FTBTheme.TEXT_MUTED).pack(pady=5)
             
             except Exception as e:
-                print(f"[FTB] ERROR in _build_teams_tab: {e}")
+                _dbg(f"[FTB] ERROR in _build_teams_tab: {e}")
                 import traceback
                 traceback.print_exc()
                 
@@ -25580,12 +25965,26 @@ Teams Managed: {len(stats.teams_managed)}"""
             header = ctk.CTkFrame(container, fg_color=FTBTheme.CARD, corner_radius=8)
             header.pack(fill=tk.X, padx=10, pady=(10, 5))
             
+            header_content = ctk.CTkFrame(header, fg_color="transparent")
+            header_content.pack(fill=tk.X, padx=15, pady=15)
+            
             ctk.CTkLabel(
-                header,
+                header_content,
                 text="💰 Sponsorship Management",
                 font=("Arial", 16, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=15, pady=15, anchor="w")
+            ).pack(side=tk.LEFT)
+            
+            ctk.CTkButton(
+                header_content,
+                text="🔄 Refresh All",
+                command=self._force_sponsor_offers_refresh,
+                fg_color=FTBTheme.BUTTON_SECONDARY,
+                hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                width=110,
+                height=28,
+                font=("Arial", 11)
+            ).pack(side=tk.RIGHT)
             
             # Two-column layout: left = current sponsors, right = offers and metrics
             content_frame = ctk.CTkFrame(container, fg_color="transparent")
@@ -25645,12 +26044,27 @@ Teams Managed: {len(stats.teams_managed)}"""
             # Pending offers
             offers_header = ctk.CTkFrame(right_col, fg_color=FTBTheme.CARD, corner_radius=6)
             offers_header.pack(fill=tk.X, pady=(0, 5))
+            
+            offers_header_content = ctk.CTkFrame(offers_header, fg_color="transparent")
+            offers_header_content.pack(fill=tk.X, padx=10, pady=8)
+            
             ctk.CTkLabel(
-                offers_header,
+                offers_header_content,
                 text="📨 Pending Offers",
                 font=("Arial", 13, "bold"),
                 text_color=FTBTheme.TEXT
-            ).pack(padx=10, pady=8, anchor="w")
+            ).pack(side=tk.LEFT)
+            
+            ctk.CTkButton(
+                offers_header_content,
+                text="🔄 Refresh",
+                command=self._force_sponsor_offers_refresh,
+                fg_color=FTBTheme.BUTTON_SECONDARY,
+                hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                width=90,
+                height=24,
+                font=("Arial", 10)
+            ).pack(side=tk.RIGHT)
             
             self.pending_offers_container = ctk.CTkFrame(right_col, fg_color="transparent")
             self.pending_offers_container.pack(fill=tk.BOTH, expand=True)
@@ -26009,7 +26423,7 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def _enable_delegation(self):
             """Enable AI delegation mode"""
-            print("[FTB UI] Enabling delegation")
+            _dbg("[FTB UI] Enabling delegation")
             
             # Update UI state
             self.control_mode = "delegated"
@@ -26041,7 +26455,7 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def _disable_delegation(self):
             """Disable AI delegation mode"""
-            print("[FTB UI] Disabling delegation")
+            _dbg("[FTB UI] Disabling delegation")
             
             # Update UI state
             self.control_mode = "human"
@@ -26081,10 +26495,10 @@ Teams Managed: {len(stats.teams_managed)}"""
             focus_text = self.focus_text_entry.get().strip()
             
             if not focus_text:
-                print("[FTB UI] Cannot apply empty focus")
+                _dbg("[FTB UI] Cannot apply empty focus")
                 return
             
-            print(f"[FTB UI] Applying delegation focus: '{focus_text}'")
+            _dbg(f"[FTB UI] Applying delegation focus: '{focus_text}'")
             
             # Update UI immediately
             self.current_focus_label.configure(
@@ -26114,11 +26528,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                     priority=50
                 )
             except Exception as e:
-                print(f"[FTB UI] Failed to create notification: {e}")
+                _dbg(f"[FTB UI] Failed to create notification: {e}")
         
         def _clear_focus(self):
             """Clear the current delegation focus"""
-            print("[FTB UI] Clearing delegation focus")
+            _dbg("[FTB UI] Clearing delegation focus")
             
             # Update UI
             self.current_focus_label.configure(
@@ -26146,11 +26560,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                     priority=50
                 )
             except Exception as e:
-                print(f"[FTB UI] Failed to create notification: {e}")
+                _dbg(f"[FTB UI] Failed to create notification: {e}")
         
         def _on_time_mode_change(self, value):
             """Handle time mode change from segmented button"""
-            print(f"[FTB UI] Time mode changed to: {value}")
+            _dbg(f"[FTB UI] Time mode changed to: {value}")
             
             # Map UI values to internal modes
             mode_map = {
@@ -26258,15 +26672,104 @@ Teams Managed: {len(stats.teams_managed)}"""
             except Exception:
                 pass
         
-        def _refresh_sponsors(self):
-            """Refresh sponsors display"""
-            if not self.sim_state or not self.sim_state.player_team:
-                return
-            if not self.current_sponsors_container or not self.current_sponsors_container.winfo_exists():
-                return
-            if not self.pending_offers_container or not self.pending_offers_container.winfo_exists():
+        def _force_dashboard_refresh(self):
+            """Force an immediate dashboard refresh (manually triggered)"""
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 MANUAL REFRESH TRIGGERED - Dashboard")
+            controller = self.runtime.get("ftb_controller")
+            if not controller or not controller.state:
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh - no controller or state")
                 return
             
+            # Force update by resetting counter and calling update
+            self._update_counter = 0
+            self._last_tick = None  # Force tick change detection
+            
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 Acquiring lock for manual refresh...")
+            try:
+                lock_acquired = controller.state_lock.acquire(blocking=True, timeout=2.0)
+                if lock_acquired:
+                    try:
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔒 Lock acquired, updating from state...")
+                        self.update_from_state(controller.state)
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Manual refresh complete")
+                    finally:
+                        controller.state_lock.release()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔓 Lock released")
+                else:
+                    _dbg(f"[FTB WIDGET {self.widget_id}] ⏸️ Could not acquire lock for refresh")
+            except Exception as e:
+                import traceback
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Error during manual refresh: {e}")
+                traceback.print_exc()
+        
+        def _force_parts_marketplace_refresh(self):
+            """Force an immediate parts marketplace + inventory refresh (manually triggered)"""
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 MANUAL REFRESH TRIGGERED - Parts Marketplace")
+            controller = self.runtime.get("ftb_controller")
+            if not controller or not controller.state:
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh marketplace - no controller or state")
+                return
+            
+            try:
+                lock_acquired = controller.state_lock.acquire(blocking=True, timeout=2.0)
+                if lock_acquired:
+                    try:
+                        self.sim_state = controller.state
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔒 Lock acquired, refreshing parts marketplace...")
+                        self._refresh_parts_inventory()
+                        self._refresh_parts_marketplace()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Parts marketplace refresh complete")
+                    finally:
+                        controller.state_lock.release()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔓 Lock released")
+                else:
+                    _dbg(f"[FTB WIDGET {self.widget_id}] ⏸️ Could not acquire lock for marketplace refresh")
+            except Exception as e:
+                import traceback
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Error during marketplace refresh: {e}")
+                traceback.print_exc()
+        
+        def _force_sponsor_offers_refresh(self):
+            """Force an immediate sponsor offers + current sponsors refresh (manually triggered)"""
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 MANUAL REFRESH TRIGGERED - Sponsor Offers")
+            controller = self.runtime.get("ftb_controller")
+            if not controller or not controller.state:
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh sponsors - no controller or state")
+                return
+            
+            try:
+                lock_acquired = controller.state_lock.acquire(blocking=True, timeout=2.0)
+                if lock_acquired:
+                    try:
+                        self.sim_state = controller.state
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔒 Lock acquired, refreshing sponsors...")
+                        self._refresh_sponsors()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Sponsor offers refresh complete")
+                    finally:
+                        controller.state_lock.release()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] 🔓 Lock released")
+                else:
+                    _dbg(f"[FTB WIDGET {self.widget_id}] ⏸️ Could not acquire lock for sponsor refresh")
+            except Exception as e:
+                import traceback
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Error during sponsor refresh: {e}")
+                traceback.print_exc()
+        
+        def _refresh_sponsors(self):
+            """Refresh sponsors display"""
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 MANUAL REFRESH TRIGGERED - Sponsors Tab")
+            
+            if not self.sim_state or not self.sim_state.player_team:
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh sponsors - no state or player team")
+                return
+            if not self.current_sponsors_container or not self.current_sponsors_container.winfo_exists():
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh sponsors - container doesn't exist")
+                return
+            if not self.pending_offers_container or not self.pending_offers_container.winfo_exists():
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Cannot refresh sponsors - offers container doesn't exist")
+                return
+            
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 Refreshing sponsors data from state...")
             team = self.sim_state.player_team
             
             # === Current Sponsors ==
@@ -26635,6 +27138,8 @@ Teams Managed: {len(stats.teams_managed)}"""
                         command=lambda i=idx: self._on_reject_sponsor(i)
                     )
                     reject_btn.pack(side=tk.LEFT)
+            
+            _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Sponsors refresh complete - {len(active_sponsors)} active, {len(pending_offers)} pending")
         
         def _on_accept_sponsor(self, offer_index):
             """Handle sponsor offer acceptance"""
@@ -26856,7 +27361,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     ).pack(side=tk.RIGHT, padx=10, pady=5)
             
             except Exception as e:
-                print(f"[FTB] Error refreshing decision history: {e}")
+                _dbg(f"[FTB] Error refreshing decision history: {e}")
         
         def _refresh_history_results(self):
             """Refresh race results history display"""
@@ -26978,7 +27483,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                         ).pack(side=tk.LEFT, padx=6, pady=6)
             
             except Exception as e:
-                print(f"[FTB] Error refreshing race results history: {e}")
+                _dbg(f"[FTB] Error refreshing race results history: {e}")
         
         def _refresh_history_transactions(self):
             """Refresh financial transactions history display"""
@@ -27091,7 +27596,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     balance_label.pack(side=tk.RIGHT, padx=10)
             
             except Exception as e:
-                print(f"[FTB] Error refreshing transaction history: {e}")
+                _dbg(f"[FTB] Error refreshing transaction history: {e}")
         
         def new_game(self):
             """Return to wizard for new game"""
@@ -27100,22 +27605,43 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def save_game(self):
             """Prompt for save name and save"""
-            name = simpledialog.askstring("Save Game", "Enter save name:")
-            if name:
-                # Construct path in saves directory
-                import os
-                workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
-                saves_dir = os.path.join(workspace_root, "saves")
-                if not os.path.exists(saves_dir):
-                    os.makedirs(saves_dir)
-                
-                # Sanitize filename
-                safe_name = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
-                if not safe_name:
-                    safe_name = "save"
-                
-                path = os.path.join(saves_dir, f"{safe_name}.json")
-                self.runtime["ftb_cmd_q"].put({"cmd": "ftb_save", "path": path})
+            try:
+                name = simpledialog.askstring("Save Game", "Enter save name:")
+                if name:
+                    _dbg(f"[WIDGET] User entered save name: {name}")
+                    # Construct path in saves directory
+                    import os
+                    workspace_root = self.runtime.get("RADIO_OS_ROOT", ".")
+                    saves_dir = os.path.join(workspace_root, "saves")
+                    if not os.path.exists(saves_dir):
+                        os.makedirs(saves_dir)
+                    
+                    # Sanitize filename
+                    safe_name = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
+                    if not safe_name:
+                        safe_name = "save"
+                    
+                    path = os.path.join(saves_dir, f"{safe_name}.json")
+                    _dbg(f"[WIDGET] Sending save command with path: {path}")
+                    
+                    # Get command queue
+                    cmd_q = self.runtime.get("ftb_cmd_q")
+                    if cmd_q is None:
+                        _dbg("[WIDGET] ❌ ERROR: ftb_cmd_q not found in runtime!")
+                        from tkinter import messagebox
+                        messagebox.showerror("Save Error", "Command queue not initialized")
+                        return
+                    
+                    cmd_q.put({"cmd": "ftb_save", "path": path})
+                    _dbg(f"[WIDGET] ✓ Command queued (queue size: {cmd_q.qsize()})")
+                else:
+                    _dbg("[WIDGET] Save cancelled - no name entered")
+            except Exception as e:
+                import traceback
+                error_msg = traceback.format_exc()
+                _dbg(f"[WIDGET] ❌ Save dialog error: {e}\n{error_msg}")
+                from tkinter import messagebox
+                messagebox.showerror("Save Error", f"Failed to initiate save: {str(e)}")
         
         def load_game(self):
             """Open save browser dialog"""
@@ -27193,15 +27719,15 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def update_from_state(self, state: SimState):
             """Called by poll when state exists"""
-            print(f"[FTB WIDGET {self.widget_id}] 🔄 update_from_state ENTRY: state={'None' if state is None else f'tick={state.tick}'}")
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 update_from_state ENTRY: state={'None' if state is None else f'tick={state.tick}'}")
             if state is None:
-                print(f"[FTB WIDGET {self.widget_id}] ❌ State is None, checking for autosave...")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ State is None, checking for autosave...")
                 # Show start menu (will adapt based on whether autosave exists)
                 autosave_path = self._get_autosave_path() if self._has_autosave() else None
                 if autosave_path:
-                    print(f"[FTB WIDGET {self.widget_id}] 💾 Autosave found, showing start menu with continue option")
+                    _dbg(f"[FTB WIDGET {self.widget_id}] 💾 Autosave found, showing start menu with continue option")
                 else:
-                    print(f"[FTB WIDGET {self.widget_id}] 📋 No autosave, showing start menu")
+                    _dbg(f"[FTB WIDGET {self.widget_id}] 📋 No autosave, showing start menu")
                 self.show_start_menu(autosave_path)
                 return
             
@@ -27224,7 +27750,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             # If this is first load, ensure all dirty flags are set to force complete refresh
             if is_first_load and hasattr(state, 'mark_dirty'):
-                print(f"[FTB WIDGET {self.widget_id}] 🆕 First load detected - marking all domains dirty")
+                _dbg(f"[FTB WIDGET {self.widget_id}] 🆕 First load detected - marking all domains dirty")
                 state.mark_dirty('all')
                 state_dirty = True
             
@@ -27236,16 +27762,18 @@ Teams Managed: {len(stats.teams_managed)}"""
             force_periodic = not hasattr(self, '_update_counter') or self._update_counter >= 5
             if force_periodic:
                 self._update_counter = 0
+                _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 Force periodic refresh triggered (counter reset)")
             else:
                 self._update_counter = getattr(self, '_update_counter', 0) + 1
+                _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 Update counter incremented to {self._update_counter}/5")
             
             should_update = is_first_load or tick_changed or just_switched_to_game or tab_changed or state_dirty or force_periodic
             
-            print(f"[FTB WIDGET {self.widget_id}] 🔍 Update decision: should_update={should_update} (first_load={is_first_load}, tick_changed={tick_changed}, view_switch={just_switched_to_game}, tab_changed={tab_changed}, state_dirty={state_dirty}, force_periodic={force_periodic})")
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🔍 Update decision: should_update={should_update} (first_load={is_first_load}, tick_changed={tick_changed}, view_switch={just_switched_to_game}, tab_changed={tab_changed}, state_dirty={state_dirty}, force_periodic={force_periodic})")
             
             # Skip update if nothing changed
             if not should_update:
-                print(f"[FTB WIDGET {self.widget_id}] ⏭️ Skipping update - no changes detected")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ⏭️ Skipping update - no changes detected")
                 return
             
             self.sim_state = state
@@ -27260,7 +27788,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             if tab_changed: reason.append('tab_change')
             if state_dirty: reason.append('state_dirty')
             if force_periodic: reason.append('periodic_refresh')
-            print(f"[FTB WIDGET {self.widget_id}] Updating UI, tick={state.tick}, reason={'+'.join(reason)}")
+            _dbg(f"[FTB WIDGET {self.widget_id}] Updating UI, tick={state.tick}, reason={'+'.join(reason)}")
 
             # Populate league dropdown once state is available
             if hasattr(self, '_stats_league_var'):
@@ -27285,18 +27813,18 @@ Teams Managed: {len(stats.teams_managed)}"""
                         if isinstance(entry_day, (list, tuple)):
                             # Malformed data - use first element if it's a sequence
                             entry_day = entry_day[0] if entry_day else 0
-                            print(f"[FTB] WARNING: entry_day was a {type(entry_day).__name__}, using {entry_day}")
+                            _dbg(f"[FTB] WARNING: entry_day was a {type(entry_day).__name__}, using {entry_day}")
                         elif not isinstance(entry_day, int):
-                            print(f"[FTB] WARNING: entry_day is {type(entry_day).__name__}: {entry_day}")
+                            _dbg(f"[FTB] WARNING: entry_day is {type(entry_day).__name__}: {entry_day}")
                             entry_day = 0
                         
                         # Safe access to sim_day_of_year - handle if it's malformed
                         sim_day = state.sim_day_of_year
                         if isinstance(sim_day, (list, tuple)):
                             sim_day = sim_day[0] if sim_day else 0
-                            print(f"[FTB] WARNING: sim_day_of_year was a {type(state.sim_day_of_year).__name__}, using {sim_day}")
+                            _dbg(f"[FTB] WARNING: sim_day_of_year was a {type(state.sim_day_of_year).__name__}, using {sim_day}")
                         elif not isinstance(sim_day, int):
-                            print(f"[FTB] WARNING: sim_day_of_year is {type(sim_day).__name__}: {sim_day}")
+                            _dbg(f"[FTB] WARNING: sim_day_of_year is {type(sim_day).__name__}: {sim_day}")
                             sim_day = 0
                         
                         days_until = entry_day - sim_day
@@ -27320,16 +27848,19 @@ Teams Managed: {len(stats.teams_managed)}"""
                             text_color=FTBTheme.TEXT_MUTED
                         )
                 except Exception as e:
-                    print(f"[FTB] Error updating next event: {e}")
+                    _dbg(f"[FTB] Error updating next event: {e}")
                     self.next_event_label.configure(text="⏰ Next: Error", text_color=FTBTheme.TEXT_MUTED)
             
             # Access attributes safely
-            print(f"[FTB WIDGET {self.widget_id}] 🏢 Updating team UI components...")
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🏢 Updating team UI components...")
             p_team = state.player_team
-            print(f"[FTB WIDGET {self.widget_id}] 🏢 Player team: {p_team.name if p_team else 'None'}")
+            _dbg(f"[FTB WIDGET {self.widget_id}] 🏢 Player team: {p_team.name if p_team else 'None'}")
             if p_team and hasattr(self, 'team_name_label'):
-                print(f"[FTB WIDGET {self.widget_id}] Updating team labels: {p_team.name}, ${p_team.budget.cash:,.0f}")
-                print(f"[FTB WIDGET {self.widget_id}] Team details: tier={p_team.tier}, drivers={len([d for d in p_team.drivers if d is not None])}, ownership={p_team.ownership_type}")
+                _dbg(f"[FTB WIDGET {self.widget_id}] 💰 Budget BEFORE update: current_label_text='{self.team_budget_label.cget('text')}'")
+                _dbg(f"[FTB WIDGET {self.widget_id}] 💰 Budget from state: ${p_team.budget.cash:,.0f}")
+                _dbg(f"[FTB WIDGET {self.widget_id}] 😊 Morale BEFORE update: current_label_text='{self.team_morale_label.cget('text')}'")
+                _dbg(f"[FTB WIDGET {self.widget_id}] 😊 Morale from state: {p_team.standing_metrics.get('morale', 50.0):.0f}%")
+                _dbg(f"[FTB WIDGET {self.widget_id}] Team details: tier={p_team.tier}, drivers={len([d for d in p_team.drivers if d is not None])}, ownership={p_team.ownership_type}")
                 
                 # Tier info
                 tier_names = {1: "Grassroots", 2: "Formula V", 3: "Formula X", 4: "Formula Y", 5: "Formula Z"}
@@ -27339,17 +27870,21 @@ Teams Managed: {len(stats.teams_managed)}"""
                 
                 # Budget with color coding
                 budget_color = FTBTheme.SUCCESS if p_team.budget.cash > 0 else FTBTheme.DANGER
+                new_budget_text = f"💰 {format_currency(p_team.budget.cash)}"
                 self.team_budget_label.configure(
-                    text=f"💰 {format_currency(p_team.budget.cash)}",
+                    text=new_budget_text,
                     text_color=budget_color
                 )
+                _dbg(f"[FTB WIDGET {self.widget_id}] 💰 Budget AFTER update: new_label_text='{new_budget_text}'")
                 
                 # Morale bar and label
                 if hasattr(self, 'team_morale_bar'):
                     morale = p_team.standing_metrics.get('morale', 50.0)
                     morale_pct = morale / 100.0
                     self.team_morale_bar.set(morale_pct)
-                    self.team_morale_label.configure(text=f"{morale:.0f}%")
+                    new_morale_text = f"{morale:.0f}%"
+                    self.team_morale_label.configure(text=new_morale_text)
+                    _dbg(f"[FTB WIDGET {self.widget_id}] 😊 Morale AFTER update: new_label_text='{new_morale_text}', bar={morale_pct:.2f}")
                     # Color code the bar
                     if morale >= 70:
                         self.team_morale_bar.configure(progress_color=FTBTheme.SUCCESS)
@@ -27469,11 +28004,11 @@ Teams Managed: {len(stats.teams_managed)}"""
                             text_color=FTBTheme.TEXT
                         )
                 
-                print(f"[FTB WIDGET {self.widget_id}] ✅ Team name and budget labels updated")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Team name and budget labels updated")
             elif p_team:
-                print(f"[FTB WIDGET {self.widget_id}] ⚠️ Player team exists but team_name_label not found")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ⚠️ Player team exists but team_name_label not found")
             else:
-                print(f"[FTB WIDGET {self.widget_id}] ⚠️ No player team available")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ⚠️ No player team available")
                 
                 # Form indicator - calculate from recent race results
                 if hasattr(self, 'team_form_label'):
@@ -27637,7 +28172,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                 current_tab = self.tabview.get()
                 tab_changed = (not hasattr(self, '_last_tab') or self._last_tab != current_tab)
                 if tab_changed:
-                    print(f"[FTB WIDGET] Tab switched: {getattr(self, '_last_tab', 'None')} → {current_tab}")
+                    _dbg(f"[FTB WIDGET] Tab switched: {getattr(self, '_last_tab', 'None')} → {current_tab}")
                 self._last_tab = current_tab
                 
                 # Write tab change to state DB for narrator awareness
@@ -27659,7 +28194,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     
                 # Force refresh of all core tabs ONLY on first load (not periodic refresh)
                 if is_first_load:
-                    print(f"[FTB WIDGET {self.widget_id}] 🔄 Full refresh triggered (first_load={is_first_load})")
+                    _dbg(f"[FTB WIDGET {self.widget_id}] 🔄 Full refresh triggered (first_load={is_first_load})")
                     # Refresh Team tab components
                     try:
                         if hasattr(self, 'financial_overview_container'):
@@ -27668,9 +28203,9 @@ Teams Managed: {len(stats.teams_managed)}"""
                             self._refresh_roster()
                         if hasattr(self, 'job_board_container'):
                             self._refresh_job_board()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Team tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Team tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Team tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Team tab refresh error: {e}")
                     
                     # Refresh Car tab components
                     try:
@@ -27678,9 +28213,9 @@ Teams Managed: {len(stats.teams_managed)}"""
                             self._refresh_car_overview()
                             self._refresh_car_parts_visual()
                             self._refresh_parts_inventory()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Car tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Car tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Car tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Car tab refresh error: {e}")
                     
                     # Refresh Development tab components
                     try:
@@ -27690,17 +28225,17 @@ Teams Managed: {len(stats.teams_managed)}"""
                             self._refresh_infrastructure()
                         if hasattr(self, 'parts_marketplace_container'):
                             self._refresh_parts_marketplace()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Development tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Development tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Development tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Development tab refresh error: {e}")
                         
                     # Refresh Finance tab
                     try:
                         if hasattr(self, 'cash_metric'):
                             self._refresh_finance()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Finance tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Finance tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Finance tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Finance tab refresh error: {e}")
                         
                     # Refresh Racing Stats tab
                     try:
@@ -27713,25 +28248,25 @@ Teams Managed: {len(stats.teams_managed)}"""
                                 'archive_results': None,
                                 'archive_timestamp': 0
                             }
-                            print(f"[FTB WIDGET {self.widget_id}] 🗑️ Cleared racing stats cache for full refresh")
+                            _dbg(f"[FTB WIDGET {self.widget_id}] 🗑️ Cleared racing stats cache for full refresh")
                             self._refresh_racing_stats()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Racing Stats tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Racing Stats tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Racing Stats tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Racing Stats tab refresh error: {e}")
                         
                     # Refresh Sponsors tab
                     try:
                         if hasattr(self, 'current_sponsors_container'):
                             self._refresh_sponsors()
-                        print(f"[FTB WIDGET {self.widget_id}] ✅ Sponsors tab refreshed")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Sponsors tab refreshed")
                     except Exception as e:
-                        print(f"[FTB WIDGET {self.widget_id}] ❌ Sponsors tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Sponsors tab refresh error: {e}")
                         
                     # Clear all dirty flags after full refresh
                     if hasattr(state, 'clear_dirty_flags'):
                         state.clear_dirty_flags()
                         
-                    print(f"[FTB WIDGET {self.widget_id}] 🎊 Full UI refresh complete!")
+                    _dbg(f"[FTB WIDGET {self.widget_id}] 🎊 Full UI refresh complete!")
                     
                 # Normal tab-specific updates (only when viewing that tab)
                 elif current_tab == "Dashboard":
@@ -27790,17 +28325,17 @@ Teams Managed: {len(stats.teams_managed)}"""
                         if hasattr(self, 'team_browser_container'):
                             self._refresh_team_browser()
                     except Exception as e:
-                        print(f"[FTB WIDGET] Team tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET] Team tab refresh error: {e}")
                 elif current_tab == "Manager Career" and (tab_changed or getattr(state, '_team_dirty', False) or getattr(state, '_manager_career_dirty', False)):
-                    print(f"[FTB WIDGET] Refreshing Manager Career tab: tab_changed={tab_changed}, team_dirty={getattr(state, '_team_dirty', False)}, career_dirty={getattr(state, '_manager_career_dirty', False)}")
+                    _dbg(f"[FTB WIDGET] Refreshing Manager Career tab: tab_changed={tab_changed}, team_dirty={getattr(state, '_team_dirty', False)}, career_dirty={getattr(state, '_manager_career_dirty', False)}")
                     try:
                         if hasattr(self, 'manager_career_container'):
                             self._refresh_manager_career()
                             state._manager_career_dirty = False
                     except Exception as e:
-                        print(f"[FTB WIDGET] Manager Career tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET] Manager Career tab refresh error: {e}")
                 elif current_tab == "Car" and (tab_changed or getattr(state, '_car_dirty', False)):
-                    print(f"[FTB WIDGET] Refreshing Car tab: tab_changed={tab_changed}, dirty={getattr(state, '_car_dirty', False)}")
+                    _dbg(f"[FTB WIDGET] Refreshing Car tab: tab_changed={tab_changed}, dirty={getattr(state, '_car_dirty', False)}")
                     try:
                         if hasattr(self, 'car_overview_container'):
                             self._refresh_car_overview()
@@ -27809,16 +28344,16 @@ Teams Managed: {len(stats.teams_managed)}"""
                         if hasattr(self, 'parts_inventory_container'):
                             self._refresh_parts_inventory()
                         if hasattr(self, 'parts_marketplace_container'):
-                            print(f"[FTB WIDGET] Refreshing parts marketplace...")
+                            _dbg(f"[FTB WIDGET] Refreshing parts marketplace...")
                             self._refresh_parts_marketplace()
-                            print(f"[FTB WIDGET] Parts marketplace refresh complete")
+                            _dbg(f"[FTB WIDGET] Parts marketplace refresh complete")
                         state._car_dirty = False
                     except Exception as e:
-                        print(f"[FTB WIDGET] Car tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET] Car tab refresh error: {e}")
                         import traceback
                         traceback.print_exc()
                 elif current_tab == "Development" and (tab_changed or getattr(state, '_development_dirty', False)):
-                    print(f"[FTB WIDGET] Refreshing Development tab: tab_changed={tab_changed}, dirty={getattr(state, '_development_dirty', False)}")
+                    _dbg(f"[FTB WIDGET] Refreshing Development tab: tab_changed={tab_changed}, dirty={getattr(state, '_development_dirty', False)}")
                     try:
                         if hasattr(self, 'projects_container'):
                             self._refresh_development_projects()
@@ -27826,7 +28361,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                         if hasattr(self, 'infrastructure_container'):
                             self._refresh_infrastructure()
                     except Exception as e:
-                        print(f"[FTB WIDGET] Development tab refresh error: {e}")
+                        _dbg(f"[FTB WIDGET] Development tab refresh error: {e}")
                         import traceback
                         traceback.print_exc()
                 elif current_tab == "Finance" and (tab_changed or state._finance_dirty):
@@ -27984,10 +28519,10 @@ Teams Managed: {len(stats.teams_managed)}"""
                     if hasattr(self, 'sponsor_metric'):
                         self.sponsor_metric.update("No sponsors", FTBTheme.TEXT_MUTED, "Seek sponsorships")
                 
-                print(f"[FTB WIDGET {self.widget_id}] ✅ Pressure indicators updated")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Pressure indicators updated")
                 
             except Exception as e:
-                print(f"[FTB WIDGET {self.widget_id}] ❌ Error updating pressure indicators: {e}")
+                _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Error updating pressure indicators: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -28074,7 +28609,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     )
                 
             except Exception as e:
-                print(f"[FTB WIDGET] Error updating contract alerts: {e}")
+                _dbg(f"[FTB WIDGET] Error updating contract alerts: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -28212,10 +28747,10 @@ Teams Managed: {len(stats.teams_managed)}"""
                 while not ftb_notif.notification_queue.empty():
                     try:
                         notif = ftb_notif.notification_queue.get_nowait()
-                        print(f"[FTB] 🔔 Polling notification: {notif.title}")
+                        _dbg(f"[FTB] 🔔 Polling notification: {notif.title}")
                         self._show_toast(notif)
                     except Exception as e:
-                        print(f"[FTB] ❌ Error processing notification from queue: {e}")
+                        _dbg(f"[FTB] ❌ Error processing notification from queue: {e}")
                         import traceback
                         traceback.print_exc()
                         break
@@ -28225,7 +28760,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                 
             except Exception as e:
                 # Silent fail if notifications not available
-                print(f"[FTB] ❌ Error in _poll_notifications: {e}")
+                _dbg(f"[FTB] ❌ Error in _poll_notifications: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -28234,19 +28769,19 @@ Teams Managed: {len(stats.teams_managed)}"""
             try:
                 import plugins.ftb_notifications as ftb_notif
                 
-                print(f"[FTB] 🍞 Showing notification for: {notification.title} (category: {notification.category})")
+                _dbg(f"[FTB] 🍞 Showing notification for: {notification.title} (category: {notification.category})")
                 
                 # Race results get a special modal dialog that demands attention
                 if notification.category == 'race_result':
-                    print(f"[FTB] 🏁 Showing RACE RESULT MODAL")
+                    _dbg(f"[FTB] 🏁 Showing RACE RESULT MODAL")
                     modal = ftb_notif.RaceResultModal(self.container, notification)
-                    print(f"[FTB] ✅ Race result modal displayed successfully")
+                    _dbg(f"[FTB] ✅ Race result modal displayed successfully")
                     return
                 
                 # All other notifications get a toast
                 # Check if toast_container exists
                 if not hasattr(self, 'toast_container'):
-                    print(f"[FTB] ❌ toast_container not found, cannot show toast")
+                    _dbg(f"[FTB] ❌ toast_container not found, cannot show toast")
                     return
                 
                 # Create toast
@@ -28256,10 +28791,10 @@ Teams Managed: {len(stats.teams_managed)}"""
                     on_dismiss=lambda n: self._dismiss_toast(toast)
                 )
                 toast.pack(fill="x", pady=5)
-                print(f"[FTB] ✅ Toast displayed successfully")
+                _dbg(f"[FTB] ✅ Toast displayed successfully")
                 
             except Exception as e:
-                print(f"[FTB] ❌ Failed to show notification: {e}")
+                _dbg(f"[FTB] ❌ Failed to show notification: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -28341,7 +28876,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                     msg = ui_q.get_nowait()
                     action, data = msg if isinstance(msg, tuple) else (msg, {})
                     
-                    print(f"[FTB WIDGET] 📨 UI queue message: {action}")
+                    _dbg(f"[FTB WIDGET] 📨 UI queue message: {action}")
                     
                     if action == "show_pre_race_prompt":
                         self._show_pre_race_prompt(data)
@@ -28354,7 +28889,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                 except queue.Empty:
                     break
                 except Exception as e:
-                    print(f"[FTB WIDGET] ⚠️ Error processing UI queue message: {e}")
+                    _dbg(f"[FTB WIDGET] ⚠️ Error processing UI queue message: {e}")
                     import traceback
                     traceback.print_exc()
         
@@ -28364,7 +28899,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             track_name = data.get("track_name", "Unknown Track")
             tier = data.get("tier", 1)
             
-            print(f"[FTB RACE DAY] 🏁 Showing pre-race prompt: {league_name} at {track_name}")
+            _dbg(f"[FTB RACE DAY] 🏁 Showing pre-race prompt: {league_name} at {track_name}")
             
             # Create custom dialog
             dialog = ctk.CTkToplevel(self)
@@ -28438,7 +28973,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             def on_response(watch_live: bool):
                 """Handle user response"""
-                print(f"[FTB RACE DAY] 📋 User response: watch_live={watch_live}")
+                _dbg(f"[FTB RACE DAY] 📋 User response: watch_live={watch_live}")
                 
                 ftb_cmd_q = self.runtime.get("ftb_cmd_q")
                 if ftb_cmd_q:
@@ -28446,7 +28981,7 @@ Teams Managed: {len(stats.teams_managed)}"""
                         "cmd": "ftb_pre_race_response",
                         "watch_live": watch_live
                     })
-                    print(f"[FTB RACE DAY] ✅ Sent response to controller")
+                    _dbg(f"[FTB RACE DAY] ✅ Sent response to controller")
                 
                 dialog.destroy()
             
@@ -28494,7 +29029,7 @@ Teams Managed: {len(stats.teams_managed)}"""
             pole_driver = data.get("pole_driver", "Unknown")
             pole_team = data.get("pole_team", "Unknown")
             
-            print(f"[FTB RACE DAY] 🏁 Showing quali complete notification")
+            _dbg(f"[FTB RACE DAY] 🏁 Showing quali complete notification")
             
             # Show as a messagebox for now (could be a nicer toast notification)
             messagebox.showinfo(
@@ -28524,66 +29059,66 @@ Teams Managed: {len(stats.teams_managed)}"""
         
         def _poll(self):
             """Poll controller for state updates"""
-            print(f"[FTB WIDGET POLL {self.widget_id}] 🔄 Starting poll cycle")
+            _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🔄 Starting poll cycle")
             try:
                 if not self.winfo_exists():
-                    print(f"[FTB WIDGET POLL {self.widget_id}] ❌ Widget no longer exists")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] ❌ Widget no longer exists")
                     return
             except Exception as e:
-                print(f"[FTB WIDGET POLL {self.widget_id}] ❌ Widget existence check failed: {e}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] ❌ Widget existence check failed: {e}")
                 return
 
             # Check UI queue for special actions (dialogs, prompts)
             self._check_ui_queue()
 
-            print(f"[FTB WIDGET POLL {self.widget_id}] 🔍 Looking for controller in runtime...")
+            _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🔍 Looking for controller in runtime...")
             controller = self.runtime.get("ftb_controller")
             if not controller:
-                print(f"[FTB WIDGET POLL {self.widget_id}] ⚠️ No controller found, runtime keys: {list(self.runtime.keys())}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] ⚠️ No controller found, runtime keys: {list(self.runtime.keys())}")
                 self.after(500, self._poll)
                 return
-            print(f"[FTB WIDGET POLL {self.widget_id}] ✅ Controller found: {type(controller).__name__}")
+            _dbg(f"[FTB WIDGET POLL {self.widget_id}] ✅ Controller found: {type(controller).__name__}")
 
             # If no state, stay in start_menu or wizard (don't force switch)
             if not controller.state:
-                print(f"[FTB WIDGET POLL {self.widget_id}] ⚠️ Controller has no state, current_view={self.current_view}")
-                print(f"[FTB WIDGET POLL {self.widget_id}] 🔍 Controller details: thread_alive={controller.thread.is_alive() if controller.thread else False}, stop_event_set={controller.stop_event.is_set()}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] ⚠️ Controller has no state, current_view={self.current_view}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🔍 Controller details: thread_alive={controller.thread.is_alive() if controller.thread else False}, stop_event_set={controller.stop_event.is_set()}")
                 # Only switch to start_menu if we're not already in start_menu, wizard, welcome, or loading
                 if self.current_view not in ["start_menu", "wizard", "welcome", "loading"]:
                     # Check if save exists
                     autosave_path = self._get_autosave_path() if self._has_autosave() else None
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 💾 Autosave check: path={autosave_path}, exists={autosave_path is not None}")
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 📋 Switching to start menu")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] 💾 Autosave check: path={autosave_path}, exists={autosave_path is not None}")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] 📋 Switching to start menu")
                     self.show_start_menu(autosave_path)
             else:
                 # Switch to game view if necessary
-                print(f"[FTB WIDGET POLL {self.widget_id}] ✓ Controller has state: tick={controller.state.tick}, current_view={self.current_view}")
-                print(f"[FTB WIDGET POLL {self.widget_id}] 📋 State summary: player_team={controller.state.player_team.name if controller.state.player_team else 'None'}, leagues={len(controller.state.leagues)}, time_mode={controller.state.time_mode}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] ✓ Controller has state: tick={controller.state.tick}, current_view={self.current_view}")
+                _dbg(f"[FTB WIDGET POLL {self.widget_id}] 📋 State summary: player_team={controller.state.player_team.name if controller.state.player_team else 'None'}, leagues={len(controller.state.leagues)}, time_mode={controller.state.time_mode}")
                 if self.current_view != "game":
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 🎮 Switching to game interface...")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🎮 Switching to game interface...")
                     self.show_game_interface()
                 else:
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 🎮 Already in game interface")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🎮 Already in game interface")
                 
                 try:
                     # Try to acquire lock - if simulation is running, skip this update
-                    print(f"[FTB WIDGET POLL {self.widget_id}] 🔒 Trying to acquire state lock for UI update...")
+                    _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🔒 Trying to acquire state lock for UI update...")
                     lock_acquired = controller.state_lock.acquire(blocking=False)
                     if lock_acquired:
                         try:
-                            print(f"[FTB WIDGET POLL {self.widget_id}] 🔒 State lock acquired")
+                            _dbg(f"[FTB WIDGET POLL {self.widget_id}] 🔒 State lock acquired")
                             # Just call update with live state for now
-                            print(f"[FTB WIDGET POLL {self.widget_id}] Calling update_from_state with tick={controller.state.tick}")
-                            print(f"[FTB WIDGET POLL {self.widget_id}] State details: day={controller.state.sim_day_of_year}, mode={controller.state.time_mode}, control={controller.state.control_mode}")
+                            _dbg(f"[FTB WIDGET POLL {self.widget_id}] Calling update_from_state with tick={controller.state.tick}")
+                            _dbg(f"[FTB WIDGET POLL {self.widget_id}] State details: day={controller.state.sim_day_of_year}, mode={controller.state.time_mode}, control={controller.state.control_mode}")
                             self.update_from_state(controller.state)
-                            print(f"[FTB WIDGET POLL {self.widget_id}] ✅ update_from_state completed successfully")
+                            _dbg(f"[FTB WIDGET POLL {self.widget_id}] ✅ update_from_state completed successfully")
                         finally:
                             controller.state_lock.release()
                     else:
-                        print(f"[FTB WIDGET POLL {self.widget_id}] ⏸️ State lock busy (simulation running), skipping update")
+                        _dbg(f"[FTB WIDGET POLL {self.widget_id}] ⏸️ State lock busy (simulation running), skipping update")
                 except Exception as e:
                     import traceback
-                    print(f"[FTB WIDGET] ❌ UI update error: {e}")
+                    _dbg(f"[FTB WIDGET] ❌ UI update error: {e}")
                     traceback.print_exc()
                 
                 # Poll for notifications (regardless of current view)
@@ -28751,7 +29286,7 @@ class FTBNarrationHelpers:
                         manifest_path = os.path.join(station_dir, 'manifest.yaml')
                 
                 if not manifest_path or not os.path.exists(manifest_path):
-                    print(f"[AUDIO] ⚠️ Cannot find manifest at {manifest_path}")
+                    _dbg(f"[AUDIO] ⚠️ Cannot find manifest at {manifest_path}")
                     return
                 
                 # Read current manifest
@@ -28787,7 +29322,7 @@ class FTBNarrationHelpers:
                 with open(manifest_path, 'w', encoding='utf-8') as f:
                     yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
                 
-                print(f"[AUDIO] ✅ Audio settings saved to manifest: {manifest_path}")
+                _dbg(f"[AUDIO] ✅ Audio settings saved to manifest: {manifest_path}")
                 
                 # Emit audio settings update event to runtime
                 if hasattr(self.runtime, 'get') and 'event_q' in self.runtime:
@@ -28802,7 +29337,7 @@ class FTBNarrationHelpers:
                         ))
                 
             except Exception as e:
-                print(f"[AUDIO] ❌ Error saving audio settings: {e}")
+                _dbg(f"[AUDIO] ❌ Error saving audio settings: {e}")
 
 
 # ============================================================
@@ -29387,7 +29922,7 @@ class FTBController:
             if not db_conn_fn: missing.append('db_connect')
             if not db_enqueue_fn: missing.append('db_enqueue_segment')
             if not text: missing.append('text')
-            print(f"[FTB PBP] ⚠️  _enqueue_pbp_segment SKIPPED – missing: {', '.join(missing)}")
+            _dbg(f"[FTB PBP] ⚠️  _enqueue_pbp_segment SKIPPED – missing: {', '.join(missing)}")
             return
         
         import hashlib
@@ -29411,7 +29946,7 @@ class FTBController:
             voice_path = voices_a.get(fallback_key) or voices_b.get(fallback_key)
             voice_name = fallback_key
             if voice_path:
-                print(f"[FTB PBP] 🔄 Voice '{voice_key}' not in manifest, using '{fallback_key}' instead")
+                _dbg(f"[FTB PBP] 🔄 Voice '{voice_key}' not in manifest, using '{fallback_key}' instead")
         
         segment = {
             "id": seg_id,
@@ -29438,9 +29973,9 @@ class FTBController:
             conn = db_conn_fn()
             db_enqueue_fn(conn, segment)
             conn.close()
-            print(f"[FTB PBP] 🎙️ Enqueued ({voice_key}): {text[:70]}...")
+            _dbg(f"[FTB PBP] 🎙️ Enqueued ({voice_key}): {text[:70]}...")
         except Exception as e:
-            print(f"[FTB PBP] ⚠️  Enqueue error: {e}")
+            _dbg(f"[FTB PBP] ⚠️  Enqueue error: {e}")
     
     def _enqueue_pbp_commentary_for_race_start(self, rds, player_league, track):
         """Generate and enqueue 'lights out' + opening commentary."""
@@ -29496,9 +30031,9 @@ class FTBController:
                 _conn.commit()
                 _conn.close()
                 if _flushed:
-                    print(f"[FTB PBP] 🧹 FLUSHED {_flushed} stale broadcast segments — keeping commentary CURRENT!")
+                    _dbg(f"[FTB PBP] 🧹 FLUSHED {_flushed} stale broadcast segments — keeping commentary CURRENT!")
         except Exception as _flush_err:
-            print(f"[FTB PBP] ⚠️  Could not flush stale segments: {_flush_err}")
+            _dbg(f"[FTB PBP] ⚠️  Could not flush stale segments: {_flush_err}")
         
         # ── Also drain pre-rendered audio queue to kill stale TTS ──
         try:
@@ -29512,7 +30047,7 @@ class FTBController:
                     except Exception:
                         break
                 if _drained:
-                    print(f"[FTB PBP] 🧹 Drained {_drained} stale pre-rendered audio items")
+                    _dbg(f"[FTB PBP] 🧹 Drained {_drained} stale pre-rendered audio items")
         except Exception:
             pass
         
@@ -29658,7 +30193,7 @@ class FTBController:
         
         # Stream next event
         event = events[cursor]
-        print(f"[FTB LIVE RACE] 📡 Streaming event {cursor+1}/{len(events)}: {event.category}")
+        _dbg(f"[FTB LIVE RACE] 📡 Streaming event {cursor+1}/{len(events)}: {event.category}")
         
         # Emit event to narrator/audio system
         self._emit_events([event])
@@ -29668,7 +30203,7 @@ class FTBController:
             try:
                 ftb_state_db.write_event_batch(self.state_db_path, [event])
             except Exception as e:
-                print(f"[FTB] Warning: Could not write live event to DB: {e}")
+                _dbg(f"[FTB] Warning: Could not write live event to DB: {e}")
         
         # Advance cursor
         self.state._live_pbp_cursor = cursor + 1
@@ -29683,7 +30218,7 @@ class FTBController:
         if not self.state:
             return
         
-        print(f"[FTB LIVE RACE] 🏁 Finalizing live race mode")
+        _dbg(f"[FTB LIVE RACE] 🏁 Finalizing live race mode")
         
         # Clear live mode flags
         self.state._live_pbp_mode = False
@@ -29711,9 +30246,9 @@ class FTBController:
                 ftb_state_db.write_event_batch(self.state_db_path, events)
                 ftb_state_db.write_game_snapshot(self.state_db_path, self.state)
             except Exception as e:
-                print(f"[FTB] Warning: Could not write final race events to DB: {e}")
+                _dbg(f"[FTB] Warning: Could not write final race events to DB: {e}")
         
-        print(f"[FTB LIVE RACE] ✅ Live race finalized, returning to normal flow")
+        _dbg(f"[FTB LIVE RACE] ✅ Live race finalized, returning to normal flow")
         
         # Trigger UI refresh
         self._refresh_widget()
@@ -29747,11 +30282,11 @@ class FTBController:
             if race_tick == tick:
                 # CRITICAL: Skip if this race was already completed (via live race day)
                 if hasattr(self.state, 'completed_race_ticks') and (league.league_id, race_tick) in self.state.completed_race_ticks:
-                    print(f"[FTB RACE DAY] ⏭️ _check_for_upcoming_player_race: race at tick {race_tick} already completed, skipping")
+                    _dbg(f"[FTB RACE DAY] ⏭️ _check_for_upcoming_player_race: race at tick {race_tick} already completed, skipping")
                     return None
                 # Also skip if already prompted (live race day flow)
                 if hasattr(self.state, 'prompted_race_ticks') and (league.league_id, race_tick) in self.state.prompted_race_ticks:
-                    print(f"[FTB RACE DAY] ⏭️ _check_for_upcoming_player_race: race at tick {race_tick} already prompted, skipping")
+                    _dbg(f"[FTB RACE DAY] ⏭️ _check_for_upcoming_player_race: race at tick {race_tick} already prompted, skipping")
                     return None
                 
                 # Found a race!
@@ -29769,7 +30304,7 @@ class FTBController:
         Uses tkinter messagebox for immediate response.
         This is a BLOCKING call - it waits for user input.
         """
-        print(f"[FTB DIALOG] 🏁 Showing watch race dialog for {race_data.get('track_name', 'Unknown Circuit')}")
+        _dbg(f"[FTB DIALOG] 🏁 Showing watch race dialog for {race_data.get('track_name', 'Unknown Circuit')}")
         
         try:
             import tkinter.messagebox as messagebox
@@ -29785,17 +30320,17 @@ class FTBController:
             # This will block until user responds
             result = messagebox.askyesno(title, message)
             
-            print(f"[FTB DIALOG] User responded: {'YES (watch live)' if result else 'NO (instant)'}")
+            _dbg(f"[FTB DIALOG] User responded: {'YES (watch live)' if result else 'NO (instant)'}")
             
             # Set flag directly on state
             if self.state:
                 self.state._watch_current_race_live = result
-                print(f"[FTB DIALOG] Flag set on state: _watch_current_race_live = {result}")
+                _dbg(f"[FTB DIALOG] Flag set on state: _watch_current_race_live = {result}")
             else:
-                print(f"[FTB DIALOG] ERROR: No state available to set flag!")
+                _dbg(f"[FTB DIALOG] ERROR: No state available to set flag!")
                     
         except Exception as e:
-            print(f"[FTB DIALOG] Error showing dialog: {e}")
+            _dbg(f"[FTB DIALOG] Error showing dialog: {e}")
             import traceback
             traceback.print_exc()
             # Default to NO (instant) if dialog fails
@@ -29813,28 +30348,28 @@ class FTBController:
                       manager_first_name: str = "",
                       manager_last_name: str = "") -> None:
         """Create new save and initialize simulation"""
-        print(f"[FTB CONTROLLER] 🆕 start_new_game ENTRY: origin={origin}, tier={tier}, seed={seed}, team_name={team_name}")
-        print(f"[FTB CONTROLLER] 🆕 Parameters: ownership={ownership}, manager_age={manager_age}, name={manager_first_name} {manager_last_name}")
+        _dbg(f"[FTB CONTROLLER] 🆕 start_new_game ENTRY: origin={origin}, tier={tier}, seed={seed}, team_name={team_name}")
+        _dbg(f"[FTB CONTROLLER] 🆕 Parameters: ownership={ownership}, manager_age={manager_age}, name={manager_first_name} {manager_last_name}")
         
         # Generate unique game ID for this session
         game_id = str(uuid.uuid4())
-        print(f"[FTB CONTROLLER] 🆔 Generated new game_id: {game_id}")
+        _dbg(f"[FTB CONTROLLER] 🆔 Generated new game_id: {game_id}")
         
         # Force narrator shutdown before any state changes to prevent state pollution
-        print(f"[FTB CONTROLLER] 🛑 Forcing narrator shutdown...")
+        _dbg(f"[FTB CONTROLLER] 🛑 Forcing narrator shutdown...")
         if self.active_meta_plugin and hasattr(self.active_meta_plugin, 'narrator'):
             try:
                 narrator = getattr(self.active_meta_plugin, 'narrator', None)
                 if narrator:
-                    print(f"[FTB CONTROLLER] 🛑 Stopping narrator thread...")
+                    _dbg(f"[FTB CONTROLLER] 🛑 Stopping narrator thread...")
                     narrator.stop()
                     # Wait a moment for narrator thread to clean up
                     time.sleep(0.5)
                     self.active_meta_plugin.narrator = None
-                    print(f"[FTB CONTROLLER] ✅ Narrator stopped and cleared")
+                    _dbg(f"[FTB CONTROLLER] ✅ Narrator stopped and cleared")
             except Exception as e:
                 self.log("ftb", f"Failed to stop narrator: {e}")
-                print(f"[FTB CONTROLLER] ⚠️ Narrator shutdown failed: {e}")
+                _dbg(f"[FTB CONTROLLER] ⚠️ Narrator shutdown failed: {e}")
         
         # Clear controller-level caches for clean slate
         self.last_known_tick = 0
@@ -29842,14 +30377,14 @@ class FTBController:
             self.weekend_summary_cache = {}
         if hasattr(self, 'pending_notifications'):
             self.pending_notifications = []
-        print(f"[FTB CONTROLLER] 🧹 Cleared controller state caches")
+        _dbg(f"[FTB CONTROLLER] 🧹 Cleared controller state caches")
         
         self.current_save_path = self._get_autosave_path()
-        print(f"[FTB CONTROLLER] 💾 Setting current_save_path to: {self.current_save_path}")
+        _dbg(f"[FTB CONTROLLER] 💾 Setting current_save_path to: {self.current_save_path}")
         
-        print(f"[FTB CONTROLLER] 🗄️ Ensuring state DB (reset=True)...")
+        _dbg(f"[FTB CONTROLLER] 🗄️ Ensuring state DB (reset=True)...")
         self._ensure_state_db(self.current_save_path, reset=True)
-        print(f"[FTB CONTROLLER] 🗄️ State DB path: {self.state_db_path}")
+        _dbg(f"[FTB CONTROLLER] 🗄️ State DB path: {self.state_db_path}")
         
         # ── FLUSH all stale queued audio from previous session ──
         try:
@@ -29862,9 +30397,9 @@ class FTBController:
                 _conn.commit()
                 _conn.close()
                 if _flushed:
-                    print(f"[FTB CONTROLLER] 🧹 FLUSHED {_flushed} stale queued audio segments on new game")
+                    _dbg(f"[FTB CONTROLLER] 🧹 FLUSHED {_flushed} stale queued audio segments on new game")
         except Exception as _flush_err:
-            print(f"[FTB CONTROLLER] ⚠️  Could not flush stale audio on new game: {_flush_err}")
+            _dbg(f"[FTB CONTROLLER] ⚠️  Could not flush stale audio on new game: {_flush_err}")
         try:
             _audio_q = self.runtime.get('audio_queue')
             if _audio_q:
@@ -29876,7 +30411,7 @@ class FTBController:
                     except Exception:
                         break
                 if _drained:
-                    print(f"[FTB CONTROLLER] 🧹 Drained {_drained} pre-rendered audio items on new game")
+                    _dbg(f"[FTB CONTROLLER] 🧹 Drained {_drained} pre-rendered audio items on new game")
         except Exception:
             pass
         try:
@@ -29886,13 +30421,13 @@ class FTBController:
                 import time as _time
                 _time.sleep(0.2)
                 _show_interrupt.clear()
-                print(f"[FTB CONTROLLER] 🔇 Interrupted stale TTS on new game")
+                _dbg(f"[FTB CONTROLLER] 🔇 Interrupted stale TTS on new game")
         except Exception:
             pass
         
         self.log("ftb", f"Starting new game: origin={origin}, identity={identity}, save_mode={save_mode}, tier={tier}, seed={seed}, team_name={team_name}, ownership={ownership}, manager_age={manager_age}, manager_name={manager_first_name} {manager_last_name}")
         cfg = self.runtime.get("config", {}).get("ftb", {})
-        print(f"[FTB CONTROLLER] ⚙️ Config: {cfg}")
+        _dbg(f"[FTB CONTROLLER] ⚙️ Config: {cfg}")
         
         origin = origin or cfg.get("origin_story", "game_show_winner")
         identity = identity or cfg.get("player_identity", [])
@@ -29902,12 +30437,12 @@ class FTBController:
         if seed is None:
             seed = int(time.time()) if save_mode == "permanent" else 42
         
-        print(f"[FTB CONTROLLER] Resolved parameters: origin={origin}, tier={starting_tier}, seed={seed}")
-        print(f"[FTB CONTROLLER] Creating new save with FTBSimulation.create_new_save...")
+        _dbg(f"[FTB CONTROLLER] Resolved parameters: origin={origin}, tier={starting_tier}, seed={seed}")
+        _dbg(f"[FTB CONTROLLER] Creating new save with FTBSimulation.create_new_save...")
         self.log("ftb", f"Creating new save with resolved params...")
         
         with self.state_lock:
-            print(f"[FTB CONTROLLER] 🔒 State lock acquired, calling FTBSimulation.create_new_save...")
+            _dbg(f"[FTB CONTROLLER] 🔒 State lock acquired, calling FTBSimulation.create_new_save...")
             self.state = FTBSimulation.create_new_save(
                 origin_story=origin,
                 player_identity=identity,
@@ -29920,22 +30455,22 @@ class FTBController:
                 manager_first_name=manager_first_name,
                 manager_last_name=manager_last_name
             )
-            print(f"[FTB CONTROLLER] ✅ FTBSimulation.create_new_save returned: {type(self.state).__name__ if self.state else 'None'}")
+            _dbg(f"[FTB CONTROLLER] ✅ FTBSimulation.create_new_save returned: {type(self.state).__name__ if self.state else 'None'}")
             # Set state database path for narrator/delegate interface
             if self.state:
                 # Assign unique game ID to this new game session
                 self.state.game_id = game_id
-                print(f"[FTB CONTROLLER] 🆔 Assigned game_id to state: {self.state.game_id}")
+                _dbg(f"[FTB CONTROLLER] 🆔 Assigned game_id to state: {self.state.game_id}")
                 
                 self.state.state_db_path = self.state_db_path
-                print(f"[FTB CONTROLLER] 🗄️ Set state.state_db_path: {self.state.state_db_path}")
+                _dbg(f"[FTB CONTROLLER] 🗄️ Set state.state_db_path: {self.state.state_db_path}")
                 # Mark all domains as dirty to force UI refresh after new game creation
                 self.state.mark_dirty('all')
-                print(f"[FTB CONTROLLER] ✓ Marked all domains as dirty for UI refresh")
+                _dbg(f"[FTB CONTROLLER] ✓ Marked all domains as dirty for UI refresh")
         
         self.log("ftb", f"New game created successfully! Team: {self.state.player_team.name if self.state and self.state.player_team else 'None'}")
-        print(f"[FTB CONTROLLER] ✓ New game created: state={self.state is not None}, player_team={self.state.player_team.name if self.state and self.state.player_team else 'None'}")
-        print(f"[FTB CONTROLLER] ✓ Game tick: {self.state.tick if self.state else 'NO STATE'}")
+        _dbg(f"[FTB CONTROLLER] ✓ New game created: state={self.state is not None}, player_team={self.state.player_team.name if self.state and self.state.player_team else 'None'}")
+        _dbg(f"[FTB CONTROLLER] ✓ Game tick: {self.state.tick if self.state else 'NO STATE'}")
         
         # Initialize state-aware narrator
         if self.event_pool and self.state and self.state.player_team:
@@ -30010,24 +30545,24 @@ class FTBController:
                     for league in self.state.leagues.values():
                         if self.state.player_team in league.teams:
                             player_in_league = True
-                            print(f"[FTB] INIT_VALIDATION: Player team '{self.state.player_team.name}' found in league '{league.name}'")
-                            print(f"[FTB] INIT_VALIDATION: League has {len(league.schedule)} races scheduled")
+                            _dbg(f"[FTB] INIT_VALIDATION: Player team '{self.state.player_team.name}' found in league '{league.name}'")
+                            _dbg(f"[FTB] INIT_VALIDATION: League has {len(league.schedule)} races scheduled")
                             break
                     if not player_in_league:
-                        print(f"[FTB] INIT_WARNING: Player team '{self.state.player_team.name}' not assigned to any league!")
-                        print(f"[FTB] INIT_WARNING: Available leagues: {list(self.state.leagues.keys())}")
+                        _dbg(f"[FTB] INIT_WARNING: Player team '{self.state.player_team.name}' not assigned to any league!")
+                        _dbg(f"[FTB] INIT_WARNING: Available leagues: {list(self.state.leagues.keys())}")
                 else:
-                    print(f"[FTB] INIT_WARNING: No player team set! Calendar will be empty.")
+                    _dbg(f"[FTB] INIT_WARNING: No player team set! Calendar will be empty.")
                 
                 ftb_state_db.write_game_snapshot(self.state_db_path, self.state)
                 ftb_state_db.write_free_agents(self.state_db_path, self.state.free_agents)
                 projection = self.state.get_calendar_projection(days_ahead=60)
-                print(f"[FTB] INITIAL_CALENDAR_WRITE: Writing {len(projection)} calendar entries at game start")
+                _dbg(f"[FTB] INITIAL_CALENDAR_WRITE: Writing {len(projection)} calendar entries at game start")
                 if projection:
                     sample = projection[0] if projection else None
-                    print(f"[FTB] INITIAL_CALENDAR_SAMPLE: {sample}")
+                    _dbg(f"[FTB] INITIAL_CALENDAR_SAMPLE: {sample}")
                 else:
-                    print(f"[FTB] INITIAL_CALENDAR_WRITE: WARNING - No calendar entries generated!")
+                    _dbg(f"[FTB] INITIAL_CALENDAR_WRITE: WARNING - No calendar entries generated!")
                 ftb_state_db.write_calendar_projection(self.state_db_path, projection)
                 self.log("ftb", "Initial game state and calendar written to database")
             except Exception as e:
@@ -30048,24 +30583,24 @@ class FTBController:
     
     def load_save(self, path: str) -> None:
         """Load save from JSON"""
-        print(f"[FTB CONTROLLER] 📁 load_save ENTRY: path={path}")
+        _dbg(f"[FTB CONTROLLER] 📁 load_save ENTRY: path={path}")
         try:
-            print(f"[FTB CONTROLLER] 📁 Setting current_save_path to {path}")
+            _dbg(f"[FTB CONTROLLER] 📁 Setting current_save_path to {path}")
             self.current_save_path = path
-            print(f"[FTB CONTROLLER] 📁 Ensuring state DB for save...")
+            _dbg(f"[FTB CONTROLLER] 📁 Ensuring state DB for save...")
             db_new_or_reset = self._ensure_state_db(path, reset=False)
-            print(f"[FTB CONTROLLER] 📁 State DB result: new_or_reset={db_new_or_reset}, path={self.state_db_path}")
+            _dbg(f"[FTB CONTROLLER] 📁 State DB result: new_or_reset={db_new_or_reset}, path={self.state_db_path}")
             
-            print(f"[FTB CONTROLLER] 🔒 Acquiring state lock for load...")
+            _dbg(f"[FTB CONTROLLER] 🔒 Acquiring state lock for load...")
             with self.state_lock:
-                print(f"[FTB CONTROLLER] 📂 Loading SimState from JSON...")
+                _dbg(f"[FTB CONTROLLER] 📂 Loading SimState from JSON...")
                 self.state = SimState.load_from_json(path)
-                print(f"[FTB CONTROLLER] ✅ SimState loaded: tick={self.state.tick if self.state else 'None'}")
+                _dbg(f"[FTB CONTROLLER] ✅ SimState loaded: tick={self.state.tick if self.state else 'None'}")
                 if self.state:
-                    print(f"[FTB CONTROLLER] State details: player_team={self.state.player_team.name if self.state.player_team else 'None'}, leagues={len(self.state.leagues)}, day={self.state.sim_day_of_year}")
+                    _dbg(f"[FTB CONTROLLER] State details: player_team={self.state.player_team.name if self.state.player_team else 'None'}, leagues={len(self.state.leagues)}, day={self.state.sim_day_of_year}")
                     # Mark all domains as dirty to force UI refresh after loading
                     self.state.mark_dirty('all')
-                    print(f"[FTB CONTROLLER] ✓ Marked all domains as dirty for UI refresh")
+                    _dbg(f"[FTB CONTROLLER] ✓ Marked all domains as dirty for UI refresh")
                     
                     # CRITICAL: Reset race_day_state to IDLE after loading to avoid stale race data
                     if ftb_race_day and hasattr(self.state, 'race_day_state') and self.state.race_day_state:
@@ -30075,11 +30610,11 @@ class FTBController:
                         self.state.race_day_state.league_id = None
                         self.state.race_day_state.track_id = None
                         self.state.race_day_state.player_wants_live_race = False
-                        print(f"[FTB CONTROLLER] 🔄 Reset race_day_state to IDLE after load")
+                        _dbg(f"[FTB CONTROLLER] 🔄 Reset race_day_state to IDLE after load")
                     
                 # Set state database path for narrator/delegate interface
                 self.state.state_db_path = self.state_db_path
-                print(f"[FTB CONTROLLER] 🗄️ Set state DB path: {self.state.state_db_path}")
+                _dbg(f"[FTB CONTROLLER] 🗄️ Set state DB path: {self.state.state_db_path}")
 
             # ── FLUSH all stale queued audio on load ──
             # Kills leftover broadcast/narrator segments from a previous session
@@ -30094,11 +30629,11 @@ class FTBController:
                     _conn.commit()
                     _conn.close()
                     if _flushed:
-                        print(f"[FTB CONTROLLER] 🧹 FLUSHED {_flushed} stale queued audio segments on save load")
+                        _dbg(f"[FTB CONTROLLER] 🧹 FLUSHED {_flushed} stale queued audio segments on save load")
                     else:
-                        print(f"[FTB CONTROLLER] ✅ Audio queue clean — no stale segments")
+                        _dbg(f"[FTB CONTROLLER] ✅ Audio queue clean — no stale segments")
             except Exception as _flush_err:
-                print(f"[FTB CONTROLLER] ⚠️  Could not flush stale audio on load: {_flush_err}")
+                _dbg(f"[FTB CONTROLLER] ⚠️  Could not flush stale audio on load: {_flush_err}")
             
             # ── Also drain pre-rendered audio queue ──
             try:
@@ -30112,7 +30647,7 @@ class FTBController:
                         except Exception:
                             break
                     if _drained:
-                        print(f"[FTB CONTROLLER] 🧹 Drained {_drained} pre-rendered audio items on save load")
+                        _dbg(f"[FTB CONTROLLER] 🧹 Drained {_drained} pre-rendered audio items on save load")
             except Exception:
                 pass
             
@@ -30124,44 +30659,44 @@ class FTBController:
                     import time as _time
                     _time.sleep(0.2)
                     _show_interrupt.clear()
-                    print(f"[FTB CONTROLLER] 🔇 Interrupted stale TTS on save load")
+                    _dbg(f"[FTB CONTROLLER] 🔇 Interrupted stale TTS on save load")
             except Exception:
                 pass
 
             if self.state_db_path and ftb_state_db:
                 try:
-                    print(f"[FTB CONTROLLER] 💾 Writing initial state to DB...")
+                    _dbg(f"[FTB CONTROLLER] 💾 Writing initial state to DB...")
                     ftb_state_db.write_game_snapshot(self.state_db_path, self.state)
                     ftb_state_db.write_free_agents(self.state_db_path, self.state.free_agents)
-                    print(f"[FTB CONTROLLER] 📅 Getting calendar projection...")
+                    _dbg(f"[FTB CONTROLLER] 📅 Getting calendar projection...")
                     projection = self.state.get_calendar_projection(days_ahead=60)
-                    print(f"[FTB CONTROLLER] 📅 Writing {len(projection)} calendar entries to DB...")
+                    _dbg(f"[FTB CONTROLLER] 📅 Writing {len(projection)} calendar entries to DB...")
                     ftb_state_db.write_calendar_projection(self.state_db_path, projection)
                     if db_new_or_reset:
-                        print("[FTB CONTROLLER] ✅ Loaded save wrote initial state to new DB")
+                        _dbg("[FTB CONTROLLER] ✅ Loaded save wrote initial state to new DB")
                         self.log("ftb", "Loaded save wrote initial state to new DB")
                 except Exception as e:
-                    print(f"[FTB CONTROLLER] ❌ Failed to write loaded state to database: {e}")
+                    _dbg(f"[FTB CONTROLLER] ❌ Failed to write loaded state to database: {e}")
                     self.log("ftb", f"Failed to write loaded state to database: {e}")
             
             # Clear old notifications from database
             if self.state_db_path:
                 try:
-                    print(f"[FTB CONTROLLER] 🧹 Clearing old notifications...")
+                    _dbg(f"[FTB CONTROLLER] 🧹 Clearing old notifications...")
                     import plugins.ftb_notifications as ftb_notif
                     ftb_notif.clear_all_notifications(self.state_db_path)
-                    print(f"[FTB CONTROLLER] ✅ Cleared old notifications for loaded save")
+                    _dbg(f"[FTB CONTROLLER] ✅ Cleared old notifications for loaded save")
                     self.log("ftb", "Cleared old notifications for loaded save")
                 except Exception as e:
-                    print(f"[FTB CONTROLLER] ❌ Failed to clear notifications: {e}")
+                    _dbg(f"[FTB CONTROLLER] ❌ Failed to clear notifications: {e}")
                     self.log("ftb", f"Failed to clear notifications: {e}")
             
             # Write race results from event_history to database
             if self.state_db_path and self.state:
                 try:
-                    print(f"[FTB CONTROLLER] 🏁 Writing race results from event_history to DB...")
+                    _dbg(f"[FTB CONTROLLER] 🏁 Writing race results from event_history to DB...")
                     race_events = [e for e in self.state.event_history if e.category == "race_result"]
-                    print(f"[FTB CONTROLLER] Found {len(race_events)} race results in event_history")
+                    _dbg(f"[FTB CONTROLLER] Found {len(race_events)} race results in event_history")
                     
                     # Bulk write race results to database
                     races_written = 0
@@ -30200,25 +30735,25 @@ class FTBController:
                             ftb_state_db.write_race_result_archive(self.state_db_path, race_record)
                             races_written += 1
                         except Exception as e:
-                            print(f"[FTB CONTROLLER] ⚠️ Failed to write race result: {e}")
+                            _dbg(f"[FTB CONTROLLER] ⚠️ Failed to write race result: {e}")
                     
-                    print(f"[FTB CONTROLLER] ✅ Wrote {races_written} race results to database")
+                    _dbg(f"[FTB CONTROLLER] ✅ Wrote {races_written} race results to database")
                     self.log("ftb", f"Wrote {races_written} race results to database")
                 except Exception as e:
-                    print(f"[FTB CONTROLLER] ❌ Failed to bulk write race results: {e}")
+                    _dbg(f"[FTB CONTROLLER] ❌ Failed to bulk write race results: {e}")
                     import traceback
                     traceback.print_exc()
                     self.log("ftb", f"Failed to bulk write race results: {e}")
             
-            print(f"[FTB CONTROLLER] ✅ Load save completed successfully: {path}")
+            _dbg(f"[FTB CONTROLLER] ✅ Load save completed successfully: {path}")
             self.log("ftb", f"Loaded save: {path}")
-            print(f"[FTB CONTROLLER] 🎙️ Initializing narrator for state...")
+            _dbg(f"[FTB CONTROLLER] 🎙️ Initializing narrator for state...")
             self._init_narrator_for_state()
-            print(f"[FTB CONTROLLER] ✅ load_save method completed")
+            _dbg(f"[FTB CONTROLLER] ✅ load_save method completed")
         except Exception as e:
-            print(f"[FTB CONTROLLER] ❌ Failed to load save: {e}")
+            _dbg(f"[FTB CONTROLLER] ❌ Failed to load save: {e}")
             import traceback
-            print(f"[FTB CONTROLLER] ❌ Load save traceback: {traceback.format_exc()}")
+            _dbg(f"[FTB CONTROLLER] ❌ Load save traceback: {traceback.format_exc()}")
             self.log("ftb", f"Failed to load save: {e}")
     
     def load_from_db(self, clear_existing: bool = False) -> int:
@@ -30230,14 +30765,14 @@ class FTBController:
         Returns:
             Number of race results loaded
         """
-        print(f"[FTB CONTROLLER] 🗄️ load_from_db ENTRY (clear_existing={clear_existing})")
+        _dbg(f"[FTB CONTROLLER] 🗄️ load_from_db ENTRY (clear_existing={clear_existing})")
         
         if not self.state:
-            print(f"[FTB CONTROLLER] ❌ No state available for load_from_db")
+            _dbg(f"[FTB CONTROLLER] ❌ No state available for load_from_db")
             return 0
             
         if not self.state_db_path:
-            print(f"[FTB CONTROLLER] ❌ No database path available")
+            _dbg(f"[FTB CONTROLLER] ❌ No database path available")
             return 0
         
         try:
@@ -30250,11 +30785,11 @@ class FTBController:
                         if e.category != "race_result"
                     ]
                     removed = original_count - len(self.state.event_history)
-                    print(f"[FTB CONTROLLER] 🗑️ Cleared {removed} existing race results from event_history")
+                    _dbg(f"[FTB CONTROLLER] 🗑️ Cleared {removed} existing race results from event_history")
                 
                 # Load race results from database
                 results = ftb_state_db.query_race_results(self.state_db_path)
-                print(f"[FTB CONTROLLER] 📊 Found {len(results)} race results in database")
+                _dbg(f"[FTB CONTROLLER] 📊 Found {len(results)} race results in database")
                 
                 # Convert DB records to SimEvent objects and add to event_history
                 loaded = 0
@@ -30307,24 +30842,24 @@ class FTBController:
                             loaded += 1
                         
                     except Exception as e:
-                        print(f"[FTB CONTROLLER] ⚠️ Failed to convert DB result to event: {e}")
+                        _dbg(f"[FTB CONTROLLER] ⚠️ Failed to convert DB result to event: {e}")
                         continue
                 
                 # Sort event_history by timestamp
                 self.state.event_history.sort(key=lambda e: e.ts)
                 
-                print(f"[FTB CONTROLLER] ✅ Loaded {loaded} race results from DB into event_history")
+                _dbg(f"[FTB CONTROLLER] ✅ Loaded {loaded} race results from DB into event_history")
                 self.log("ftb", f"Loaded {loaded} race results from database")
                 
                 # Mark stats as dirty to trigger UI refresh
                 if loaded > 0:
                     self.state.mark_dirty('stats')
-                    print(f"[FTB CONTROLLER] 🔄 Marked stats as dirty for UI refresh")
+                    _dbg(f"[FTB CONTROLLER] 🔄 Marked stats as dirty for UI refresh")
                 
                 return loaded
                 
         except Exception as e:
-            print(f"[FTB CONTROLLER] ❌ Failed to load from database: {e}")
+            _dbg(f"[FTB CONTROLLER] ❌ Failed to load from database: {e}")
             import traceback
             traceback.print_exc()
             self.log("ftb", f"Failed to load from database: {e}")
@@ -30333,10 +30868,13 @@ class FTBController:
     def save_game(self, path: Optional[str] = None) -> None:
         """Save current state to JSON in background thread (non-blocking)"""
         if not self.state:
+            _dbg("[SAVE] ❌ Cannot save - no state loaded")
             return
         
         if path is None:
             path = self._get_autosave_path()
+        
+        _dbg(f"[SAVE] 💾 Initiating save to: {path}")
         
         # Start background save
         self.log("ftb", f"[AUTOSAVE] Starting background save to {path}")
@@ -30354,6 +30892,7 @@ class FTBController:
             with self.state_lock:
                 self.state.save_to_json(path)
             self.log("ftb", f"[AUTOSAVE] Background save complete: {path}")
+            _dbg(f"[SAVE] ✅ Save complete: {path}")
             self._sync_state_db_for_save(path)
             
             # Create success notification
@@ -30373,7 +30912,10 @@ class FTBController:
                 self.log("ftb", f"Failed to create save notification: {notif_error}")
                 
         except Exception as e:
-            self.log("ftb", f"[AUTOSAVE] Background save failed: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            self.log("ftb", f"[AUTOSAVE] Background save failed: {e}\n{error_details}")
+            _dbg(f"[SAVE] ❌ Save failed: {e}\n{error_details}")
             
             # Create error notification
             try:
@@ -30412,7 +30954,7 @@ class FTBController:
     def _run(self) -> None:
         """Main tick loop"""
         self.log("ftb", "Controller thread started, entering main loop...")
-        print(f"[FTB CONTROLLER] 🚀 Main thread started, runtime_id={id(self.runtime)}")
+        _dbg(f"[FTB CONTROLLER] 🚀 Main thread started, runtime_id={id(self.runtime)}")
         tick_count = 0
         
         while not self.stop_event.is_set():
@@ -30422,10 +30964,10 @@ class FTBController:
                     cmd_q = self.runtime.get("ftb_cmd_q")
                     q_size = cmd_q.qsize() if cmd_q else -1
                     state_info = f"tick={self.state.tick}, mode={self.state.time_mode}, control={self.state.control_mode}" if self.state else "None"
-                    print(f"[FTB CONTROLLER] 💓 Heartbeat #{tick_count}: q_size={q_size}, state={state_info}")
+                    _dbg(f"[FTB CONTROLLER] 💓 Heartbeat #{tick_count}: q_size={q_size}, state={state_info}")
                     self.log("ftb", f"Thread heartbeat: tick={tick_count}, q_size={q_size}, state={'exists' if self.state else 'None'}")
                 
-                print(f"[FTB CONTROLLER] 📬 Checking for UI commands...")
+                _dbg(f"[FTB CONTROLLER] 📬 Checking for UI commands...")
                 # Handle UI commands
                 self._handle_ui_cmds()
                 
@@ -30437,12 +30979,12 @@ class FTBController:
                         pass
                     else:
                         # Streaming complete, finalize race
-                        print(f"[FTB CONTROLLER] 🏁 Live race stream complete, finalizing...")
+                        _dbg(f"[FTB CONTROLLER] 🏁 Live race stream complete, finalizing...")
                         self._finalize_live_race()
                 
                 # Advance simulation (only if auto mode)
                 should_tick = False
-                print(f"[FTB CONTROLLER] ⏰ Checking if should auto-tick: state={'exists' if self.state else 'None'}")
+                _dbg(f"[FTB CONTROLLER] ⏰ Checking if should auto-tick: state={'exists' if self.state else 'None'}")
                 
                 # CRITICAL: Block ALL tick advances while race day is active (not IDLE)
                 # The prompt pauses the sim; ticks must not happen until the player responds
@@ -30450,17 +30992,72 @@ class FTBController:
                     from plugins.ftb_race_day import RaceDayPhase
                     rd_phase = self.state.race_day_state.phase
                     if rd_phase != RaceDayPhase.IDLE:
-                        print(f"[FTB CONTROLLER] ⏸️  TICK BLOCKED - race day active (phase={rd_phase.value})")
-                        # Don't tick - wait for player to respond to race day prompt
-                        should_tick = False
+                        _dbg(f"[FTB CONTROLLER] ⏸️  TICK BLOCKED - race day active (phase={rd_phase.value})")
+                        
+                        # SAFETY CHECK: Detect stuck races and auto-reset
+                        # If race has been "running" but no actual race data exists, it's stuck
+                        if rd_phase == RaceDayPhase.RACE_RUNNING:
+                            # Check if race data actually exists
+                            has_race_data = hasattr(self.state, '_live_race_result') and self.state._live_race_result is not None
+                            is_pbp_active = self.runtime.get('PBP_ACTIVE', None)
+                            
+                            if not has_race_data and (is_pbp_active is None or not is_pbp_active):
+                                _dbg(f"[FTB CONTROLLER] ⚠️  STUCK RACE DETECTED!")
+                                _dbg(f"[FTB CONTROLLER] ⚠️  Race phase=RACE_RUNNING but no race data exists")
+                                _dbg(f"[FTB CONTROLLER] ⚠️  Auto-resetting race_day_state to IDLE to unblock simulation")
+                                
+                                # Reset to IDLE
+                                self.state.race_day_state.phase = RaceDayPhase.IDLE
+                                self.state.race_day_state.race_tick = None
+                                self.state.race_day_state.league_id = None
+                                self.state.race_day_state.track_id = None
+                                self.state.race_day_active = False
+                                self.state.race_day_started_ts = None
+                                
+                                # Clear any stale race data
+                                if hasattr(self.state, '_live_race_result'):
+                                    self.state._live_race_result = None
+                                if hasattr(self.state, '_live_pbp_mode'):
+                                    self.state._live_pbp_mode = False
+                                
+                                _dbg(f"[FTB CONTROLLER] ✅ Race state reset complete - simulation unblocked")
+                                
+                                # Now allow tick to proceed
+                                rd_phase = RaceDayPhase.IDLE
+                        
+                        # Don't tick if still not IDLE - wait for player to respond to race day prompt
+                        if rd_phase != RaceDayPhase.IDLE:
+                            should_tick = False
+                        else:
+                            # Now IDLE after reset, can continue to tick check
+                            if self.state.time_mode == 'auto':
+                                _dbg(f"[FTB CONTROLLER] ⏰ State is in auto mode, control_mode={self.state.control_mode}")
+                                if self.state.control_mode == "delegated":
+                                    # Delegated mode: only tick when time interval has passed
+                                    if self.delegate_next_tick_ts is not None:
+                                        now = time.time()
+                                        if now >= self.delegate_next_tick_ts:
+                                            should_tick = True
+                                            self.delegate_next_tick_ts = now + self.delegate_tick_interval
+                                            _dbg(f"[FTB CONTROLLER] [DELEGATE] Tick #{self.state.tick} - next tick in {self.delegate_tick_interval}s")
+                                            self.log("ftb", f"[DELEGATE] Tick #{self.state.tick} - next tick in {self.delegate_tick_interval}s")
+                                        else:
+                                            wait_time = self.delegate_next_tick_ts - now
+                                            _dbg(f"[FTB CONTROLLER] [DELEGATE] Waiting {wait_time:.1f}s for next tick")
+                                else:
+                                    # Normal auto mode: tick every loop iteration
+                                    should_tick = True
+                                    _dbg(f"[FTB CONTROLLER] Auto mode active, will tick")
+                            else:
+                                _dbg(f"[FTB CONTROLLER] State exists but not in auto mode: {self.state.time_mode}")
                     else:
                         # Phase is IDLE — safety-clear stale race_day_active flag
                         if self.state.race_day_active:
                             self.state.race_day_active = False
                             self.state.race_day_started_ts = None
-                            print(f"[FTB CONTROLLER] 🔧 Cleared stale race_day_active flag (phase already IDLE)")
+                            _dbg(f"[FTB CONTROLLER] 🔧 Cleared stale race_day_active flag (phase already IDLE)")
                         if self.state.time_mode == 'auto':
-                            print(f"[FTB CONTROLLER] ⏰ State is in auto mode, control_mode={self.state.control_mode}")
+                            _dbg(f"[FTB CONTROLLER] ⏰ State is in auto mode, control_mode={self.state.control_mode}")
                             if self.state.control_mode == "delegated":
                                 # Delegated mode: only tick when time interval has passed
                                 if self.delegate_next_tick_ts is not None:
@@ -30468,19 +31065,19 @@ class FTBController:
                                     if now >= self.delegate_next_tick_ts:
                                         should_tick = True
                                         self.delegate_next_tick_ts = now + self.delegate_tick_interval
-                                        print(f"[FTB CONTROLLER] [DELEGATE] Tick #{self.state.tick} - next tick in {self.delegate_tick_interval}s")
+                                        _dbg(f"[FTB CONTROLLER] [DELEGATE] Tick #{self.state.tick} - next tick in {self.delegate_tick_interval}s")
                                         self.log("ftb", f"[DELEGATE] Tick #{self.state.tick} - next tick in {self.delegate_tick_interval}s")
                                     else:
                                         wait_time = self.delegate_next_tick_ts - now
-                                        print(f"[FTB CONTROLLER] [DELEGATE] Waiting {wait_time:.1f}s for next tick")
+                                        _dbg(f"[FTB CONTROLLER] [DELEGATE] Waiting {wait_time:.1f}s for next tick")
                             else:
                                 # Normal auto mode: tick every loop iteration
                                 should_tick = True
-                                print(f"[FTB CONTROLLER] Auto mode active, will tick")
+                                _dbg(f"[FTB CONTROLLER] Auto mode active, will tick")
                         else:
-                            print(f"[FTB CONTROLLER] State exists but not in auto mode: {self.state.time_mode}")
+                            _dbg(f"[FTB CONTROLLER] State exists but not in auto mode: {self.state.time_mode}")
                 elif self.state and self.state.time_mode == 'auto':
-                    print(f"[FTB CONTROLLER] ⏰ State is in auto mode, control_mode={self.state.control_mode}")
+                    _dbg(f"[FTB CONTROLLER] ⏰ State is in auto mode, control_mode={self.state.control_mode}")
                     if self.state.control_mode == "delegated":
                         if self.delegate_next_tick_ts is not None:
                             now = time.time()
@@ -30489,23 +31086,23 @@ class FTBController:
                                 self.delegate_next_tick_ts = now + self.delegate_tick_interval
                             else:
                                 wait_time = self.delegate_next_tick_ts - now
-                                print(f"[FTB CONTROLLER] [DELEGATE] Waiting {wait_time:.1f}s for next tick")
+                                _dbg(f"[FTB CONTROLLER] [DELEGATE] Waiting {wait_time:.1f}s for next tick")
                     else:
                         should_tick = True
-                        print(f"[FTB CONTROLLER] Auto mode active, will tick")
+                        _dbg(f"[FTB CONTROLLER] Auto mode active, will tick")
                 elif self.state:
-                    print(f"[FTB CONTROLLER] State exists but not in auto mode: {self.state.time_mode}")
+                    _dbg(f"[FTB CONTROLLER] State exists but not in auto mode: {self.state.time_mode}")
                 else:
-                    print(f"[FTB CONTROLLER] No state available for auto-tick")
+                    _dbg(f"[FTB CONTROLLER] No state available for auto-tick")
 
                 if self.state and should_tick:
-                    print(f"[FTB CONTROLLER] Performing simulation tick: current_tick={self.state.tick}")
+                    _dbg(f"[FTB CONTROLLER] Performing simulation tick: current_tick={self.state.tick}")
                     with self.state_lock:
-                        print(f"[FTB CONTROLLER] State lock acquired, calling tick_simulation")
+                        _dbg(f"[FTB CONTROLLER] State lock acquired, calling tick_simulation")
                         events = FTBSimulation.tick_simulation(self.state)
-                        print(f"[FTB CONTROLLER] tick_simulation returned {len(events)} events")
+                        _dbg(f"[FTB CONTROLLER] tick_simulation returned {len(events)} events")
                     
-                    print(f"[FTB CONTROLLER] Converting and emitting {len(events)} events")
+                    _dbg(f"[FTB CONTROLLER] Converting and emitting {len(events)} events")
                     # Convert and emit events
                     self._emit_events(events)
                     
@@ -30513,7 +31110,7 @@ class FTBController:
                     for event in events:
                         if event.event_type == "ui_action" and event.category == "show_pre_race_prompt":
                             # Show pre-race prompt dialog
-                            print(f"[FTB RACE DAY] 📢 Detected show_pre_race_prompt event (auto-tick)")
+                            _dbg(f"[FTB RACE DAY] 📢 Detected show_pre_race_prompt event (auto-tick)")
                             ftb_ui_q = self.runtime.get("ftb_ui_q")
                             if ftb_ui_q:
                                 ftb_ui_q.put(("show_pre_race_prompt", {
@@ -30523,13 +31120,13 @@ class FTBController:
                                     "league_id": event.data.get("league_id"),
                                     "track_id": event.data.get("track_id")
                                 }))
-                                print(f"[FTB RACE DAY] ✅ Sent show_pre_race_prompt to ftb_ui_q")
+                                _dbg(f"[FTB RACE DAY] ✅ Sent show_pre_race_prompt to ftb_ui_q")
                             else:
-                                print(f"[FTB RACE DAY] ❌ ftb_ui_q not found in runtime!")
+                                _dbg(f"[FTB RACE DAY] ❌ ftb_ui_q not found in runtime!")
                         
                         elif event.event_type == "ui_action" and event.category == "quali_complete":
                             # Notify player that quali is complete
-                            print(f"[FTB RACE DAY] 🏁 Detected quali_complete event (auto-tick)")
+                            _dbg(f"[FTB RACE DAY] 🏁 Detected quali_complete event (auto-tick)")
                             ftb_ui_q = self.runtime.get("ftb_ui_q")
                             if ftb_ui_q:
                                 ftb_ui_q.put(("quali_complete", {
@@ -30537,7 +31134,7 @@ class FTBController:
                                     "pole_driver": event.data.get("pole_driver"),
                                     "pole_team": event.data.get("pole_team")
                                 }))
-                                print(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q")
+                                _dbg(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q")
                     
                     # Write state snapshot to DB for narrator/delegate
                     if self.state_db_path and ftb_state_db:
@@ -30549,10 +31146,10 @@ class FTBController:
                             # Write calendar projection (every 10 ticks to avoid overhead)
                             if self.state.tick % 10 == 0:
                                 projection = self.state.get_calendar_projection(days_ahead=60)
-                                print(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
+                                _dbg(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
                                 if projection:
                                     sample = projection[0] if projection else None
-                                    print(f"[FTB] CALENDAR_SAMPLE: {sample}")
+                                    _dbg(f"[FTB] CALENDAR_SAMPLE: {sample}")
                                 ftb_state_db.write_calendar_projection(self.state_db_path, projection)
                         except Exception as e:
                             self.log('ftb', f'State DB write error: {e}')
@@ -30577,23 +31174,23 @@ class FTBController:
         """Process commands from ftb_cmd_q"""
         ftb_cmd_q = self.runtime.get("ftb_cmd_q")
         if not ftb_cmd_q:
-            print(f"[FTB CONTROLLER] ✗ _handle_ui_cmds: no ftb_cmd_q found in runtime dict id={id(self.runtime)}")
+            _dbg(f"[FTB CONTROLLER] ✗ _handle_ui_cmds: no ftb_cmd_q found in runtime dict id={id(self.runtime)}")
             return
         
         if ftb_cmd_q.empty():
             return  # Nothing to process
         
-        print(f"[FTB CONTROLLER] ✓ _handle_ui_cmds: queue id={id(ftb_cmd_q)} has {ftb_cmd_q.qsize()} items, runtime dict id={id(self.runtime)}")
+        _dbg(f"[FTB CONTROLLER] ✓ _handle_ui_cmds: queue id={id(ftb_cmd_q)} has {ftb_cmd_q.qsize()} items, runtime dict id={id(self.runtime)}")
         
         while not ftb_cmd_q.empty():
             try:
                 msg = ftb_cmd_q.get_nowait()
                 cmd = msg.get("cmd", "")
-                print(f"[FTB] Processing command: {cmd}, full_msg={msg}")
+                _dbg(f"[FTB] Processing command: {cmd}, full_msg={msg}")
                 self.log("ftb", f"Processing command: {cmd}")
                 
                 if cmd == "ftb_new_save":
-                    print("[FTB] Handling ftb_new_save command")
+                    _dbg("[FTB] Handling ftb_new_save command")
                     origin = msg.get("origin")
                     identity = msg.get("identity")
                     save_mode = msg.get("save_mode")
@@ -30604,57 +31201,61 @@ class FTBController:
                     manager_age = msg.get("manager_age", 32)
                     manager_first_name = msg.get("manager_first_name", "")
                     manager_last_name = msg.get("manager_last_name", "")
-                    print(f"[FTB] Calling start_new_game with: origin={origin}, identity={identity}, save_mode={save_mode}, tier={tier}, seed={seed}, team_name={team_name}, ownership={ownership}, manager_age={manager_age}, manager_name={manager_first_name} {manager_last_name}")
+                    _dbg(f"[FTB] Calling start_new_game with: origin={origin}, identity={identity}, save_mode={save_mode}, tier={tier}, seed={seed}, team_name={team_name}, ownership={ownership}, manager_age={manager_age}, manager_name={manager_first_name} {manager_last_name}")
                     self.start_new_game(origin, identity, save_mode, tier, seed, team_name, ownership, manager_age, manager_first_name, manager_last_name)
-                    print(f"[FTB] ✓ start_new_game returned, state exists: {self.state is not None}")
+                    _dbg(f"[FTB] ✓ start_new_game returned, state exists: {self.state is not None}")
                     if self.state:
-                        print(f"[FTB] ✓ State initialized: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}")
+                        _dbg(f"[FTB] ✓ State initialized: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}")
                         # Trigger immediate UI refresh
                         self._refresh_widget()
-                        print(f"[FTB] ✓ Triggered UI refresh after new game creation")
+                        _dbg(f"[FTB] ✓ Triggered UI refresh after new game creation")
                     else:
-                        print("[FTB] ✗ WARNING: state is None after start_new_game!")
+                        _dbg("[FTB] ✗ WARNING: state is None after start_new_game!")
                 
                 elif cmd == "ftb_load_save":
                     path = msg.get("path")
-                    print(f"[FTB CONTROLLER] 💾 Loading save from: {path}")
+                    _dbg(f"[FTB CONTROLLER] 💾 Loading save from: {path}")
                     if path:
                         self.load_save(path)
-                        print(f"[FTB CONTROLLER] ✅ load_save completed, state exists: {self.state is not None}")
+                        _dbg(f"[FTB CONTROLLER] ✅ load_save completed, state exists: {self.state is not None}")
                         if self.state:
-                            print(f"[FTB CONTROLLER] ✅ Loaded state: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}, leagues={len(self.state.leagues)}")
+                            _dbg(f"[FTB CONTROLLER] ✅ Loaded state: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}, leagues={len(self.state.leagues)}")
                             # Clear racing stats cache to force refresh with new data
-                            print(f"[FTB CONTROLLER] 🔄 Clearing racing stats cache...")
+                            _dbg(f"[FTB CONTROLLER] 🔄 Clearing racing stats cache...")
                             # Trigger immediate UI refresh
                             self._refresh_widget(clear_stats_cache=True)
-                            print(f"[FTB CONTROLLER] ✓ Triggered UI refresh after save loaded")
+                            _dbg(f"[FTB CONTROLLER] ✓ Triggered UI refresh after save loaded")
                     else:
-                        print(f"[FTB CONTROLLER] ❌ No path provided for load_save")
+                        _dbg(f"[FTB CONTROLLER] ❌ No path provided for load_save")
                 
                 elif cmd == "ftb_load_from_db":
                     clear_existing = msg.get("clear_existing", False)
-                    print(f"[FTB CONTROLLER] 🗄️ Loading race results from database (clear_existing={clear_existing})")
+                    _dbg(f"[FTB CONTROLLER] 🗄️ Loading race results from database (clear_existing={clear_existing})")
                     count = self.load_from_db(clear_existing=clear_existing)
-                    print(f"[FTB CONTROLLER] ✅ Loaded {count} race results from DB")
+                    _dbg(f"[FTB CONTROLLER] ✅ Loaded {count} race results from DB")
                     if count > 0 and self.state:
                         # Trigger immediate UI refresh with cache clear
                         self._refresh_widget(clear_stats_cache=True)
-                        print(f"[FTB CONTROLLER] ✓ Triggered UI refresh after DB load")
+                        _dbg(f"[FTB CONTROLLER] ✓ Triggered UI refresh after DB load")
                 
                 elif cmd == "ftb_save":
                     path = msg.get("path")
-                    self.save_game(path)
+                    _dbg(f"[FTB CONTROLLER] 💾 Save command received, path: {path}")
+                    if path:
+                        self.save_game(path)
+                    else:
+                        _dbg("[FTB CONTROLLER] ❌ No path provided for save command")
                 
                 elif cmd == "ftb_tick_step":
                     n = int(msg.get("n", 1))
-                    print(f"[FTB CONTROLLER] ⏩ Manual tick step requested: {n} ticks")
+                    _dbg(f"[FTB CONTROLLER] ⏩ Manual tick step requested: {n} ticks")
                     if self.state:
                         # If race day is active, SKIP-COMPLETE it so the tick can proceed
                         if ftb_race_day and hasattr(self.state, 'race_day_state') and self.state.race_day_state:
                             from plugins.ftb_race_day import RaceDayPhase
                             rd_phase = self.state.race_day_state.phase
                             if rd_phase not in (RaceDayPhase.IDLE, None):
-                                print(f"[FTB CONTROLLER] ⏩ SKIP-COMPLETING race day (phase={rd_phase.value}) to allow tick advance")
+                                _dbg(f"[FTB CONTROLLER] ⏩ SKIP-COMPLETING race day (phase={rd_phase.value}) to allow tick advance")
                                 # Force-complete: inject ftb_complete_race_day then re-queue this tick step
                                 ftb_cmd_q.put({"cmd": "ftb_complete_race_day"})
                                 ftb_cmd_q.put({"cmd": "ftb_tick_step", "n": n})
@@ -30663,9 +31264,9 @@ class FTBController:
                             if self.state.race_day_active:
                                 self.state.race_day_active = False
                                 self.state.race_day_started_ts = None
-                                print(f"[FTB CONTROLLER] 🔧 Cleared stale race_day_active flag on manual tick (phase IDLE)")
+                                _dbg(f"[FTB CONTROLLER] 🔧 Cleared stale race_day_active flag on manual tick (phase IDLE)")
                         
-                        print(f"[FTB CONTROLLER] ⏩ Starting tick step from tick {self.state.tick}")
+                        _dbg(f"[FTB CONTROLLER] ⏩ Starting tick step from tick {self.state.tick}")
                         
                         # PRE-TICK CHECK: Is there a player race about to happen?
                         if n == 1 and self.state.control_mode != "delegated":  # Only for single manual ticks, not batch
@@ -30679,15 +31280,15 @@ class FTBController:
                                     'round_number': round_num
                                 })
                                 # Dialog is blocking, so state._watch_current_race_live is now set
-                                print(f"[FTB CONTROLLER] 🏁 Dialog shown, user chose: {'WATCH' if getattr(self.state, '_watch_current_race_live', False) else 'SKIP'}")
+                                _dbg(f"[FTB CONTROLLER] 🏁 Dialog shown, user chose: {'WATCH' if getattr(self.state, '_watch_current_race_live', False) else 'SKIP'}")
                         
                         # ACTUAL TICK EXECUTION
                         # Note: Race day logic removed - races now happen naturally when you tick into them
                         # This makes the simulation flow clearer: tick = time advances, period.
-                        print(f"[FTB CONTROLLER] 🎯 Executing tick simulation...")
+                        _dbg(f"[FTB CONTROLLER] 🎯 Executing tick simulation...")
                         if n > 1:
                             # Multi-day advances, batch all events to avoid LLM spam
-                            print(f"[FTB CONTROLLER] 📦 Multi-tick batch: {n} ticks")
+                            _dbg(f"[FTB CONTROLLER] 📦 Multi-tick batch: {n} ticks")
                             all_events = []
                             start_tick = self.state.tick
                             
@@ -30695,11 +31296,11 @@ class FTBController:
                                 # Check stop flag on each iteration
                                 if self.stop_tick_flag:
                                     self.log('ftb', f'⛔ Tick step STOPPED by user at {i+1}/{n} ticks')
-                                    print(f"[FTB CONTROLLER] ⛔ Tick step STOPPED by user at {i+1}/{n} ticks")
+                                    _dbg(f"[FTB CONTROLLER] ⛔ Tick step STOPPED by user at {i+1}/{n} ticks")
                                     self.stop_tick_flag = False  # Reset flag
                                     break
                                 
-                                print(f"[FTB CONTROLLER] 🎯 Batch tick {i+1}/{n}: advancing from {self.state.tick}")
+                                _dbg(f"[FTB CONTROLLER] 🎯 Batch tick {i+1}/{n}: advancing from {self.state.tick}")
                                 with self.state_lock:
                                     events = FTBSimulation.tick_simulation(self.state)
                                     all_events.extend(events)
@@ -30710,7 +31311,7 @@ class FTBController:
                                         self.state.race_day_state.phase == ftb_race_day.RaceDayPhase.PRE_RACE_PROMPT):
                                         self.state.race_day_state.phase = ftb_race_day.RaceDayPhase.IDLE
                                         self.state.race_day_state.player_wants_live_race = False
-                                print(f"[FTB CONTROLLER] 🎯 Batch tick {i+1} complete: now at tick {self.state.tick}, generated {len(events)} events")
+                                _dbg(f"[FTB CONTROLLER] 🎯 Batch tick {i+1} complete: now at tick {self.state.tick}, generated {len(events)} events")
                                 
                                 # Write state snapshot to DB
                                 if self.state_db_path and ftb_state_db:
@@ -30722,17 +31323,17 @@ class FTBController:
                                         # Write calendar projection (every 10 ticks)
                                         if self.state.tick % 10 == 0:
                                             projection = self.state.get_calendar_projection(days_ahead=60)
-                                            print(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
+                                            _dbg(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
                                             if projection:
                                                 sample = projection[0] if projection else None
-                                                print(f"[FTB] CALENDAR_SAMPLE: {sample}")
+                                                _dbg(f"[FTB] CALENDAR_SAMPLE: {sample}")
                                             ftb_state_db.write_calendar_projection(self.state_db_path, projection)
                                     except Exception as e:
                                         self.log('ftb', f'State DB write error: {e}')
                             
                             # Emit all events as a single batch for narrator
                             end_tick = self.state.tick
-                            print(f"[FTB CONTROLLER] 📡 Emitting {len(all_events)} batched events for ticks {start_tick}-{end_tick}")
+                            _dbg(f"[FTB CONTROLLER] 📡 Emitting {len(all_events)} batched events for ticks {start_tick}-{end_tick}")
                             self._emit_events(all_events, batch_mode=True, tick_range=(start_tick, end_tick))
                             self.log('ftb', f'Batch advance complete: {n} ticks, {len(all_events)} events')
                             
@@ -30742,20 +31343,20 @@ class FTBController:
                                 self.log('ftb', f'[AUTOSAVE] Auto-save triggered at tick {self.state.tick}')
                             
                             # Trigger UI refresh after multi-tick batch
-                            print(f"[FTB CONTROLLER] 🔄 Triggering widget refresh after multi-tick batch...")
+                            _dbg(f"[FTB CONTROLLER] 🔄 Triggering widget refresh after multi-tick batch...")
                             self._refresh_widget()
                         else:
                             # Single tick - emit immediately
-                            print(f"[FTB CONTROLLER] 🎯 Single tick execution from {self.state.tick}")
+                            _dbg(f"[FTB CONTROLLER] 🎯 Single tick execution from {self.state.tick}")
                             with self.state_lock:
                                 events = FTBSimulation.tick_simulation(self.state)
-                            print(f"[FTB CONTROLLER] 🎯 Single tick complete: now at tick {self.state.tick}, generated {len(events)} events")
+                            _dbg(f"[FTB CONTROLLER] 🎯 Single tick complete: now at tick {self.state.tick}, generated {len(events)} events")
                             self._emit_events(events)
                             
                             # Check for special UI action events (race day prompts, etc.)
                             for event in events:
                                 if event.event_type == "ui_action" and event.category == "show_pre_race_prompt":
-                                    print(f"[FTB RACE DAY] 📢 Detected show_pre_race_prompt event (manual tick path)")
+                                    _dbg(f"[FTB RACE DAY] 📢 Detected show_pre_race_prompt event (manual tick path)")
                                     ftb_ui_q = self.runtime.get("ftb_ui_q")
                                     if ftb_ui_q:
                                         ftb_ui_q.put(("show_pre_race_prompt", {
@@ -30765,11 +31366,11 @@ class FTBController:
                                             "league_id": event.data.get("league_id"),
                                             "track_id": event.data.get("track_id")
                                         }))
-                                        print(f"[FTB RACE DAY] ✅ Sent show_pre_race_prompt to ftb_ui_q (manual tick)")
+                                        _dbg(f"[FTB RACE DAY] ✅ Sent show_pre_race_prompt to ftb_ui_q (manual tick)")
                                     else:
-                                        print(f"[FTB RACE DAY] ❌ ftb_ui_q not found in runtime!")
+                                        _dbg(f"[FTB RACE DAY] ❌ ftb_ui_q not found in runtime!")
                                 elif event.event_type == "ui_action" and event.category == "quali_complete":
-                                    print(f"[FTB RACE DAY] 🏁 Detected quali_complete event (manual tick path)")
+                                    _dbg(f"[FTB RACE DAY] 🏁 Detected quali_complete event (manual tick path)")
                                     ftb_ui_q = self.runtime.get("ftb_ui_q")
                                     if ftb_ui_q:
                                         ftb_ui_q.put(("quali_complete", {
@@ -30777,7 +31378,7 @@ class FTBController:
                                             "pole_driver": event.data.get("pole_driver"),
                                             "pole_team": event.data.get("pole_team")
                                         }))
-                                        print(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q (manual tick)")
+                                        _dbg(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q (manual tick)")
                             
                             # Write state snapshot to DB
                             if self.state_db_path and ftb_state_db:
@@ -30789,10 +31390,10 @@ class FTBController:
                                     # Write calendar projection (every 10 ticks)
                                     if self.state.tick % 10 == 0:
                                         projection = self.state.get_calendar_projection(days_ahead=60)
-                                        print(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
+                                        _dbg(f"[FTB] CALENDAR_WRITE: Writing {len(projection)} calendar entries at tick {self.state.tick}")
                                         if projection:
                                             sample = projection[0] if projection else None
-                                            print(f"[FTB] CALENDAR_SAMPLE: {sample}")
+                                            _dbg(f"[FTB] CALENDAR_SAMPLE: {sample}")
                                         ftb_state_db.write_calendar_projection(self.state_db_path, projection)
                                 except Exception as e:
                                     self.log('ftb', f'State DB write error: {e}')
@@ -30803,17 +31404,17 @@ class FTBController:
                                 self.log('ftb', f'[AUTOSAVE] Auto-save triggered at tick {self.state.tick}')
                         
                         # Trigger UI refresh after tick completion
-                        print(f"[FTB CONTROLLER] 🔄 Triggering widget refresh after tick...")
+                        _dbg(f"[FTB CONTROLLER] 🔄 Triggering widget refresh after tick...")
                         self._refresh_widget()
-                        print(f"[FTB CONTROLLER] ✅ Tick step completed successfully!")
+                        _dbg(f"[FTB CONTROLLER] ✅ Tick step completed successfully!")
                     else:
-                        print(f"[FTB CONTROLLER] ❌ Cannot tick - no state available")
+                        _dbg(f"[FTB CONTROLLER] ❌ Cannot tick - no state available")
                 
                 elif cmd == "ftb_stop_tick":
                     # Stop any in-progress batch tick operations
                     self.stop_tick_flag = True
                     self.log("ftb", "🛑 Stop tick requested - will halt batch operations")
-                    print("[FTB CONTROLLER] 🛑 Stop tick flag set")
+                    _dbg("[FTB CONTROLLER] 🛑 Stop tick flag set")
                 
                 elif cmd == "ftb_tick_batch":
                     n = int(msg.get("n", 7))
@@ -30823,7 +31424,7 @@ class FTBController:
                             from plugins.ftb_race_day import RaceDayPhase
                             rd_phase = self.state.race_day_state.phase
                             if rd_phase not in (RaceDayPhase.IDLE, None):
-                                print(f"[FTB CONTROLLER] ⏸️  BATCH TICK BLOCKED - race day active (phase={rd_phase.value})")
+                                _dbg(f"[FTB CONTROLLER] ⏸️  BATCH TICK BLOCKED - race day active (phase={rd_phase.value})")
                                 continue
                         
                         # Execute batch and collect summary
@@ -30836,7 +31437,7 @@ class FTBController:
                             # Check stop flag on each iteration
                             if self.stop_tick_flag:
                                 self.log('ftb', f'⛔ Batch tick STOPPED by user at {i+1}/{n} ticks')
-                                print(f"[FTB CONTROLLER] ⛔ Batch tick STOPPED by user at {i+1}/{n} ticks")
+                                _dbg(f"[FTB CONTROLLER] ⛔ Batch tick STOPPED by user at {i+1}/{n} ticks")
                                 self.stop_tick_flag = False  # Reset flag
                                 break
                             
@@ -30918,7 +31519,7 @@ class FTBController:
                             self.state.watch_race_live_response = watch_live
                         self.log("ftb", f"User chose to {'WATCH' if watch_live else 'SKIP'} live race viewing")
                         # Trigger immediate tick to continue race execution
-                        print(f"[FTB] ▶️  Resuming tick after user response")
+                        _dbg(f"[FTB] ▶️  Resuming tick after user response")
                 
                 elif cmd == "ftb_pre_race_response":
                     # NEW: Handle pre-race prompt response (watch live vs instant sim)
@@ -30926,11 +31527,11 @@ class FTBController:
                     if self.state and ftb_race_day and self.state.race_day_state:
                         from plugins.ftb_race_day import RaceDayPhase, simulate_qualifying
                         
-                        print(f"[FTB RACE DAY] 📋 Pre-race response: watch_live={watch_live}")
+                        _dbg(f"[FTB RACE DAY] 📋 Pre-race response: watch_live={watch_live}")
                         
                         if watch_live:
                             # Player wants to watch live - simulate qualifying
-                            print(f"[FTB RACE DAY] ✅ Player chose LIVE RACE mode")
+                            _dbg(f"[FTB RACE DAY] ✅ Player chose LIVE RACE mode")
                             
                             # Get race info (no lock needed - controller thread is single-threaded)
                             league_id = self.state.race_day_state.league_id
@@ -30956,21 +31557,21 @@ class FTBController:
                                         self.state.race_day_state.league_id = league_id
                                         if track_id:
                                             self.state.race_day_state.track_id = track_id
-                                        print(f"[FTB RACE DAY] 🔄 Resolved league_id={league_id}, track_id={track_id} from player team fallback")
+                                        _dbg(f"[FTB RACE DAY] 🔄 Resolved league_id={league_id}, track_id={track_id} from player team fallback")
                                         break
                             
-                            print(f"[FTB RACE DAY] 🔍 Looking up league_id={league_id}, track_id={track_id}")
+                            _dbg(f"[FTB RACE DAY] 🔍 Looking up league_id={league_id}, track_id={track_id}")
                             
                             league = self.state.leagues.get(league_id) if league_id else None
                             track = self.state.tracks.get(track_id) if track_id else None
                             
-                            print(f"[FTB RACE DAY] 🔍 League found: {league.name if league else 'NONE'}, Track found: {track.name if track else 'NONE'}")
+                            _dbg(f"[FTB RACE DAY] 🔍 League found: {league.name if league else 'NONE'}, Track found: {track.name if track else 'NONE'}")
                             
                             if league:
                                 # Simulate qualifying
                                 try:
                                     rng = random.Random(self.state.seed + self.state.tick)
-                                    print(f"[FTB RACE DAY] 🏎️ Running simulate_qualifying...")
+                                    _dbg(f"[FTB RACE DAY] 🏎️ Running simulate_qualifying...")
                                     quali_grid, quali_events = simulate_qualifying(self.state, league, track, rng)
                                     
                                     # Store quali results
@@ -30979,15 +31580,15 @@ class FTBController:
                                     self.state.race_day_state.phase = RaceDayPhase.QUALI_COMPLETE
                                     self.state.race_day_state.player_wants_live_race = True
                                     
-                                    print(f"[FTB RACE DAY] 🏁 Qualifying complete: {len(quali_grid)} drivers, {len(quali_events)} events")
+                                    _dbg(f"[FTB RACE DAY] 🏁 Qualifying complete: {len(quali_grid)} drivers, {len(quali_events)} events")
                                     
                                     # Write quali events to state DB for event log
                                     if self.state_db_path and ftb_state_db:
                                         try:
                                             ftb_state_db.write_event_batch(self.state_db_path, quali_events)
-                                            print(f"[FTB RACE DAY] 📝 Wrote {len(quali_events)} quali events to DB")
+                                            _dbg(f"[FTB RACE DAY] 📝 Wrote {len(quali_events)} quali events to DB")
                                         except Exception as e:
-                                            print(f"[FTB RACE DAY] ⚠️  Failed to write quali events: {e}")
+                                            _dbg(f"[FTB RACE DAY] ⚠️  Failed to write quali events: {e}")
                                     
                                     # Emit events to event history
                                     for event in quali_events:
@@ -31020,33 +31621,38 @@ class FTBController:
                                             "pole_driver": quali_complete_event.data.get("pole_driver"),
                                             "pole_team": quali_complete_event.data.get("pole_team")
                                         }))
-                                        print(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q")
+                                        _dbg(f"[FTB RACE DAY] ✅ Sent quali_complete to ftb_ui_q")
                                     
-                                    print(f"[FTB RACE DAY] ⏸️  Waiting for player to click 'Play Live Race' in PBP tab")
+                                    _dbg(f"[FTB RACE DAY] ⏸️  Waiting for player to click 'Play Live Race' in PBP tab")
                                 except Exception as e:
                                     import traceback
-                                    print(f"[FTB RACE DAY] ❌ ERROR during qualifying: {e}")
+                                    _dbg(f"[FTB RACE DAY] ❌ ERROR during qualifying: {e}")
                                     traceback.print_exc()
                                     # Reset to IDLE so player isn't stuck
                                     self.state.race_day_state.phase = RaceDayPhase.IDLE
                                     self.state.race_day_state.player_wants_live_race = False
-                                    print(f"[FTB RACE DAY] 🔄 Reset to IDLE after qualifying error")
+                                    _dbg(f"[FTB RACE DAY] 🔄 Reset to IDLE after qualifying error")
                             else:
-                                print(f"[FTB RACE DAY] ❌ League not found: league_id={league_id}, available leagues: {list(self.state.leagues.keys())}")
+                                _dbg(f"[FTB RACE DAY] ❌ League not found: league_id={league_id}, available leagues: {list(self.state.leagues.keys())}")
                                 # Reset to IDLE so player isn't stuck
                                 self.state.race_day_state.phase = RaceDayPhase.IDLE
                                 self.state.race_day_state.player_wants_live_race = False
                         else:
                             # Player chose instant sim - continue with normal tick
-                            print(f"[FTB RACE DAY] ⏩ Player chose INSTANT SIM mode")
+                            _dbg(f"[FTB RACE DAY] ⏩ Player chose INSTANT SIM mode")
                             
                             # Clear race day state
                             self.state.race_day_state.phase = RaceDayPhase.IDLE
                             self.state.race_day_state.player_wants_live_race = False
                             
                             # CRITICAL: Trigger tick to continue (it was paused for the prompt)
-                            print(f"[FTB RACE DAY] ▶️  Triggering tick advance to continue to race")
-                            ftb_cmd_q.put({"cmd": "ftb_tick_step", "n": 1})
+                            _dbg(f"[FTB RACE DAY] ▶️  Triggering tick advance to continue to race")
+                            ftb_cmd_q = self.runtime.get("ftb_cmd_q")
+                            if ftb_cmd_q:
+                                ftb_cmd_q.put({"cmd": "ftb_tick_step", "n": 1})
+                                _dbg(f"[FTB RACE DAY] ✅ Sent tick_step command")
+                            else:
+                                _dbg(f"[FTB RACE DAY] ⚠️  ftb_cmd_q not found in runtime")
                 
                 elif cmd == "ftb_start_live_race":
                     # NEW: Start live race playback from PBP widget
@@ -31055,16 +31661,16 @@ class FTBController:
                         
                         speed = msg.get("speed", 10.0)  # Seconds per lap
                         
-                        print(f"[FTB RACE DAY] ▶️  Starting live race playback (speed={speed}s/lap)")
+                        _dbg(f"[FTB RACE DAY] ▶️  Starting live race playback (speed={speed}s/lap)")
                         
                         # --- Set global PBP_ACTIVE flag (blocks narrator in TTS/host pipeline) ---
                         try:
                             _pbp_flag = self.runtime.get('PBP_ACTIVE')
                             if _pbp_flag:
                                 _pbp_flag.set()
-                                print("[FTB RACE DAY] 🔇 PBP_ACTIVE flag SET – narrator blocked in TTS/host pipeline")
+                                _dbg("[FTB RACE DAY] 🔇 PBP_ACTIVE flag SET – narrator blocked in TTS/host pipeline")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not set PBP_ACTIVE flag: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not set PBP_ACTIVE flag: {_e}")
                         
                         # --- Suspend narrator during PBP ---
                         try:
@@ -31073,7 +31679,7 @@ class FTBController:
                             meta = self.active_meta_plugin
                             if meta and hasattr(meta, 'narrator') and meta.narrator:
                                 meta.narrator.suspended = True
-                                print("[FTB RACE DAY] 🔇 Narrator SUSPENDED for PBP mode")
+                                _dbg("[FTB RACE DAY] 🔇 Narrator SUSPENDED for PBP mode")
                                 # Also flush any queued narrator segments from the audio DB
                                 # so already-enqueued narration doesn't play over PBP
                                 try:
@@ -31087,13 +31693,13 @@ class FTBController:
                                         _conn.commit()
                                         _conn.close()
                                         if _flushed:
-                                            print(f"[FTB RACE DAY] 🧹 Flushed {_flushed} queued narrator segments from DB")
+                                            _dbg(f"[FTB RACE DAY] 🧹 Flushed {_flushed} queued narrator segments from DB")
                                 except Exception as _dbe:
-                                    print(f"[FTB RACE DAY] ⚠️  Could not flush narrator DB segments: {_dbe}")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Could not flush narrator DB segments: {_dbe}")
                             else:
-                                print("[FTB RACE DAY] ⚠️  No narrator found to suspend (meta_plugin or narrator is None)")
+                                _dbg("[FTB RACE DAY] ⚠️  No narrator found to suspend (meta_plugin or narrator is None)")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not suspend narrator: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not suspend narrator: {_e}")
                         
                         # --- INTERRUPT any currently-playing TTS immediately ---
                         # SHOW_INTERRUPT causes speak() to bail out mid-sentence
@@ -31101,14 +31707,14 @@ class FTBController:
                             _show_interrupt = self.runtime.get('SHOW_INTERRUPT')
                             if _show_interrupt:
                                 _show_interrupt.set()
-                                print("[FTB RACE DAY] 🔇 SHOW_INTERRUPT set – cutting current TTS")
+                                _dbg("[FTB RACE DAY] 🔇 SHOW_INTERRUPT set – cutting current TTS")
                                 # Brief pause to let the speak() call exit
                                 import time as _time
                                 _time.sleep(0.3)
                                 _show_interrupt.clear()
-                                print("[FTB RACE DAY] 🔇 SHOW_INTERRUPT cleared – ready for PBP")
+                                _dbg("[FTB RACE DAY] 🔇 SHOW_INTERRUPT cleared – ready for PBP")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not set SHOW_INTERRUPT: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not set SHOW_INTERRUPT: {_e}")
                         
                         # --- Drain the pre-rendered audio queue ---
                         # Segments already converted to audio sit in audio_queue;
@@ -31124,9 +31730,9 @@ class FTBController:
                                     except Exception:
                                         break
                                 if _drained:
-                                    print(f"[FTB RACE DAY] 🧹 Drained {_drained} pre-rendered audio items from queue")
+                                    _dbg(f"[FTB RACE DAY] 🧹 Drained {_drained} pre-rendered audio items from queue")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not drain audio_queue: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not drain audio_queue: {_e}")
                         
                         # --- Flush ALL queued audio segments (not just narrator) ---
                         # This ensures theme music / any queued audio stops deterministically
@@ -31141,9 +31747,9 @@ class FTBController:
                                 _conn.commit()
                                 _conn.close()
                                 if _flushed_all:
-                                    print(f"[FTB RACE DAY] 🧹 Flushed {_flushed_all} total queued audio segments for clean PBP start")
+                                    _dbg(f"[FTB RACE DAY] 🧹 Flushed {_flushed_all} total queued audio segments for clean PBP start")
                         except Exception as _dbe:
-                            print(f"[FTB RACE DAY] ⚠️  Could not flush audio DB segments: {_dbe}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not flush audio DB segments: {_dbe}")
                         
                         # --- Tell audio engine: fade music to 0 ---
                         # Try direct module reference first, then sys.modules fallback
@@ -31154,13 +31760,13 @@ class FTBController:
                             if _ae_mod and hasattr(_ae_mod, 'set_pbp_mode'):
                                 _ae_mod.set_pbp_mode(True)
                                 _pbp_mode_set = True
-                                print("[FTB RACE DAY] 🔇 Called set_pbp_mode(True) – music fading out")
+                                _dbg("[FTB RACE DAY] 🔇 Called set_pbp_mode(True) – music fading out")
                             elif _ae_mod and hasattr(_ae_mod, '_audio_engine') and _ae_mod._audio_engine:
                                 _ae_mod._audio_engine.music_controller.set_pbp_mute(True)
                                 _pbp_mode_set = True
-                                print("[FTB RACE DAY] 🔇 Direct set_pbp_mute(True) on audio engine – music fading out")
+                                _dbg("[FTB RACE DAY] 🔇 Direct set_pbp_mute(True) on audio engine – music fading out")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  set_pbp_mode via sys.modules failed: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  set_pbp_mode via sys.modules failed: {_e}")
                         
                         # Fallback: try importing directly
                         if not _pbp_mode_set:
@@ -31169,9 +31775,9 @@ class FTBController:
                                 if hasattr(_ae_direct, 'set_pbp_mode'):
                                     _ae_direct.set_pbp_mode(True)
                                     _pbp_mode_set = True
-                                    print("[FTB RACE DAY] 🔇 Direct import set_pbp_mode(True) – music fading out")
+                                    _dbg("[FTB RACE DAY] 🔇 Direct import set_pbp_mode(True) – music fading out")
                             except Exception as _e2:
-                                print(f"[FTB RACE DAY] ⚠️  Direct import fallback also failed: {_e2}")
+                                _dbg(f"[FTB RACE DAY] ⚠️  Direct import fallback also failed: {_e2}")
                         
                         # Last resort: send audio event via event_q
                         if not _pbp_mode_set:
@@ -31184,16 +31790,16 @@ class FTBController:
                                         source='ftb',
                                         payload={'audio_type': 'pbp_mode', 'active': True}
                                     ))
-                                    print("[FTB RACE DAY] 🔇 Sent pbp_mode event via event_q as last resort")
+                                    _dbg("[FTB RACE DAY] 🔇 Sent pbp_mode event via event_q as last resort")
                             except Exception as _e3:
-                                print(f"[FTB RACE DAY] ⚠️  All audio fade methods failed: {_e3}")
+                                _dbg(f"[FTB RACE DAY] ⚠️  All audio fade methods failed: {_e3}")
                         
                         # --- Stop any currently-playing pygame music immediately ---
                         try:
                             import pygame
                             if pygame.mixer.get_init():
                                 pygame.mixer.music.fadeout(2000)  # 2-second fadeout
-                                print("[FTB RACE DAY] 🔇 pygame.mixer.music.fadeout(2000) called directly")
+                                _dbg("[FTB RACE DAY] 🔇 pygame.mixer.music.fadeout(2000) called directly")
                         except Exception:
                             pass
                         
@@ -31215,7 +31821,7 @@ class FTBController:
                                         track = self.state.tracks[rds.track_id]
                                     
                                     # Simulate the complete race NOW (we'll stream it progressively)
-                                    print(f"[FTB RACE DAY] 🏁 Simulating race for streaming...")
+                                    _dbg(f"[FTB RACE DAY] 🏁 Simulating race for streaming...")
                                     race_result = FTBSimulation._simulate_race_lap_by_lap(
                                         self.state, player_league, track, rds.quali_grid, 
                                         self.state.get_rng("race", context=f"live_race_{rds.race_tick}")
@@ -31227,8 +31833,8 @@ class FTBController:
                                     rds.phase = RaceDayPhase.RACE_RUNNING
                                     rds.live_race_speed = speed
                                     
-                                    print(f"[FTB RACE DAY] ✅ Race simulated and armed for live streaming")
-                                    print(f"[FTB RACE DAY]    {rds.total_laps} laps, {len(race_result.race_events)} events")
+                                    _dbg(f"[FTB RACE DAY] ✅ Race simulated and armed for live streaming")
+                                    _dbg(f"[FTB RACE DAY]    {rds.total_laps} laps, {len(race_result.race_events)} events")
                                     
                                     # --- Start engine audio loop ---
                                     try:
@@ -31245,23 +31851,23 @@ class FTBController:
                                         _ae_mod = _sys.modules.get('ftb_audio_engine')
                                         if _ae_mod and hasattr(_ae_mod, 'start_engine_audio'):
                                             _ae_mod.start_engine_audio(league_tier)
-                                            print(f"[FTB RACE DAY] 🔊 Engine audio started: {league_tier}")
+                                            _dbg(f"[FTB RACE DAY] 🔊 Engine audio started: {league_tier}")
                                         else:
-                                            print(f"[FTB RACE DAY] ⚠️  ftb_audio_engine.start_engine_audio not available")
+                                            _dbg(f"[FTB RACE DAY] ⚠️  ftb_audio_engine.start_engine_audio not available")
                                     except Exception as _e:
-                                        print(f"[FTB RACE DAY] ⚠️  Engine audio start failed: {_e}")
+                                        _dbg(f"[FTB RACE DAY] ⚠️  Engine audio start failed: {_e}")
                                     
                                     # --- Enqueue "lights out" PBP commentary ---
                                     try:
-                                        print(f"[FTB PBP] 🏁 Calling _enqueue_pbp_commentary_for_race_start...")
+                                        _dbg(f"[FTB PBP] 🏁 Calling _enqueue_pbp_commentary_for_race_start...")
                                         self._enqueue_pbp_commentary_for_race_start(rds, player_league, track)
-                                        print(f"[FTB PBP] ✅ Race start commentary call completed")
+                                        _dbg(f"[FTB PBP] ✅ Race start commentary call completed")
                                     except Exception as _e:
-                                        print(f"[FTB RACE DAY] ⚠️  Race start commentary failed: {_e}")
+                                        _dbg(f"[FTB RACE DAY] ⚠️  Race start commentary failed: {_e}")
                                         import traceback; traceback.print_exc()
                                     
                                 else:
-                                    print(f"[FTB RACE DAY] ⚠️  Could not find player league for race")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Could not find player league for race")
 
                 
                 elif cmd == "ftb_advance_race_lap":
@@ -31276,18 +31882,18 @@ class FTBController:
                             self._write_race_day_state_to_db(rds)
                             
                             # --- Generate PBP commentary for this lap ---
-                            print(f"[FTB PBP] 🔍 Lap check: prev_lap={prev_lap}, current_lap={rds.current_lap}, has_more={has_more_laps}")
+                            _dbg(f"[FTB PBP] 🔍 Lap check: prev_lap={prev_lap}, current_lap={rds.current_lap}, has_more={has_more_laps}")
                             if rds.current_lap > prev_lap:
                                 try:
                                     self._enqueue_pbp_commentary_for_lap(rds)
                                 except Exception as _e:
-                                    print(f"[FTB RACE DAY] ⚠️  Lap commentary failed: {_e}")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Lap commentary failed: {_e}")
                                     import traceback; traceback.print_exc()
                             
                             if not has_more_laps:
                                 # Race complete
                                 ftb_race_day.complete_race_stream(self.state)
-                                print(f"[FTB RACE DAY] 🏁 All laps complete!")
+                                _dbg(f"[FTB RACE DAY] 🏁 All laps complete!")
                                 
                                 # --- Stop engine audio ---
                                 try:
@@ -31295,11 +31901,11 @@ class FTBController:
                                     _ae_mod = _sys.modules.get('ftb_audio_engine')
                                     if _ae_mod and hasattr(_ae_mod, 'stop_engine_audio'):
                                         _ae_mod.stop_engine_audio()
-                                        print(f"[FTB RACE DAY] 🔇 Engine audio stopped")
+                                        _dbg(f"[FTB RACE DAY] 🔇 Engine audio stopped")
                                     else:
-                                        print(f"[FTB RACE DAY] ⚠️  ftb_audio_engine.stop_engine_audio not available")
+                                        _dbg(f"[FTB RACE DAY] ⚠️  ftb_audio_engine.stop_engine_audio not available")
                                 except Exception as _e:
-                                    print(f"[FTB RACE DAY] ⚠️  Engine audio stop failed: {_e}")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Engine audio stop failed: {_e}")
                 
                 elif cmd == "ftb_pause_live_race":
                     # NEW: Pause/resume live race
@@ -31307,7 +31913,7 @@ class FTBController:
                         paused = msg.get("paused", True)
                         with self.state_lock:
                             # Toggle pause state (implementation depends on race playback system)
-                            print(f"[FTB RACE DAY] {'⏸️' if paused else '▶️'} Race {'paused' if paused else 'resumed'}")
+                            _dbg(f"[FTB RACE DAY] {'⏸️' if paused else '▶️'} Race {'paused' if paused else 'resumed'}")
                 
                 elif cmd == "ftb_complete_race_day":
                     # NEW: Complete race day and advance tick
@@ -31317,7 +31923,7 @@ class FTBController:
                         from plugins.ftb_race_day import RaceDayPhase
                         
                         _skip_phase = self.state.race_day_state.phase
-                        print(f"[FTB RACE DAY] ✅ Race complete / skip - processing results (phase was {_skip_phase.name})")
+                        _dbg(f"[FTB RACE DAY] ✅ Race complete / skip - processing results (phase was {_skip_phase.name})")
                         
                         # --- Stop engine audio (may be playing if skipping mid-race) ---
                         try:
@@ -31325,27 +31931,27 @@ class FTBController:
                             _ae_mod = _sys.modules.get('ftb_audio_engine')
                             if _ae_mod and hasattr(_ae_mod, 'stop_engine_audio'):
                                 _ae_mod.stop_engine_audio()
-                                print("[FTB RACE DAY] 🔇 Engine audio stopped (skip/complete)")
+                                _dbg("[FTB RACE DAY] 🔇 Engine audio stopped (skip/complete)")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Engine audio stop failed: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Engine audio stop failed: {_e}")
                         
                         # --- Clear global PBP_ACTIVE flag ---
                         try:
                             _pbp_flag = self.runtime.get('PBP_ACTIVE')
                             if _pbp_flag:
                                 _pbp_flag.clear()
-                                print("[FTB RACE DAY] 🔊 PBP_ACTIVE flag CLEARED – narrator unblocked in pipeline")
+                                _dbg("[FTB RACE DAY] 🔊 PBP_ACTIVE flag CLEARED – narrator unblocked in pipeline")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not clear PBP_ACTIVE flag: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not clear PBP_ACTIVE flag: {_e}")
                         
                         # --- Resume narrator after PBP ---
                         try:
                             meta = self.active_meta_plugin
                             if meta and hasattr(meta, 'narrator') and meta.narrator:
                                 meta.narrator.suspended = False
-                                print("[FTB RACE DAY] 🔊 Narrator RESUMED after PBP")
+                                _dbg("[FTB RACE DAY] 🔊 Narrator RESUMED after PBP")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  Could not resume narrator: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not resume narrator: {_e}")
                         
                         # --- Tell audio engine: restore music ---
                         _pbp_restored = False
@@ -31355,22 +31961,69 @@ class FTBController:
                             if _ae_mod and hasattr(_ae_mod, 'set_pbp_mode'):
                                 _ae_mod.set_pbp_mode(False)
                                 _pbp_restored = True
-                                print("[FTB RACE DAY] 🔊 Called set_pbp_mode(False) – music restoring")
+                                _dbg("[FTB RACE DAY] 🔊 Called set_pbp_mode(False) – music restoring")
                             elif _ae_mod and hasattr(_ae_mod, '_audio_engine') and _ae_mod._audio_engine:
                                 _ae_mod._audio_engine.music_controller.set_pbp_mute(False)
                                 _pbp_restored = True
-                                print("[FTB RACE DAY] 🔊 Direct set_pbp_mute(False) – music restoring")
+                                _dbg("[FTB RACE DAY] 🔊 Direct set_pbp_mute(False) – music restoring")
                         except Exception as _e:
-                            print(f"[FTB RACE DAY] ⚠️  set_pbp_mode restore via sys.modules failed: {_e}")
+                            _dbg(f"[FTB RACE DAY] ⚠️  set_pbp_mode restore via sys.modules failed: {_e}")
                         
                         if not _pbp_restored:
                             try:
                                 from plugins import ftb_audio_engine as _ae_direct
                                 if hasattr(_ae_direct, 'set_pbp_mode'):
                                     _ae_direct.set_pbp_mode(False)
-                                    print("[FTB RACE DAY] 🔊 Direct import set_pbp_mode(False) – music restoring")
+                                    _dbg("[FTB RACE DAY] 🔊 Direct import set_pbp_mode(False) – music restoring")
                             except Exception as _e2:
-                                print(f"[FTB RACE DAY] ⚠️  All audio restore methods failed: {_e2}")
+                                _dbg(f"[FTB RACE DAY] ⚠️  All audio restore methods failed: {_e2}")
+                        
+                        # --- Flush PBP queue: kill all queued broadcast segments ---
+                        # When skipping/completing a race, any remaining PBP
+                        # commentary still sitting in the DB or audio queue is
+                        # stale and must not play after the tick advances.
+                        try:
+                            _db_conn_fn = self.runtime.get('db_connect')
+                            if _db_conn_fn:
+                                _conn = _db_conn_fn()
+                                _flushed = _conn.execute(
+                                    "UPDATE segments SET status='done' "
+                                    "WHERE status='queued' AND source='broadcast'"
+                                ).rowcount
+                                _conn.commit()
+                                _conn.close()
+                                if _flushed:
+                                    _dbg(f"[FTB RACE DAY] 🧹 Flushed {_flushed} queued PBP broadcast segments")
+                        except Exception as _flush_err:
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not flush PBP segments from DB: {_flush_err}")
+                        
+                        # --- Drain pre-rendered audio queue ---
+                        try:
+                            _audio_q = self.runtime.get('audio_queue')
+                            if _audio_q:
+                                _drained = 0
+                                while not _audio_q.empty():
+                                    try:
+                                        _audio_q.get_nowait()
+                                        _drained += 1
+                                    except Exception:
+                                        break
+                                if _drained:
+                                    _dbg(f"[FTB RACE DAY] 🧹 Drained {_drained} pre-rendered audio items from queue")
+                        except Exception as _drain_err:
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not drain audio queue: {_drain_err}")
+                        
+                        # --- Stop ftb_pbp live feed ---
+                        try:
+                            import plugins.ftb_pbp as _pbp_mod
+                            _pbp_mod.LIVE_FEED_ACTIVE = False
+                            _dbg("[FTB RACE DAY] 🧹 ftb_pbp live feed stopped")
+                        except Exception as _pbp_err:
+                            _dbg(f"[FTB RACE DAY] ⚠️  Could not stop ftb_pbp live feed: {_pbp_err}")
+                        
+                        # --- Clear live PBP mode on state ---
+                        if self.state:
+                            self.state._live_pbp_mode = False
                         
                         # ---- Phase 1: fast state mutations under lock ----
                         _deferred_result_events = []
@@ -31400,9 +32053,9 @@ class FTBController:
                                         self.state.mark_dirty('standings')
                                         self.state.mark_dirty('finance')
                                         
-                                        print(f"[FTB RACE DAY] ✅ Race results processed: {len(result_events)} events")
+                                        _dbg(f"[FTB RACE DAY] ✅ Race results processed: {len(result_events)} events")
                                 except Exception as e:
-                                    print(f"[FTB RACE DAY] ⚠️  Failed to process race results: {e}")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Failed to process race results: {e}")
                                     import traceback
                                     traceback.print_exc()
                             
@@ -31460,9 +32113,9 @@ class FTBController:
                                             metadata={'positions': [p for p, _, _, _ in player_results], 'track': track_name},
                                             db_path=getattr(self.state, 'state_db_path', None)
                                         )
-                                        print(f"[FTB RACE DAY] ✅ Created race result notification: {title}")
+                                        _dbg(f"[FTB RACE DAY] ✅ Created race result notification: {title}")
                                 except Exception as e:
-                                    print(f"[FTB RACE DAY] ⚠️  Failed to create race result notification: {e}")
+                                    _dbg(f"[FTB RACE DAY] ⚠️  Failed to create race result notification: {e}")
                                     import traceback
                                     traceback.print_exc()
                             
@@ -31484,17 +32137,17 @@ class FTBController:
                                     try:
                                         _catchup_events.extend(FTBSimulation.tick_simulation(self.state))
                                     except Exception as e:
-                                        print(f"[FTB RACE DAY] ⚠️  tick_simulation error during catch-up: {e}")
+                                        _dbg(f"[FTB RACE DAY] ⚠️  tick_simulation error during catch-up: {e}")
                                         self.state.tick = _catchup_race_tick
                                         break
-                                print(f"[FTB RACE DAY] ▶️  Tick caught up: {old_tick} -> {self.state.tick} (race_tick={_catchup_race_tick})")
+                                _dbg(f"[FTB RACE DAY] ▶️  Tick caught up: {old_tick} -> {self.state.tick} (race_tick={_catchup_race_tick})")
                             
                             # Clear race_day_state identification (prevent stale re-triggers)
                             self.state.race_day_state.race_tick = None
                             self.state.race_day_state.league_id = None
                             self.state.race_day_state.track_id = None
                             
-                            print(f"[FTB RACE DAY] ▶️  Ready to advance tick (phase=IDLE, tick={self.state.tick})")
+                            _dbg(f"[FTB RACE DAY] ▶️  Ready to advance tick (phase=IDLE, tick={self.state.tick})")
                         
                         # ---- Phase 2: emit events OUTSIDE the lock (may trigger LLM) ----
                         if _deferred_result_events:
@@ -32120,11 +32773,11 @@ class FTBController:
                             
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
-                                print(f"[FTB CONTROLLER] ❌ Equip FAILED - part not found in inventory: {part_id}")
+                                _dbg(f"[FTB CONTROLLER] ❌ Equip FAILED - part not found in inventory: {part_id}")
                                 return
                             
-                            print(f"[FTB CONTROLLER] Equipping part: {part.name} ({part.part_type})")
-                            print(f"[FTB CONTROLLER] Before: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
+                            _dbg(f"[FTB CONTROLLER] Equipping part: {part.name} ({part.part_type})")
+                            _dbg(f"[FTB CONTROLLER] Before: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
                             
                             # Remove from inventory
                             self.state.player_team.parts_inventory.remove(part)
@@ -32133,16 +32786,24 @@ class FTBController:
                             old_part = self.state.player_team.equipped_parts.get(part.part_type)
                             if old_part:
                                 self.state.player_team.parts_inventory.append(old_part)
-                                print(f"[FTB CONTROLLER] Unequipped old part: {old_part.name}")
+                                _dbg(f"[FTB CONTROLLER] Unequipped old part: {old_part.name}")
                             
                             # Equip new part
                             self.state.player_team.equipped_parts[part.part_type] = part
                             
-                            # Update car ratings - USE BASE SCHEMA, not current ratings!
-                            base_ratings = STATS_SCHEMAS['Car'].copy()
+                            # Update car ratings - use car's base_ratings (tier-specific), not schema defaults!
+                            # If base_ratings doesn't exist (old save), fall back to current_ratings as baseline
+                            if hasattr(self.state.player_team.car, 'base_ratings') and self.state.player_team.car.base_ratings:
+                                base_ratings = self.state.player_team.car.base_ratings.copy()
+                            else:
+                                # Fallback for old saves: use current ratings without parts as baseline
+                                # This isn't perfect but prevents jumping to 50s
+                                base_ratings = self.state.player_team.car.current_ratings.copy()
+                                _dbg(f"[FTB CONTROLLER] ⚠️  Car missing base_ratings, using current_ratings as fallback")
+                            
                             self.state.player_team.car.update_ratings(base_ratings, self.state.player_team.equipped_parts)
                             
-                            print(f"[FTB CONTROLLER] After: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
+                            _dbg(f"[FTB CONTROLLER] After: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
                             
                             # Generate event
                             event = SimEvent(
@@ -32164,7 +32825,7 @@ class FTBController:
                             self.state.event_history.append(event)
                             self._emit_events([event], skip_narration=True)
                             self.state.mark_dirty('car')
-                            print(f"[FTB CONTROLLER] ✅ Part equipped successfully")
+                            _dbg(f"[FTB CONTROLLER] ✅ Part equipped successfully")
                             self.log("ftb", f"Part equipped: {part.name} ({part.part_type})")
                 
                 elif cmd == "ftb_sell_part":
@@ -32180,7 +32841,7 @@ class FTBController:
                             
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
-                                print(f"[FTB CONTROLLER] ❌ Sell FAILED - part not found in inventory: {part_id}")
+                                _dbg(f"[FTB CONTROLLER] ❌ Sell FAILED - part not found in inventory: {part_id}")
                                 return
                             
                             # Check if part is equipped
@@ -32192,11 +32853,11 @@ class FTBController:
                             
                             if is_equipped:
                                 self.log("ftb", f"Cannot sell equipped part {part.name}")
-                                print(f"[FTB CONTROLLER] ❌ Sell FAILED - part is equipped: {part.name}")
+                                _dbg(f"[FTB CONTROLLER] ❌ Sell FAILED - part is equipped: {part.name}")
                                 return
                             
-                            print(f"[FTB CONTROLLER] Selling part: {part.name} ({part.part_type})")
-                            print(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            _dbg(f"[FTB CONTROLLER] Selling part: {part.name} ({part.part_type})")
+                            _dbg(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
                             
                             # Create sell_part action and apply it
                             original_cost = FTBSimulation.calculate_part_cost(part)
@@ -32209,15 +32870,15 @@ class FTBController:
                             
                             events = FTBSimulation._apply_sell_part(action, self.state.player_team, self.state)
                             
-                            print(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            _dbg(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
                             
                             # Emit events
                             if events:
                                 self.state.event_history.extend(events)
                                 self._emit_events(events, skip_narration=True)
-                                print(f"[FTB CONTROLLER] ✅ Part sold successfully - generated {len(events)} events")
+                                _dbg(f"[FTB CONTROLLER] ✅ Part sold successfully - generated {len(events)} events")
                             else:
-                                print(f"[FTB CONTROLLER] ⚠️ Part sale completed but no events generated")
+                                _dbg(f"[FTB CONTROLLER] ⚠️ Part sale completed but no events generated")
                             
                             self.state.mark_dirty('car')
                             self.state.mark_dirty('finance')  # Also mark finance dirty for cash update
@@ -32226,24 +32887,24 @@ class FTBController:
                 elif cmd == "ftb_purchase_part":
                     part_id = msg.get("part_id")
                     cost = msg.get("cost", 0)
-                    print(f"[FTB CONTROLLER] Purchase command received: part_id={part_id}, cost=${cost:,}")
+                    _dbg(f"[FTB CONTROLLER] Purchase command received: part_id={part_id}, cost=${cost:,}")
                     if self.state and self.state.player_team and part_id:
                         with self.state_lock:
                             # Check if can afford
                             if self.state.player_team.budget.cash < cost:
-                                print(f"[FTB CONTROLLER] ❌ Purchase FAILED - insufficient funds: have ${self.state.player_team.budget.cash:,}, need ${cost:,}")
+                                _dbg(f"[FTB CONTROLLER] ❌ Purchase FAILED - insufficient funds: have ${self.state.player_team.budget.cash:,}, need ${cost:,}")
                                 self.log("ftb", f"Cannot afford part {part_id}")
                                 return
                             
                             # Find part in catalog
                             part = self.state.parts_catalog.get(part_id)
                             if not part:
-                                print(f"[FTB CONTROLLER] ❌ Purchase FAILED - part not found in catalog: {part_id}")
+                                _dbg(f"[FTB CONTROLLER] ❌ Purchase FAILED - part not found in catalog: {part_id}")
                                 self.log("ftb", f"Part {part_id} not found in catalog")
                                 return
                             
-                            print(f"[FTB CONTROLLER] Processing purchase: {part.name} (${cost:,})")
-                            print(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            _dbg(f"[FTB CONTROLLER] Processing purchase: {part.name} (${cost:,})")
+                            _dbg(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
                             
                             # Create purchase_part action and apply it
                             action = Action(
@@ -32254,8 +32915,8 @@ class FTBController:
                             
                             events = FTBSimulation._apply_purchase_part(action, self.state.player_team, self.state)
                             
-                            print(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
-                            print(f"[FTB CONTROLLER] Part now in inventory: {part in self.state.player_team.parts_inventory}")
+                            _dbg(f"[FTB CONTROLLER] After: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
+                            _dbg(f"[FTB CONTROLLER] Part now in inventory: {part in self.state.player_team.parts_inventory}")
                             
                             # Emit events
                             if events:
@@ -32265,7 +32926,7 @@ class FTBController:
                             self.state.mark_dirty('car')
                             self.state.mark_dirty('development')
                             self.state.mark_dirty('finance')  # Also update finance for cash change
-                            print(f"[FTB CONTROLLER] ✅ Purchase complete - dirty flags set: car={self.state._car_dirty}, dev={self.state._development_dirty}, finance={self.state._finance_dirty}")
+                            _dbg(f"[FTB CONTROLLER] ✅ Purchase complete - dirty flags set: car={self.state._car_dirty}, dev={self.state._development_dirty}, finance={self.state._finance_dirty}")
                             self.log("ftb", f"Part purchased: {part.name} for ${cost:,}")
                             
                             # Force immediate UI refresh via ui_q (not needed - dirty flags handle it)
@@ -32356,7 +33017,7 @@ class FTBController:
                 import traceback
                 self.log("ftb", f"ERROR processing command '{cmd}': {e}")
                 self.log("ftb", traceback.format_exc())
-                print(f"[FTB] COMMAND ERROR: {cmd} failed with {e}")
+                _dbg(f"[FTB] COMMAND ERROR: {cmd} failed with {e}")
                 # Continue to next command instead of crashing entire handler
     
     def _emit_events(self, sim_events: List[SimEvent], batch_mode: bool = False, tick_range: tuple = None, skip_narration: bool = False) -> None:
@@ -32586,11 +33247,11 @@ class FTBController:
         Args:
             clear_stats_cache: If True, clears racing stats cache to force full refresh
         """
-        print(f"[FTB CONTROLLER] 🔄 _refresh_widget ENTRY (clear_stats_cache={clear_stats_cache})")
+        _dbg(f"[FTB CONTROLLER] 🔄 _refresh_widget ENTRY (clear_stats_cache={clear_stats_cache})")
         ui_q = self.runtime.get("ui_q")
-        print(f"[FTB CONTROLLER] 🔄 ui_q: {ui_q is not None}, state: {self.state is not None}")
+        _dbg(f"[FTB CONTROLLER] 🔄 ui_q: {ui_q is not None}, state: {self.state is not None}")
         if not ui_q or not self.state:
-            print(f"[FTB CONTROLLER] 🔄 Skipping refresh - missing ui_q or state")
+            _dbg(f"[FTB CONTROLLER] 🔄 Skipping refresh - missing ui_q or state")
             return
         
         # Send command to clear stats cache if requested
@@ -32599,14 +33260,14 @@ class FTBController:
                 ui_cmd_q = self.runtime.get("ui_cmd_q")
                 if ui_cmd_q:
                     ui_cmd_q.put(("ftb_clear_stats_cache", {}))
-                    print(f"[FTB CONTROLLER] 🗑️ Sent clear stats cache command to UI")
+                    _dbg(f"[FTB CONTROLLER] 🗑️ Sent clear stats cache command to UI")
             except Exception as e:
-                print(f"[FTB CONTROLLER] ⚠️ Failed to send clear stats cache command: {e}")
+                _dbg(f"[FTB CONTROLLER] ⚠️ Failed to send clear stats cache command: {e}")
         
         try:
-            print(f"[FTB CONTROLLER] 🔄 Acquiring state lock for widget refresh...")
+            _dbg(f"[FTB CONTROLLER] 🔄 Acquiring state lock for widget refresh...")
             with self.state_lock:
-                print(f"[FTB CONTROLLER] 🔄 Building update data for tick {self.state.tick}...")
+                _dbg(f"[FTB CONTROLLER] 🔄 Building update data for tick {self.state.tick}...")
                 update_data = {
                     "tick": self.state.tick,
                     "date_str": self.state.current_date_str(),
@@ -32615,38 +33276,38 @@ class FTBController:
                     "control_mode": self.state.control_mode,
                     "player_focus": self.state.player_focus,
                 }
-                print(f"[FTB CONTROLLER] 🔄 Core update data: {update_data}")
+                _dbg(f"[FTB CONTROLLER] 🔄 Core update data: {update_data}")
                 
                 if self.state.player_team:
-                    print(f"[FTB CONTROLLER] 🔄 Adding player team data: {self.state.player_team.name}")
+                    _dbg(f"[FTB CONTROLLER] 🔄 Adding player team data: {self.state.player_team.name}")
                     update_data["team_name"] = self.state.player_team.name
                     update_data["league_name"] = "Unknown League"
                     # Find league of player team
-                    print(f"[FTB CONTROLLER] 🔄 Searching {len(self.state.leagues)} leagues for player team...")
+                    _dbg(f"[FTB CONTROLLER] 🔄 Searching {len(self.state.leagues)} leagues for player team...")
                     for lg in self.state.leagues.values():
                         if self.state.player_team in lg.teams:
                             update_data["league_name"] = lg.name
-                            print(f"[FTB CONTROLLER] 🔄 Found player team in league: {lg.name}")
+                            _dbg(f"[FTB CONTROLLER] 🔄 Found player team in league: {lg.name}")
                             break
                     else:
-                        print(f"[FTB CONTROLLER] ⚠️ Player team not found in any league!")
+                        _dbg(f"[FTB CONTROLLER] ⚠️ Player team not found in any league!")
                             
                     update_data["budget"] = self.state.player_team.budget.cash
-                    print(f"[FTB CONTROLLER] 🔄 Player team budget: ${self.state.player_team.budget.cash:,.0f}")
+                    _dbg(f"[FTB CONTROLLER] 🔄 Player team budget: ${self.state.player_team.budget.cash:,.0f}")
                 else:
-                    print(f"[FTB CONTROLLER] ⚠️ No player team available!")
+                    _dbg(f"[FTB CONTROLLER] ⚠️ No player team available!")
             
-            print(f"[FTB CONTROLLER] 🔄 Sending widget update to ui_q: {update_data}")
+            _dbg(f"[FTB CONTROLLER] 🔄 Sending widget update to ui_q: {update_data}")
             ui_q.put(("widget_update", {
                 "widget_key": "ftb_game",
                 "data": update_data
             }))
-            print(f"[FTB CONTROLLER] ✅ Widget update sent to ui_q")
+            _dbg(f"[FTB CONTROLLER] ✅ Widget update sent to ui_q")
         
         except Exception as e:
-            print(f"[FTB CONTROLLER] ❌ Widget refresh error: {e}")
+            _dbg(f"[FTB CONTROLLER] ❌ Widget refresh error: {e}")
             import traceback
-            print(f"[FTB CONTROLLER] ❌ Widget refresh traceback: {traceback.format_exc()}")
+            _dbg(f"[FTB CONTROLLER] ❌ Widget refresh traceback: {traceback.format_exc()}")
             self.log("ftb", f"Widget refresh error: {e}")
     
     def _classify_budget_status(self, cash: float, budget_limit: float) -> str:
@@ -32810,9 +33471,9 @@ if ctk is not None:
                 if meta_plugin and hasattr(meta_plugin, "narrator") and meta_plugin.narrator:
                     narrator = meta_plugin.narrator
                     narrator.cadence_range = [min_val, max_val]
-                    print(f"[Narrator Settings] Updated cadence to {min_val}-{max_val}s")
+                    _dbg(f"[Narrator Settings] Updated cadence to {min_val}-{max_val}s")
             except Exception as e:
-                print(f"[Narrator Settings] Error updating narrator: {e}")
+                _dbg(f"[Narrator Settings] Error updating narrator: {e}")
 else:
     # Dummy class for headless mode
     class NarratorSettingsWidget:
@@ -32830,23 +33491,23 @@ def register_widgets(registry, runtime_stub):
     # Initialize FTB command queue and controller
     if "ftb_cmd_q" not in runtime_stub:
         runtime_stub["ftb_cmd_q"] = queue.Queue()
-        print("[FTB Game] Created ftb_cmd_q")
+        _dbg("[FTB Game] Created ftb_cmd_q")
     
     # Initialize dedicated FTB UI queue (separate from main ui_q which bookmark.py consumes)
     if "ftb_ui_q" not in runtime_stub:
         runtime_stub["ftb_ui_q"] = queue.Queue()
-        print("[FTB Game] Created ftb_ui_q (dedicated FTB UI queue)")
+        _dbg("[FTB Game] Created ftb_ui_q (dedicated FTB UI queue)")
     
     if "ftb_controller" not in runtime_stub:
         # Initialize controller with runtime and memory dict
         mem = {}  # Controller manages its own memory/state
         controller = FTBController(runtime_stub, mem)
         runtime_stub["ftb_controller"] = controller
-        print("[FTB Game] Created ftb_controller")
+        _dbg("[FTB Game] Created ftb_controller")
         
         # Start the controller thread to process commands
         controller.start()
-        print("[FTB Game] Started ftb_controller thread")
+        _dbg("[FTB Game] Started ftb_controller thread")
     
     # Start web server if not already running
     if "ftb_web_server_started" not in runtime_stub:
@@ -32865,9 +33526,9 @@ def register_widgets(registry, runtime_stub):
             )
             web_thread.start()
             runtime_stub["ftb_web_server_started"] = True
-            print("[FTB Game] Started web server on port 7555")
+            _dbg("[FTB Game] Started web server on port 7555")
         except Exception as e:
-            print(f"[FTB Game] Failed to start web server: {e}")
+            _dbg(f"[FTB Game] Failed to start web server: {e}")
 
     # Start HTTP-only remote server (no WebSocket, works over Tailscale)
     if "ftb_remote_started" not in runtime_stub:
@@ -32883,9 +33544,9 @@ def register_widgets(registry, runtime_stub):
             )
             remote_thread.start()
             runtime_stub["ftb_remote_started"] = True
-            print("[FTB Game] Started HTTP remote on port 7580 (no WebSocket)")
+            _dbg("[FTB Game] Started HTTP remote on port 7580 (no WebSocket)")
         except Exception as e:
-            print(f"[FTB Game] Failed to start remote server: {e}")
+            _dbg(f"[FTB Game] Failed to start remote server: {e}")
 
     # Main game widget
     def ftb_widget_factory(parent_frame):
@@ -32903,4 +33564,4 @@ def register_widgets(registry, runtime_stub):
     
     registry.register("ftb_narrator_settings", narrator_settings_factory)
     
-    print("[FTB Game] Widgets registered: ftb_game, ftb_narrator_settings")
+    _dbg("[FTB Game] Widgets registered: ftb_game, ftb_narrator_settings")

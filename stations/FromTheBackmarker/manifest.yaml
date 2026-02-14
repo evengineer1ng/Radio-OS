@@ -5,12 +5,13 @@ station:
   logo: logos/fromthebackmarker.jpg
 meta_plugin: ftb_narrator_plugin
 llm:
-  endpoint: http://127.0.0.1:11434/api/generate
+  provider: openai
+  api_key_env: OPENAI_API_KEY
 models:
-  producer: qwen2.5:14b
-  host: llama3.1:8b
-  navigator: deepseek-r1:8b
-  narrator: llama3.1:8b
+  producer: gpt-5.2
+  host: gpt-5.2
+  navigator: gpt-5.2
+  narrator: gpt-5.2
   embedding: ''
 embedding:
   enabled: false
@@ -113,6 +114,8 @@ audio:
   voices:
     host: am_adam
     narrator: bm_lewis
+    play_by_play: am_michael
+    color_commentator: bm_daniel
     formula_z_news_anchor: bf_emma
     formula_z_news: bf_emma
     news_anchor: bf_emma

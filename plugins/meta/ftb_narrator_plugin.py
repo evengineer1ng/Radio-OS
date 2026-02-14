@@ -3404,7 +3404,7 @@ Recent event: {ctx['newest_event']}
             
             # Check if there's an active live race
             cursor.execute("""
-                SELECT value FROM game_state 
+                SELECT value FROM game_state_kv 
                 WHERE key = 'race_day_phase' AND game_id = ?
             """, (self.game_id,))
             phase_row = cursor.fetchone()
@@ -3422,14 +3422,14 @@ Recent event: {ctx['newest_event']}
             
             # Get current lap and recent events
             cursor.execute("""
-                SELECT value FROM game_state 
+                SELECT value FROM game_state_kv 
                 WHERE key = 'race_day_current_lap' AND game_id = ?
             """, (self.game_id,))
             lap_row = cursor.fetchone()
             current_lap = int(lap_row[0]) if lap_row else 0
             
             cursor.execute("""
-                SELECT value FROM game_state 
+                SELECT value FROM game_state_kv 
                 WHERE key = 'race_day_total_laps' AND game_id = ?
             """, (self.game_id,))
             total_lap_row = cursor.fetchone()
@@ -3437,7 +3437,7 @@ Recent event: {ctx['newest_event']}
             
             # Get league tier for audio params
             cursor.execute("""
-                SELECT value FROM game_state 
+                SELECT value FROM game_state_kv 
                 WHERE key = 'player_league_tier' AND game_id = ?
             """, (self.game_id,))
             tier_row = cursor.fetchone()
@@ -3543,7 +3543,7 @@ Recent event: {ctx['newest_event']}
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT value FROM game_state 
+                    SELECT value FROM game_state_kv 
                     WHERE key = 'race_day_standings_p1' AND game_id = ?
                 """, (self.game_id,))
                 leader_row = cursor.fetchone()
@@ -3565,7 +3565,7 @@ Recent event: {ctx['newest_event']}
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT value FROM game_state 
+                    SELECT value FROM game_state_kv 
                     WHERE key = 'race_day_standings_p1' AND game_id = ?
                 """, (self.game_id,))
                 leader_row = cursor.fetchone()

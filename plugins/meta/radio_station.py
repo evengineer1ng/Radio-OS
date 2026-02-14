@@ -560,7 +560,7 @@ Make it conversational and radio-ready."""
             "post_id": c.get("post_id") or c.get("id"),
             "title": c.get("title", ""),
             "angle": "Report",
-            "why": "Interesting story",
+            "why": "",
             "priority": 50,
             "type": "story",
             "tags": []

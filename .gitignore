@@ -63,3 +63,12 @@ voices/kokoro/
 **/ftb_autosave.db
 **/ftb_autosave.json
 ftb_autosave.json
+
+# Large save files excluded from repo
+saves/yearlongsaveweird.db
+saves/yt2.db
+saves/championshiprun.db
+saves/longsave.db
+saves/firstmac.db
+saves/p1halfseason.db
+saves/yt1.db

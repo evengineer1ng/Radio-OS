@@ -1,6 +1,6 @@
 <script lang="ts">
   import { notifications } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { sendCommand } from '../lib/api'
   import { timeAgo } from '../lib/utils'
 
   let filter: 'all' | 'unread' | 'read' = 'all'

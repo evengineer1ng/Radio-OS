@@ -995,13 +995,18 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     radio_root = os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     dist_dir = os.path.join(radio_root, "web", "dist")
     if os.path.isdir(dist_dir):
-        # Serve index.html for SPA routing
+        # Serve index.html for SPA routing — no-cache so phone always gets latest build
         @app.get("/")
         async def serve_index():
             index_path = os.path.join(dist_dir, "index.html")
             if os.path.exists(index_path):
                 with open(index_path, "r", encoding="utf-8") as f:
-                    return HTMLResponse(f.read())
+                    html = f.read()
+                return HTMLResponse(html, headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                })
             return HTMLResponse("<h1>FTB Web UI — build not found. Run: cd web && npm run build</h1>")
 
         app.mount("/assets", StaticFiles(directory=os.path.join(dist_dir, "assets")), name="assets")

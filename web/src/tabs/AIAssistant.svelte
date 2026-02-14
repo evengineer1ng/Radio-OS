@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { sendCommand } from '../lib/api'
 
   $: delegation = $gameState.delegation_settings || {}
   $: focus = $gameState.delegation_focus

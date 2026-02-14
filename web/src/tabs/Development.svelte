@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { sendCommand } from '../lib/api'
   import { formatCurrency } from '../lib/utils'
 
   $: team = $gameState.player_team

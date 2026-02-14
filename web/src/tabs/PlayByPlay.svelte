@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/ws'
+  import { sendCommand } from '../lib/api'
 
   $: pbp = $gameState?.play_by_play || {}
   $: liveEvents = pbp.live_events || []

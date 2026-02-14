@@ -86,15 +86,15 @@ tts:
   min_gap_sec: 6
   deprioritize_penalty: 15
 audio:
-  piper_bin: "{PIPER_BIN_PATH}"
-voices:
-  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
-  lil bat: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
-  marco vision: "{VOICES_DIR}/en_GB-alan-medium.onnx"
-  nova spark: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
-  rex static: "{VOICES_DIR}/en_US-danny-low.onnx"
-  echo lane: "{VOICES_DIR}/en_GB-alba-medium.onnx"
-  hoh: "{VOICES_DIR}/en_US-eminem-medium.onnx"
+  voices_provider: kokoro
+  voices:
+    host: af_sarah
+    lil bat: bf_emma
+    marco vision: bm_george
+    nova spark: af_nova
+    rex static: am_onyx
+    echo lane: bf_alice
+    hoh: am_adam
 feeds:
   bluesky:
     enabled: true
@@ -416,7 +416,7 @@ art:
   global_bg:
     type: image
     value: '#0e0e0e'
-    path: C:/Users/evana/Downloads/Gemini_Generated_Image_amfuyxamfuyxamfu.png
+    path: /Users/even/Downloads/Gemini_Generated_Image_64hn5f64hn5f64hn.png
   panels:
     left:
       type: color
@@ -436,8 +436,8 @@ art:
       value: '#ffffff'
       gradient:
         type: linear
-        color1: '#8080ff'
-        color2: '#808040'
+        color1: '#0e0e0e'
+        color2: '#1e1e1e'
     subtitle:
       type: gradient
       value: '#0e0e0e'

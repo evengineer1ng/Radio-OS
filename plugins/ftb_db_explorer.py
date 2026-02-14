@@ -42,6 +42,12 @@ except ImportError:
     print("[FTB DB Explorer] Warning: Could not import ftb_state_db")
     ftb_state_db = None
 
+try:
+    from plugins import ftb_db_archival
+except ImportError:
+    print("[FTB DB Explorer] Warning: Could not import ftb_db_archival")
+    ftb_db_archival = None
+
 
 # ============================================================================
 # PLUGIN METADATA
@@ -346,6 +352,7 @@ class FTBDBExplorerWidget:
         self._build_league_tab()
         self._build_analytics_tab()
         self._build_query_tab()
+        self._build_archival_tab()
     
     def _build_teams_tab(self):
         """Build the teams historical dashboard tab."""
@@ -491,6 +498,56 @@ class FTBDBExplorerWidget:
         scrollbar_y = ttk.Scrollbar(self.query_results_text, orient=tk.VERTICAL, command=self.query_results_text.yview)
         scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.query_results_text.config(yscrollcommand=scrollbar_y.set)
+    
+    def _build_archival_tab(self):
+        """Build the database archival management tab."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="⚙️ Archival")
+        
+        ttk.Label(tab, text="Database Archival Management", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        if not ftb_db_archival:
+            ttk.Label(tab, text="Archival module not available", foreground="red").pack(pady=10)
+            return
+        
+        # Info section
+        info_frame = ttk.LabelFrame(tab, text="Database Information", padding=10)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.archival_info_text = tk.Text(info_frame, height=10, wrap=tk.WORD, state=tk.DISABLED)
+        self.archival_info_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Control buttons
+        button_frame = ttk.Frame(tab)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(
+            button_frame, 
+            text="🔄 Refresh Stats", 
+            command=self._refresh_archival_stats
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            button_frame, 
+            text="📦 Archive Old Data", 
+            command=self._run_archival
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            button_frame, 
+            text="🔍 View Cold DB", 
+            command=self._view_cold_db_stats
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Archival log
+        log_frame = ttk.LabelFrame(tab, text="Archival Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.archival_log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
+        self.archival_log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Initial stats load
+        self._refresh_archival_stats()
     
     def _show_team_placeholder(self):
         """Show placeholder when no team selected."""
@@ -692,6 +749,147 @@ Mettle Under Pressure: {summary.mettle_under_pressure_index:.1f}/100
         
         except Exception as e:
             messagebox.showerror("Query Error", f"Error executing query:\n{str(e)}")
+    
+    def _refresh_archival_stats(self):
+        """Refresh archival statistics display."""
+        if not ftb_db_archival:
+            return
+        
+        try:
+            stats = ftb_db_archival.get_archival_stats(self.db_path)
+            
+            # Update info text
+            self.archival_info_text.config(state=tk.NORMAL)
+            self.archival_info_text.delete("1.0", tk.END)
+            
+            info_text = f"""
+=== Hot Database ===
+Path: {stats['hot_db']['path']}
+Size: {stats['hot_db']['size_mb']:.2f} MB
+Current Season: {stats['current_season']}
+
+Key Tables (Hot DB):
+  • race_results_archive: {stats['hot_db']['table_counts'].get('race_results_archive', 0):,} rows
+  • financial_transactions: {stats['hot_db']['table_counts'].get('financial_transactions', 0):,} rows
+  • decision_history: {stats['hot_db']['table_counts'].get('decision_history', 0):,} rows
+  • events_buffer: {stats['hot_db']['table_counts'].get('events_buffer', 0):,} rows
+
+Policy: Keeping last {ftb_db_archival.ARCHIVAL_POLICY['hot_seasons_count']} seasons in hot DB
+Archive threshold: {ftb_db_archival.ARCHIVAL_POLICY['archive_threshold_mb']} MB
+
+"""
+            
+            if stats['cold_db']['exists']:
+                info_text += f"""
+=== Cold Database (Archive) ===
+Path: {stats['cold_db']['path']}
+Size: {stats['cold_db']['size_mb']:.2f} MB
+
+Archived Tables:
+  • race_results_archive: {stats['cold_db']['table_counts'].get('race_results_archive', 0):,} rows
+  • financial_transactions: {stats['cold_db']['table_counts'].get('financial_transactions', 0):,} rows
+  • decision_history: {stats['cold_db']['table_counts'].get('decision_history', 0):,} rows
+"""
+            else:
+                info_text += "\n=== Cold Database ===\nNo archive database yet.\n"
+            
+            if stats['archival_recommended']:
+                info_text += f"\n⚠️  ARCHIVAL RECOMMENDED - Hot DB exceeds {ftb_db_archival.ARCHIVAL_POLICY['archive_threshold_mb']} MB threshold\n"
+            
+            self.archival_info_text.insert("1.0", info_text.strip())
+            self.archival_info_text.config(state=tk.DISABLED)
+            
+            # Log the refresh
+            self._log_archival(f"Statistics refreshed at {time.strftime('%H:%M:%S')}")
+        
+        except Exception as e:
+            messagebox.showerror("Stats Error", f"Error loading archival stats:\n{str(e)}")
+    
+    def _run_archival(self):
+        """Run database archival process."""
+        if not ftb_db_archival:
+            return
+        
+        # Confirm with user
+        if not messagebox.askyesno(
+            "Archive Database",
+            "This will move old data from the hot database to a cold archive.\n\n"
+            f"Old data (seasons older than {ftb_db_archival.ARCHIVAL_POLICY['hot_seasons_count']} ago) will be archived.\n"
+            "Career totals and aggregates will remain in hot DB.\n\n"
+            "Continue?"
+        ):
+            return
+        
+        try:
+            self._log_archival("Starting archival process...")
+            
+            # Run archival
+            stats = ftb_db_archival.archive_old_data(self.db_path, verbose=False)
+            
+            # Log results
+            total_archived = sum(stats['archived_rows'].values())
+            self._log_archival(f"✓ Archived {total_archived} total rows")
+            
+            for table, count in stats['archived_rows'].items():
+                self._log_archival(f"  • {table}: {count} rows")
+            
+            if stats['errors']:
+                self._log_archival(f"⚠️  {len(stats['errors'])} errors occurred")
+                for error in stats['errors']:
+                    self._log_archival(f"  • {error}")
+            
+            self._log_archival(f"Completed in {stats['duration_seconds']:.2f}s")
+            
+            # Refresh stats
+            self._refresh_archival_stats()
+            
+            messagebox.showinfo(
+                "Archival Complete",
+                f"Successfully archived {total_archived} rows.\n"
+                f"Time: {stats['duration_seconds']:.2f}s"
+            )
+        
+        except Exception as e:
+            error_msg = f"Error during archival: {str(e)}"
+            self._log_archival(f"❌ {error_msg}")
+            messagebox.showerror("Archival Error", error_msg)
+    
+    def _view_cold_db_stats(self):
+        """Show detailed cold database statistics."""
+        if not ftb_db_archival:
+            return
+        
+        try:
+            stats = ftb_db_archival.get_archival_stats(self.db_path)
+            
+            if not stats['cold_db']['exists']:
+                messagebox.showinfo("No Archive", "No cold database archive exists yet.")
+                return
+            
+            # Build detailed stats message
+            msg = f"Cold Database Archive\n\n"
+            msg += f"Path: {stats['cold_db']['path']}\n"
+            msg += f"Size: {stats['cold_db']['size_mb']:.2f} MB\n\n"
+            msg += "Table Contents:\n"
+            
+            for table, count in sorted(stats['cold_db']['table_counts'].items()):
+                if count > 0:
+                    msg += f"  • {table}: {count:,} rows\n"
+            
+            messagebox.showinfo("Cold DB Stats", msg)
+        
+        except Exception as e:
+            messagebox.showerror("Stats Error", f"Error viewing cold DB stats:\n{str(e)}")
+    
+    def _log_archival(self, message: str):
+        """Add message to archival log."""
+        import time
+        
+        self.archival_log_text.config(state=tk.NORMAL)
+        timestamp = time.strftime("%H:%M:%S")
+        self.archival_log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.archival_log_text.see(tk.END)
+        self.archival_log_text.config(state=tk.DISABLED)
 
 
 # ============================================================================

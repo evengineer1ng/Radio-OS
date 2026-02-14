@@ -84,14 +84,14 @@ tts:
   min_gap_sec: 6
   deprioritize_penalty: 15
 audio:
-  piper_bin: "{PIPER_BIN_PATH}"
-voices:
-  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
-  expert: "{VOICES_DIR}/en_GB-alba-medium.onnx"
-  skeptic: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
-  optimist: "{VOICES_DIR}/en_US-danny-low.onnx"
-  storyteller: "{VOICES_DIR}/en_GB-alan-medium.onnx"
-  sidekick: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
+  voices_provider: kokoro
+  voices:
+    host: af_sarah
+    expert: bf_alice
+    skeptic: bf_emma
+    optimist: am_liam
+    storyteller: bm_george
+    sidekick: af_nova
 feeds:
   bluesky:
     enabled: true

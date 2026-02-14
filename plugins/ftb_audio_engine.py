@@ -170,6 +170,7 @@ class StateMusicController:
         self.is_ducking = False
         self.duck_volume = 0.02  # Very faint during speech
         self.normal_volume = config.get('channel_volumes', {}).get('music', 0.08)  # Very low background volume
+        self.pbp_muted = False  # True when PBP mode has muted music entirely
         
         # Pygame channels
         self.music_channel = None
@@ -270,10 +271,38 @@ class StateMusicController:
         self.is_ducking = ducking
         target_volume = self.duck_volume if ducking else self.normal_volume
         
+        # PBP mute overrides ducking
+        if self.pbp_muted:
+            return
+        
         if self.music_channel:
-            # Pygame doesn't have smooth volume ramp, so do instant change
-            # (could implement manual ramp with thread if needed)
             self.music_channel.set_volume(target_volume)
+    
+    def set_pbp_mute(self, muted: bool) -> None:
+        """
+        Mute / unmute music for PBP mode.
+        Uses a smooth fade via a background thread.
+        When muted, volume → 0.  When unmuted, restore to normal/duck level.
+        """
+        self.pbp_muted = muted
+        target = 0.0 if muted else (self.duck_volume if self.is_ducking else self.normal_volume)
+        
+        if self.music_channel:
+            # Threaded fade over ~2 seconds (40 steps × 50ms)
+            def _fade():
+                ch = self.music_channel
+                if not ch:
+                    return
+                start_vol = ch.get_volume()
+                steps = 40
+                for i in range(1, steps + 1):
+                    vol = start_vol + (target - start_vol) * (i / steps)
+                    try:
+                        ch.set_volume(max(0.0, vol))
+                    except Exception:
+                        break
+                    time.sleep(0.05)
+            threading.Thread(target=_fade, daemon=True, name="MusicFade").start()
     
     def stop(self) -> None:
         """Stop music playback"""
@@ -284,12 +313,183 @@ class StateMusicController:
 
 
 # =======================
+# Ambient Audio Manager
+# =======================
+
+class AmbientAudioManager:
+    """
+    Manages looping ambient sounds that fade in/out independently:
+    - garage.ogg, toolbox.ogg (mechanical ambient)
+    - distantchatter.ogg, distantpa.ogg (crowd/PA ambient)
+    Each sound loops and fades on its own schedule for layered atmosphere.
+    """
+    
+    def __init__(self, audio_dir: str, runtime: Dict[str, Any], config: Dict[str, Any]):
+        self.audio_dir = Path(audio_dir)
+        self.runtime = runtime
+        self.config = config
+        
+        self.base_volume = config.get('channel_volumes', {}).get('ambient', 0.15)
+        
+        # Ambient sound definitions
+        self.ambient_sounds = {
+            'garage': {
+                'file': 'world/ambient/garage.ogg',
+                'channel': None,
+                'fade_in_duration': (3.0, 8.0),  # Random range
+                'fade_out_duration': (5.0, 12.0),
+                'silence_duration': (10.0, 30.0),
+                'target_volume': 0.3,
+                'current_volume': 0.0,
+                'state': 'silent',  # silent, fading_in, playing, fading_out
+                'state_timer': 0.0,
+                'next_duration': 0.0
+            },
+            'toolbox': {
+                'file': 'world/ambient/toolbox.ogg',
+                'channel': None,
+                'fade_in_duration': (4.0, 10.0),
+                'fade_out_duration': (6.0, 15.0),
+                'silence_duration': (15.0, 45.0),
+                'target_volume': 0.25,
+                'current_volume': 0.0,
+                'state': 'silent',
+                'state_timer': 0.0,
+                'next_duration': 0.0
+            },
+            'distantchatter': {
+                'file': 'world/ambient/distantchatter.ogg',
+                'channel': None,
+                'fade_in_duration': (5.0, 12.0),
+                'fade_out_duration': (8.0, 20.0),
+                'silence_duration': (5.0, 20.0),
+                'target_volume': 0.4,
+                'current_volume': 0.0,
+                'state': 'silent',
+                'state_timer': 0.0,
+                'next_duration': 0.0
+            },
+            'distantpa': {
+                'file': 'world/ambient/distantpa.ogg',
+                'channel': None,
+                'fade_in_duration': (6.0, 15.0),
+                'fade_out_duration': (10.0, 25.0),
+                'silence_duration': (20.0, 60.0),
+                'target_volume': 0.2,
+                'current_volume': 0.0,
+                'state': 'silent',
+                'state_timer': 0.0,
+                'next_duration': 0.0
+            }
+        }
+        
+        self.channel_offset = 10  # Start at channel 10
+        self._assign_channels()
+        self._init_timers()
+    
+    def _assign_channels(self):
+        """Assign pygame channels to each ambient sound"""
+        if not HAS_PYGAME or not pygame.mixer.get_init():
+            return
+        
+        for idx, sound_name in enumerate(self.ambient_sounds.keys()):
+            self.ambient_sounds[sound_name]['channel'] = pygame.mixer.Channel(self.channel_offset + idx)
+    
+    def _init_timers(self):
+        """Initialize random timers for staggered starts"""
+        for sound_name, sound_data in self.ambient_sounds.items():
+            # Start with random silence before first fade-in
+            sound_data['next_duration'] = random.uniform(*sound_data['silence_duration'])
+            sound_data['state_timer'] = 0.0
+    
+    def update(self, dt: float):
+        """Update all ambient sounds (fade in/out logic)"""
+        if not HAS_PYGAME or not pygame.mixer.get_init():
+            return
+        
+        for sound_name, sound_data in self.ambient_sounds.items():
+            sound_data['state_timer'] += dt
+            
+            if sound_data['state'] == 'silent':
+                if sound_data['state_timer'] >= sound_data['next_duration']:
+                    self._start_fade_in(sound_name)
+            
+            elif sound_data['state'] == 'fading_in':
+                progress = sound_data['state_timer'] / sound_data['next_duration']
+                if progress >= 1.0:
+                    sound_data['state'] = 'playing'
+                    sound_data['state_timer'] = 0.0
+                    sound_data['next_duration'] = random.uniform(15.0, 45.0)  # Play duration
+                    sound_data['current_volume'] = sound_data['target_volume']
+                else:
+                    sound_data['current_volume'] = sound_data['target_volume'] * progress
+                
+                if sound_data['channel']:
+                    sound_data['channel'].set_volume(sound_data['current_volume'] * self.base_volume)
+            
+            elif sound_data['state'] == 'playing':
+                if sound_data['state_timer'] >= sound_data['next_duration']:
+                    self._start_fade_out(sound_name)
+            
+            elif sound_data['state'] == 'fading_out':
+                progress = sound_data['state_timer'] / sound_data['next_duration']
+                if progress >= 1.0:
+                    sound_data['state'] = 'silent'
+                    sound_data['state_timer'] = 0.0
+                    sound_data['next_duration'] = random.uniform(*sound_data['silence_duration'])
+                    sound_data['current_volume'] = 0.0
+                    if sound_data['channel']:
+                        sound_data['channel'].stop()
+                else:
+                    sound_data['current_volume'] = sound_data['target_volume'] * (1.0 - progress)
+                
+                if sound_data['channel']:
+                    sound_data['channel'].set_volume(sound_data['current_volume'] * self.base_volume)
+    
+    def _start_fade_in(self, sound_name: str):
+        """Begin fade-in for an ambient sound"""
+        sound_data = self.ambient_sounds[sound_name]
+        sound_file = self.audio_dir / sound_data['file']
+        
+        if not sound_file.exists():
+            self.runtime.get('log', print)(f"[ambient] File not found: {sound_file}")
+            return
+        
+        try:
+            sound = pygame.mixer.Sound(str(sound_file))
+            channel = sound_data['channel']
+            if channel:
+                channel.play(sound, loops=-1)
+                channel.set_volume(0.0)
+                sound_data['state'] = 'fading_in'
+                sound_data['state_timer'] = 0.0
+                sound_data['next_duration'] = random.uniform(*sound_data['fade_in_duration'])
+        except Exception as e:
+            self.runtime.get('log', print)(f"[ambient] Error playing {sound_name}: {e}")
+    
+    def _start_fade_out(self, sound_name: str):
+        """Begin fade-out for an ambient sound"""
+        sound_data = self.ambient_sounds[sound_name]
+        sound_data['state'] = 'fading_out'
+        sound_data['state_timer'] = 0.0
+        sound_data['next_duration'] = random.uniform(*sound_data['fade_out_duration'])
+    
+    def stop_all(self):
+        """Stop all ambient sounds"""
+        for sound_data in self.ambient_sounds.values():
+            if sound_data['channel']:
+                sound_data['channel'].stop()
+            sound_data['state'] = 'silent'
+            sound_data['current_volume'] = 0.0
+
+
+# =======================
 # World Audio Controller
 # =======================
 
 class WorldAudioController:
     """
-    Manages race audio: engines, crashes, ambient motorsport texture.
+    Manages race audio: engines, crashes, crowd reactions, ambient motorsport texture.
     """
     
     def __init__(self, audio_dir: str, runtime: Dict[str, Any], config: Dict[str, Any]):
@@ -300,17 +500,25 @@ class WorldAudioController:
         # Channels
         self.engine_channel = None
         self.crash_channel = None
-        self.ambient_channel = None
+        self.crowd_channel = None
         
         # State
         self.current_engine_league = None
+        self.current_engine_sound = None  # Keep reference to loaded sound
+        self.engine_loop_start_pos = 20.0  # Start loops at 20 seconds in
+        self.engine_first_play = True
         self.silence_until = 0  # Timestamp for post-crash silence
         
         self.volume = config.get('channel_volumes', {}).get('world', 0.5)
+        
+        # Ambient manager
+        self.ambient_manager = AmbientAudioManager(audio_dir, runtime, config)
     
     def play_engine_loop(self, league_tier: str) -> None:
         """
         Play engine audio loop for current league tier.
+        These are full onboard lap recordings that should loop continuously
+        as ambient background audio throughout the race.
         
         Args:
             league_tier: 'grassroots', 'midformula', 'formulaz'
@@ -325,8 +533,10 @@ class WorldAudioController:
         if not engine_dir.exists():
             return
         
-        # Pick random variant
-        engine_files = list(engine_dir.glob('*.ogg')) + list(engine_dir.glob('*.wav'))
+        # Pick random variant (OGG preferred, then WAV)
+        engine_files = list(engine_dir.glob('*.ogg'))
+        if not engine_files:
+            engine_files = list(engine_dir.glob('*.wav'))
         if not engine_files:
             return
         
@@ -336,9 +546,15 @@ class WorldAudioController:
             sound = pygame.mixer.Sound(str(engine_file))
             if self.engine_channel is None:
                 self.engine_channel = pygame.mixer.Channel(2)
+            
+            # Loop indefinitely - pygame will handle seamless looping
+            # Note: For loop point at 20s, would need pygame.mixer.music or custom implementation
+            # For now, loop from beginning which works for most onboard audio
             self.engine_channel.play(sound, loops=-1)
-            self.engine_channel.set_volume(self.volume * 0.4)  # Engines at 40% of world volume
+            self.engine_channel.set_volume(self.volume * 0.3)  # Engines at 30% - ambient background
             self.current_engine_league = league_tier
+            
+            self.runtime.get('log', print)(f"[ftb_audio_engine] Engine audio started: {league_tier}")
         except Exception as e:
             self.runtime.get('log', print)(f"[ftb_audio_engine] Engine audio error: {e}")
     
@@ -364,15 +580,16 @@ class WorldAudioController:
             silence_duration = 0.0
         
         crash_dir = self.audio_dir / 'world' / 'crashes'
-        crash_file = crash_dir / f'{crash_type}.wav'
         
-        if not crash_file.exists():
-            # Try finding any crash file
+        # Try .ogg first, then .wav
+        crash_files = list(crash_dir.glob(f'{crash_type}*.ogg'))
+        if not crash_files:
             crash_files = list(crash_dir.glob(f'{crash_type}*.wav'))
-            if crash_files:
-                crash_file = random.choice(crash_files)
-            else:
-                return
+        
+        if not crash_files:
+            return
+        
+        crash_file = random.choice(crash_files)
         
         try:
             sound = pygame.mixer.Sound(str(crash_file))
@@ -381,7 +598,7 @@ class WorldAudioController:
             self.crash_channel.play(sound)
             self.crash_channel.set_volume(self.volume * 0.6)  # Crashes at 60%
             
-            # Post-crash silence
+            # Post-crash silence (fade out engines briefly)
             if silence_duration > 0:
                 self.silence_until = time.time() + silence_duration
                 if self.engine_channel:
@@ -389,18 +606,63 @@ class WorldAudioController:
         except Exception as e:
             self.runtime.get('log', print)(f"[ftb_audio_engine] Crash audio error: {e}")
     
-    def update(self) -> None:
-        """Check for end of post-crash silence"""
+    def play_crowd_reaction(self, reaction_type: str = 'cheer') -> None:
+        """
+        Play crowd reaction sound.
+        
+        Args:
+            reaction_type: 'cheer', 'chatter', 'whoop' for different crowd reactions
+        """
+        if not HAS_PYGAME or not pygame.mixer.get_init():
+            return
+        
+        crowd_dir = self.audio_dir / 'world' / 'ambient'
+        
+        # Map reaction types to files
+        sound_map = {
+            'cheer': 'crowdcheer_oneshot.ogg',
+            'chatter': 'crowdchatter_oneshot.ogg',
+            'whoop': 'crowdwhoop.ogg'
+        }
+        
+        sound_file = crowd_dir / sound_map.get(reaction_type, 'crowdcheer_oneshot.ogg')
+        
+        if not sound_file.exists():
+            return
+        
+        try:
+            sound = pygame.mixer.Sound(str(sound_file))
+            if self.crowd_channel is None:
+                self.crowd_channel = pygame.mixer.Channel(4)
+            self.crowd_channel.play(sound)
+            self.crowd_channel.set_volume(self.volume * 0.5)
+        except Exception as e:
+            self.runtime.get('log', print)(f"[ftb_audio_engine] Crowd audio error: {e}")
+    
+    def update(self, dt: float = 0.05) -> None:
+        """
+        Update world audio state.
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        # Check for end of post-crash silence
         if self.silence_until > 0 and time.time() >= self.silence_until:
             self.silence_until = 0
             if self.engine_channel:
                 self.engine_channel.set_volume(self.volume * 0.4)
+        
+        # Update ambient sounds
+        self.ambient_manager.update(dt)
     
     def stop_engine(self) -> None:
         """Stop engine loop (race ended)"""
         if self.engine_channel:
             self.engine_channel.stop()
         self.current_engine_league = None
+        
+        # Stop ambient sounds too
+        self.ambient_manager.stop_all()
 
 
 # =======================
@@ -518,9 +780,9 @@ class FTBAudioEngine:
             try:
                 if not pygame.mixer.get_init():
                     pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-                    pygame.mixer.set_num_channels(8)  # Reserve channels for different types
+                    pygame.mixer.set_num_channels(16)  # Reserve more channels for ambient sounds
                     log_fn = self.runtime.get('log', lambda role, msg: print(f"[{role}] {msg}"))
-                    log_fn("ftb_audio", "pygame.mixer initialized")
+                    log_fn("ftb_audio", "pygame.mixer initialized with 16 channels")
                 else:
                     log_fn = self.runtime.get('log', lambda role, msg: print(f"[{role}] {msg}"))
                     log_fn("ftb_audio", "Using existing pygame.mixer")
@@ -582,7 +844,7 @@ class FTBAudioEngine:
                 self.last_update = now
                 
                 self.music_controller.update(self.current_scalar, dt)
-                self.world_controller.update()
+                self.world_controller.update(dt)
                 
                 time.sleep(0.05)  # 20 Hz update rate
             except Exception as e:
@@ -609,8 +871,15 @@ class FTBAudioEngine:
             else:
                 self.narrator_bridge.narrator_ended()
         
+        elif event.audio_type == 'pbp_mode':
+            # Play-by-play mode: fade music to 0 or restore
+            active = event.metadata.get('active', False)
+            self.music_controller.set_pbp_mute(active)
+            log_fn = self.runtime.get('log', lambda r, m: print(f"[{r}] {m}"))
+            log_fn("ftb_audio", f"PBP mode {'ACTIVE – music fading to 0' if active else 'ENDED – music restoring'}")
+        
         elif event.audio_type == 'world':
-            # World audio (crash, engine change)
+            # World audio (crash, engine change, crowd reactions)
             action = event.metadata.get('action')
             if action == 'crash':
                 severity = event.metadata.get('severity', 0.5)
@@ -620,6 +889,9 @@ class FTBAudioEngine:
                 self.world_controller.play_engine_loop(league_tier)
             elif action == 'engine_stop':
                 self.world_controller.stop_engine()
+            elif action == 'crowd_reaction':
+                reaction_type = event.metadata.get('reaction_type', 'cheer')
+                self.world_controller.play_crowd_reaction(reaction_type)
         
         elif event.audio_type == 'ui':
             # UI feedback
@@ -641,6 +913,45 @@ class FTBAudioEngine:
 # =======================
 
 _audio_engine: Optional[FTBAudioEngine] = None
+
+
+def set_pbp_mode(active: bool) -> None:
+    """
+    Public helper – call from game controller to fade music in/out for PBP.
+    Bypasses event_q so it cannot be swallowed by another consumer.
+    """
+    if _audio_engine:
+        _audio_engine.music_controller.set_pbp_mute(active)
+        log_fn = _audio_engine.runtime.get('log', lambda r, m: print(f"[{r}] {m}"))
+        log_fn("ftb_audio", f"set_pbp_mode({active}) – music {'fading to 0' if active else 'restoring'}")
+    else:
+        print(f"[ftb_audio_engine] set_pbp_mode({active}) called but engine not initialized")
+
+
+def start_engine_audio(league_tier: str = 'midformula') -> None:
+    """
+    Public helper – start engine loop for the given league tier.
+    Bypasses event_q so it cannot be swallowed by another consumer.
+    """
+    if _audio_engine:
+        _audio_engine.world_controller.play_engine_loop(league_tier)
+        log_fn = _audio_engine.runtime.get('log', lambda r, m: print(f"[{r}] {m}"))
+        log_fn("ftb_audio", f"start_engine_audio('{league_tier}') – engine loop started")
+    else:
+        print(f"[ftb_audio_engine] start_engine_audio('{league_tier}') called but engine not initialized")
+
+
+def stop_engine_audio() -> None:
+    """
+    Public helper – stop engine loop.
+    Bypasses event_q so it cannot be swallowed by another consumer.
+    """
+    if _audio_engine:
+        _audio_engine.world_controller.stop_engine()
+        log_fn = _audio_engine.runtime.get('log', lambda r, m: print(f"[{r}] {m}"))
+        log_fn("ftb_audio", "stop_engine_audio() – engine loop stopped")
+    else:
+        print(f"[ftb_audio_engine] stop_engine_audio() called but engine not initialized")
 
 
 def feed_worker(stop_event, mem: Dict[str, Any], payload: Dict[str, Any], runtime: Dict[str, Any]) -> None:

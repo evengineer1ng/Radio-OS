@@ -9,13 +9,13 @@ models:
   producer: rnj-1:8b
   host: rnj-1:8b
 audio:
-  piper_bin: "{PIPER_BIN_PATH}"
-voices:
-  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
-  analyst: "{VOICES_DIR}/en_GB-alba-medium.onnx"
-  stats_guru: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
-  hype: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
-  coach: "{VOICES_DIR}/en_US-danny-low.onnx"
+  voices_provider: kokoro
+  voices:
+    host: af_sarah
+    analyst: bf_alice
+    stats_guru: bf_emma
+    hype: af_nova
+    coach: am_liam
 scheduler:
   source_quotas:
     feed: 5
@@ -113,8 +113,8 @@ feeds:
     poll_sec: 1.0
   futuresight:
     enabled: true
-    vision_provider: "ollama"
-    vision_model: "llava:latest"
+    vision_provider: ollama
+    vision_model: llava:latest
   visual_reader:
     enabled: true
   reddit:
@@ -141,3 +141,73 @@ feeds:
     enabled: false
   markets:
     enabled: false
+art:
+  global_bg:
+    type: image
+    value: '#0e0e0e'
+    path: /Users/even/Desktop/Screenshot 2026-02-13 at 8.40.13 AM.png
+  panels:
+    left:
+      type: color
+      value: '#121212'
+    center:
+      type: color
+      value: '#121212'
+    right:
+      type: color
+      value: '#121212'
+    toolbar:
+      type: color
+      value: '#0e0e0e'
+    subtitle:
+      type: color
+      value: '#0e0e0e'
+  accent: '#4cc9f0'
+  subtitle_wave: true
+ui_layout:
+  windows:
+    window_1:
+      window_id: window_1
+      geometry:
+        x: 0
+        y: 13
+        width: 466
+        height: 600
+      is_minimized: false
+      active_tab: null
+      tabs: []
+    window_2:
+      window_id: window_2
+      geometry:
+        x: 499
+        y: 16
+        width: 466
+        height: 600
+      is_minimized: false
+      active_tab: null
+      tabs: []
+    window_3:
+      window_id: window_3
+      geometry:
+        x: 1008
+        y: 11
+        width: 466
+        height: 600
+      is_minimized: false
+      active_tab: null
+      tabs: []
+  panes:
+    left:
+      tabs:
+      - widget_key: radio_dial
+        title: Radio • Dial
+    center:
+      tabs:
+      - widget_key: callin
+        title: Live Call-In
+    right:
+      tabs:
+      - widget_key: rss_now_playing
+        title: RSS • Feed
+      - widget_key: reddit_now_playing
+        title: Reddit • Feed

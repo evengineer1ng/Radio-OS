@@ -86,16 +86,16 @@ tts:
   min_gap_sec: 6
   deprioritize_penalty: 15
 audio:
-  piper_bin: "{PIPER_BIN_PATH}"
-voices:
-  host: "{VOICES_DIR}/en_US-lessac-high.onnx"
-  skeptic: "{VOICES_DIR}/en_GB-alba-medium.onnx"
-  engineer: "{VOICES_DIR}/en_US-danny-low.onnx"
-  macro: "{VOICES_DIR}/en_US-amy-medium.onnx"
-  optimist: "{VOICES_DIR}/en_US-hfc_female-medium.onnx"
-  coach: "{VOICES_DIR}/en_GB-southern_english_female-low.onnx"
-  expert: "{VOICES_DIR}/en_US-danny-low.onnx"
-  storyteller: "{VOICES_DIR}/en_GB-alan-medium.onnx"
+  voices_provider: kokoro
+  voices:
+    host: af_sarah
+    skeptic: bf_alice
+    engineer: am_adam
+    macro: af_bella
+    optimist: af_nova
+    coach: bf_emma
+    expert: am_liam
+    storyteller: bm_george
 feeds:
   bluesky:
     enabled: true

@@ -95,6 +95,20 @@ except ImportError:
     print("[FTB Narrator] Warning: Could not import ftb_segment_prompts")
     ftb_segment_prompts = None
 
+# Import broadcast commentary generator
+try:
+    from plugins import ftb_broadcast_commentary
+except ImportError:
+    print("[FTB Narrator] Warning: Could not import ftb_broadcast_commentary")
+    ftb_broadcast_commentary = None
+
+# Import race day module
+try:
+    from plugins import ftb_race_day
+except ImportError:
+    print("[FTB Narrator] Warning: Could not import ftb_race_day")
+    ftb_race_day = None
+
 
 # ============================================================================
 # NARRATOR TYPES
@@ -114,6 +128,15 @@ class CommentaryType(Enum):
     ROLE_REMINDER = "role_reminder"                       # What kind of team you're expected to be
     NARRATIVE_TONE = "narrative_tone"                     # Calm rebuild, scrappy fight, etc.
     NOTHING_URGENT = "nothing_urgent"                     # Explicitly okay to breathe
+    
+    # ===== BROADCAST COMMENTARY (NEW) =====
+    BROADCAST_RACE_START = "broadcast_race_start"         # Race start commentary
+    BROADCAST_OVERTAKE = "broadcast_overtake"             # Overtake commentary
+    BROADCAST_CRASH = "broadcast_crash"                   # Incident commentary
+    BROADCAST_DNF = "broadcast_dnf"                       # Retirement commentary
+    BROADCAST_FASTEST_LAP = "broadcast_fastest_lap"       # Fastest lap commentary
+    BROADCAST_FINAL_LAP = "broadcast_final_lap"           # Race finish commentary
+    BROADCAST_LAP_UPDATE = "broadcast_lap_update"         # Periodic lap update
     
     # ===== II. LOOKING FORWARD =====
     SCHEDULE_PREVIEW = "schedule_preview"                 # Races, development windows
@@ -809,6 +832,7 @@ class ContinuousNarrator:
         # State
         self.context = NarratorContext(player_team=player_team)
         self.running = False
+        self.suspended = False  # True during PBP mode – narrator sleeps
         self.thread = None
         self.last_segment_time = 0
         self.last_news_broadcast_time = 0  # Track Formula Z news broadcasts separately
@@ -843,8 +867,25 @@ class ContinuousNarrator:
         # Voice configuration
         self.voice_path = cfg.get("voices", {}).get("narrator", 
                                                      cfg.get("audio", {}).get("voices", {}).get("narrator"))
-        self.news_anchor_voice_path = cfg.get("voices", {}).get("news_anchor", 
-                                                                 cfg.get("audio", {}).get("voices", {}).get("news_anchor", self.voice_path))
+        
+        # Formula Z news anchor voice (with multiple fallback paths)
+        self.news_anchor_voice_path = (
+            cfg.get("audio", {}).get("voices", {}).get("formula_z_news_anchor")  # Primary
+            or cfg.get("audio", {}).get("voices", {}).get("formula_z_news")      # Alternate key
+            or cfg.get("audio", {}).get("voices", {}).get("news_anchor")         # Generic news
+            or cfg.get("voices", {}).get("formula_z_news_anchor")                # Legacy location
+            or self.voice_path  # Final fallback to narrator
+        )
+        
+        # Broadcast commentary voices (play-by-play and color commentator)
+        self.pbp_voice_path = cfg.get("voices", {}).get("play_by_play", self.voice_path)
+        self.color_voice_path = cfg.get("voices", {}).get("color_commentator", self.news_anchor_voice_path)
+        
+        # Broadcast commentary generator
+        self.broadcast_generator = None
+        if ftb_broadcast_commentary:
+            # Will be initialized when we know league tier
+            self.broadcast_generator_tier = None
         
         # LLM model
         self.model_name = cfg.get("models", {}).get("narrator", "qwen3:8b")
@@ -1090,8 +1131,13 @@ class ContinuousNarrator:
         
         while self.running:
             try:
-                # Increment tick counter for cooldown calculations
-                self.context.current_tick += 1
+                # ---- PBP suspension gate ----
+                if self.suspended:
+                    time.sleep(1.0)
+                    continue
+                
+                # TICK ALIGNMENT: Sync narrator tick with game simulation tick
+                self._sync_current_tick()
                 
                 # Reset hourly counter
                 if time.time() - self.hour_start_time > 3600:
@@ -1130,17 +1176,43 @@ class ContinuousNarrator:
                 should_speak, commentary_type = self._should_generate_commentary(observations)
                 
                 if should_speak:
+                    # ---- Re-check suspension BEFORE expensive LLM call ----
+                    if self.suspended:
+                        self.log("ftb_narrator", "Suspended before LLM call – skipping")
+                        continue
+
                     # Generate commentary
                     segment_text = self._generate_commentary(observations, commentary_type)
                     
+                    # ---- Re-check suspension AFTER LLM call (may have taken 10-30s) ----
+                    if self.suspended:
+                        self.log("ftb_narrator", "Suspended after LLM call – discarding generated text")
+                        self.burst_sequence = []
+                        self.in_burst_mode = False
+                        continue
+
                     if segment_text:
                         # CONTINUITY-FIRST: Validate and enforce continuity
                         validated_text = self._validate_and_enforce_continuity(segment_text, commentary_type, observations)
                         
+                        # ---- Re-check suspension AFTER validation (more LLM calls) ----
+                        if self.suspended:
+                            self.log("ftb_narrator", "Suspended after validation – discarding")
+                            self.burst_sequence = []
+                            self.in_burst_mode = False
+                            continue
+
                         if validated_text:
                             # CONTINUITY-FIRST: Trigger burst mode (rapid multi-part delivery)
                             self._trigger_burst_mode(validated_text, commentary_type, observations)
                             
+                            # ---- Final suspension gate before enqueue ----
+                            if self.suspended:
+                                self.log("ftb_narrator", "Suspended before enqueue – discarding burst")
+                                self.burst_sequence = []
+                                self.in_burst_mode = False
+                                continue
+
                             # Enqueue burst sequence or single segment
                             if self.burst_sequence:
                                 self._enqueue_burst_sequence()
@@ -1188,6 +1260,9 @@ class ContinuousNarrator:
                             self.log("ftb_narrator", f"News broadcast rejected (hallucinations detected): {violations}")
                             # Still update last broadcast time to avoid spam retries
                             self.last_news_broadcast_time = time.time()
+                
+                # Check for live race broadcast commentary
+                self._check_live_race_broadcast()
                 
                 # Random sleep for natural pacing (reduced for omnipresent narrator)
                 sleep_duration = random.uniform(2, 5)  # Changed from self.cadence_range (10-20)
@@ -1380,6 +1455,28 @@ class ContinuousNarrator:
             world_events=world_events
         )
     
+    def _sync_current_tick(self):
+        """TICK ALIGNMENT: Sync narrator's tick counter with game simulation tick from database"""
+        if not ftb_state_db or not self.db_path:
+            # Fallback: increment manually if DB unavailable
+            self.context.current_tick += 1
+            return
+        
+        try:
+            game_state = ftb_state_db.query_game_state(self.db_path)
+            if game_state:
+                db_tick = game_state.get("tick", 0)
+                if db_tick != self.context.current_tick:
+                    old_tick = self.context.current_tick
+                    self.context.current_tick = db_tick
+                    # Log only on significant jumps (batch mode or startup)
+                    if abs(db_tick - old_tick) > 1:
+                        self.log("ftb_narrator", f"Tick sync: {old_tick} -> {db_tick} (jump of {db_tick - old_tick})")
+        except Exception as e:
+            self.log("ftb_narrator", f"Error syncing tick: {e}")
+            # Fallback: increment manually on error
+            self.context.current_tick += 1
+    
     def _update_player_context(self):
         """Update narrator's understanding of current player state from DB"""
         if not ftb_state_db or not self.db_path:
@@ -1409,8 +1506,12 @@ class ContinuousNarrator:
             self.log("ftb_narrator", f"Error updating player context: {e}")
     
     def _purge_old_events(self, current_day: int):
-        """Ruthlessly purge events older than 2 days from queue"""
-        if not ftb_state_db or not self.db_path or current_day == 0:
+        """TICK ALIGNMENT: Ruthlessly purge events older than 10 ticks from queue"""
+        if not ftb_state_db or not self.db_path:
+            return 0
+        
+        current_tick = self.context.current_tick
+        if current_tick == 0:
             return 0
         
         try:
@@ -1418,11 +1519,11 @@ class ContinuousNarrator:
             with ftb_state_db.get_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                # Count events to be purged
+                # Count events to be purged (>10 ticks old)
                 cursor.execute("""
                     SELECT COUNT(*) FROM events_buffer 
-                    WHERE emitted_to_narrator = 0 AND game_day < ?
-                """, (current_day - 2,))
+                    WHERE emitted_to_narrator = 0 AND tick < ?
+                """, (current_tick - 10,))
                 old_count = cursor.fetchone()[0]
                 
                 if old_count > 0:
@@ -1430,11 +1531,11 @@ class ContinuousNarrator:
                     cursor.execute("""
                         UPDATE events_buffer 
                         SET emitted_to_narrator = 1 
-                        WHERE emitted_to_narrator = 0 AND game_day < ?
-                    """, (current_day - 2,))
+                        WHERE emitted_to_narrator = 0 AND tick < ?
+                    """, (current_tick - 10,))
                     
                     conn.commit()
-                    self.log("ftb_narrator", f"Purged {old_count} events older than 2 days (current day: {current_day})")
+                    self.log("ftb_narrator", f"Purged {old_count} events older than 10 ticks (current tick: {current_tick})")
                     return old_count
             
             return 0
@@ -1495,6 +1596,36 @@ class ContinuousNarrator:
         
         # Get current tick for cooldown calculations
         current_tick = self.context.current_tick
+        
+        # RECENCY BOOST: Check for very recent high-priority events (especially race results)
+        has_fresh_race_result = False
+        if observations.high_priority_events:
+            for event in observations.high_priority_events:
+                event_data = event.get('data', {})
+                event_tick = event.get('tick', 0)
+                tick_age = current_tick - event_tick
+                
+                # Race result within 3 ticks gets massive boost
+                if event_data.get('category') in ['race_result', 'race_finish'] and tick_age <= 3:
+                    has_fresh_race_result = True
+                    self.log("ftb_narrator", f"RACE RESULT DOMINANCE: race_result at tick {event_tick} (age: {tick_age}) triggers focused coverage")
+                    break
+        
+        # RACE RESULT DOMINANCE: Force race-specific segment types if fresh result exists
+        if has_fresh_race_result:
+            race_segments = [
+                CommentaryType.POST_RACE_COOLDOWN,
+                CommentaryType.RACE_ATMOSPHERE,
+                CommentaryType.DRIVER_SPOTLIGHT,  # Focus on driver performance
+                CommentaryType.DRIVER_TRAJECTORY,  # How driver/team trend looks
+                CommentaryType.RECAP,  # Race recap
+                CommentaryType.MOMENTUM_CHECK,  # Post-race momentum assessment
+            ]
+            
+            # All these types exist, pick one randomly
+            chosen = random.choice(race_segments)
+            self.log("ftb_narrator", f"Race result dominance: forcing {chosen.value}")
+            return chosen
         
         # Check if urgent event mode is active
         if self.context.urgent_event_pending and self.context.event_theme:
@@ -1710,6 +1841,11 @@ class ContinuousNarrator:
                 timeout=30  # Increased timeout for narrator (runs async)
             )
             
+            # ---- Bail out immediately if suspended during LLM call ----
+            if self.suspended:
+                self.log("ftb_narrator", "Suspended during LLM call – discarding response")
+                return None
+            
             # Extract text
             if isinstance(response, dict):
                 text = response.get("response", "") or response.get("text", "")
@@ -1833,16 +1969,26 @@ Morale: {self.context.player_morale:.1f}/100 | Reputation: {self.context.player_
         if self.context.active_tab:
             context_str += f"\nCurrent View: {self.context.active_tab} tab\n"
         
-        # Add recent events (show more for batch mode)
+        # RECENCY BOOST: Apply multipliers and sort by boosted priority
         events_str = ""
         if observations.has_significant_events():
             event_limit = 15 if is_batch else 5  # More events for batch summaries
+            
+            # Apply recency boost to get freshest events first
+            boosted_events = self._apply_recency_boost_to_events(observations.player_team_events)
+            boosted_events.sort(key=lambda e: e.get('priority', 50.0), reverse=True)
+            
             events_str = f"\nRECENT EVENTS{' (BATCH)' if is_batch else ''}:\n"
-            for event in observations.player_team_events[:event_limit]:
+            for event in boosted_events[:event_limit]:
                 category = event.get('category', 'event')
                 data = event.get('data', {})
                 summary = data.get('summary', data.get('reason', 'Event occurred'))
-                events_str += f"- {category}: {summary}\n"
+                
+                # Show recency indicator for debugging
+                multiplier = event.get('_recency_multiplier', 1.0)
+                freshness_marker = "🔥" if multiplier >= 1.5 else "⚡" if multiplier > 1.0 else ""
+                
+                events_str += f"- {freshness_marker}{category}: {summary}\n"
         
         # Add tab-specific data and instructions
         tab_specific_context = ""
@@ -2328,6 +2474,10 @@ Reply with ONLY the news update text."""
         TRUTH-FIRST: Reject any hallucinations or invented facts.
         Regenerate if needed.
         """
+        # ---- Bail immediately if suspended ----
+        if self.suspended:
+            return None
+        
         # Import narrative prompts
         try:
             from plugins import ftb_narrative_prompts
@@ -2750,14 +2900,68 @@ OUTPUT ONLY THE REWRITTEN NARRATION—no explanations, no meta-commentary.
         
         return facts
     
+    def _calculate_event_recency_multiplier(self, event: dict) -> float:
+        """
+        RECENCY BOOST: Calculate priority multiplier based on event tick age
+        
+        Multipliers:
+        - tick_age = 0 (this tick): 2.0x
+        - tick_age ≤ 2: 1.5x
+        - tick_age ≤ 5: 1.2x
+        - tick_age ≤ 10: 1.0x (baseline)
+        - tick_age > 10: 0.5x (should be purged, but handle gracefully)
+        """
+        event_tick = event.get('tick', 0)
+        current_tick = self.context.current_tick
+        tick_age = current_tick - event_tick
+        
+        if tick_age == 0:
+            return 2.0
+        elif tick_age <= 2:
+            return 1.5
+        elif tick_age <= 5:
+            return 1.2
+        elif tick_age <= 10:
+            return 1.0
+        else:
+            return 0.5  # Stale event
+    
+    def _apply_recency_boost_to_events(self, events: List[dict]) -> List[dict]:
+        """Apply recency multipliers to event priorities (creates augmented copies)"""
+        boosted_events = []
+        
+        for event in events:
+            # Create shallow copy to avoid mutating original
+            boosted = event.copy()
+            
+            # Calculate recency multiplier
+            multiplier = self._calculate_event_recency_multiplier(event)
+            
+            # Apply to priority
+            base_priority = event.get('priority', 50.0)
+            boosted['priority'] = base_priority * multiplier
+            boosted['_recency_multiplier'] = multiplier  # Track for debugging
+            
+            boosted_events.append(boosted)
+        
+        return boosted_events
+    
     def _build_context_dict(self, observations: EventObservation) -> dict:
         """Build context dictionary for narrative prompts"""
+        # RECENCY BOOST: Apply multipliers to all events before building context
+        high_priority_boosted = self._apply_recency_boost_to_events(observations.high_priority_events)
+        player_team_boosted = self._apply_recency_boost_to_events(observations.player_team_events)
+        
+        # Sort by boosted priority to get freshest/most important events first
+        high_priority_boosted.sort(key=lambda e: e.get('priority', 50.0), reverse=True)
+        player_team_boosted.sort(key=lambda e: e.get('priority', 50.0), reverse=True)
+        
         newest_event = ""
-        if observations.high_priority_events:
-            evt = observations.high_priority_events[0]
+        if high_priority_boosted:
+            evt = high_priority_boosted[0]
             newest_event = evt.get('event_type', '') + ": " + str(evt.get('data', {}))
-        elif observations.player_team_events:
-            evt = observations.player_team_events[0]
+        elif player_team_boosted:
+            evt = player_team_boosted[0]
             newest_event = evt.get('event_type', '') + ": " + str(evt.get('data', {}))
         
         # CALENDAR INTEGRATION: Query upcoming events for time-aware commentary
@@ -2992,6 +3196,10 @@ Recent event: {ctx['newest_event']}
         self.in_burst_mode = True
         self.burst_sequence = [(primary_text, 85.0, commentary_type)]  # Primary segment at base priority
         
+        # ---- Don't generate follow-ups if already suspended ----
+        if self.suspended:
+            return
+        
         # Decide if we should generate follow-ups (every 3rd generation, or high-priority events)
         should_burst = (
             len(observations.high_priority_events) > 0 or
@@ -3005,6 +3213,11 @@ Recent event: {ctx['newest_event']}
         num_follow_ups = random.randint(1, 2)
         
         for i in range(num_follow_ups):
+            # ---- Check suspension before each follow-up LLM call ----
+            if self.suspended:
+                self.log("ftb_narrator", f"Burst generation aborted (suspended) after {i} follow-ups")
+                break
+
             try:
                 # Build context for follow-up
                 ctx = self._build_context_dict(observations)
@@ -3023,6 +3236,11 @@ Recent event: {ctx['newest_event']}
                     temperature=0.75,
                     timeout=30
                 )
+                
+                # ---- Check suspension after LLM call returns ----
+                if self.suspended:
+                    self.log("ftb_narrator", f"Burst follow-up {i+1} discarded (suspended after LLM)")
+                    break
                 
                 if isinstance(response, dict):
                     follow_up_text = response.get("response", "") or response.get("text", "")
@@ -3057,6 +3275,13 @@ Recent event: {ctx['newest_event']}
         if not self.burst_sequence:
             return
         
+        # ---- HARD GATE: discard burst if suspended during generation ----
+        if self.suspended:
+            self.log("ftb_narrator", f"BLOCKED burst enqueue of {len(self.burst_sequence)} segments (suspended/PBP)")
+            self.burst_sequence = []
+            self.in_burst_mode = False
+            return
+        
         self.log("ftb_narrator", f"Enqueueing burst sequence of {len(self.burst_sequence)} segments")
         
         for text, priority, commentary_type in self.burst_sequence:
@@ -3073,6 +3298,11 @@ Recent event: {ctx['newest_event']}
     
     def _enqueue_audio_with_priority(self, text: str, commentary_type: CommentaryType, priority: float = 85.0):
         """Enqueue commentary with custom priority"""
+        # ---- HARD GATE: never enqueue while suspended (PBP mode) ----
+        if self.suspended:
+            self.log("ftb_narrator", f"BLOCKED enqueue (suspended/PBP): {commentary_type.value}")
+            return
+
         if not self.db_enqueue or not self.db_connect or not self.voice_path:
             self.log("ftb_narrator", f"Would speak ({commentary_type.value}): {text}")
             return
@@ -3089,14 +3319,20 @@ Recent event: {ctx['newest_event']}
             
             # News broadcasts use different voice and newsflash sound effect
             if commentary_type == CommentaryType.FORMULA_Z_NEWS:
+                # Use dedicated Formula Z news anchor voice with proper fallback chain
                 news_voice_path = (
-                    self.cfg.get("voices", {}).get("formula_z_news")
+                    self.cfg.get("audio", {}).get("voices", {}).get("formula_z_news_anchor")
                     or self.cfg.get("audio", {}).get("voices", {}).get("formula_z_news")
+                    or self.cfg.get("audio", {}).get("voices", {}).get("news_anchor")
+                    or self.cfg.get("voices", {}).get("formula_z_news_anchor")
                     or self.news_anchor_voice_path
-                    or self.voice_path
+                    or self.voice_path  # Final fallback to narrator voice
                 )
                 voice_path = news_voice_path
                 voice_name = "formula_z_news"
+                
+                self.log("ftb_narrator", f"Formula Z news using voice: {voice_path} (via {voice_name})")
+                
                 # Add newsflash sound effect (relative to station directory)
                 station_dir = self.runtime.get('STATION_DIR', '.')
                 newsflash_sfx = os.path.join(station_dir, 'audio', 'ui', 'newsflash.wav')
@@ -3151,6 +3387,251 @@ Recent event: {ctx['newest_event']}
             self.log("ftb_narrator", f"Error enqueueing audio: {e}")
             import traceback
             traceback.print_exc()
+    
+    
+    def _check_live_race_broadcast(self):
+        """
+        Check if live race is streaming and generate broadcast commentary.
+        This runs on a separate cadence from regular narrator commentary.
+        """
+        if not ftb_race_day or not ftb_broadcast_commentary:
+            return
+        
+        try:
+            # Get game state from DB
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if there's an active live race
+            cursor.execute("""
+                SELECT value FROM game_state 
+                WHERE key = 'race_day_phase' AND game_id = ?
+            """, (self.game_id,))
+            phase_row = cursor.fetchone()
+            
+            if not phase_row:
+                conn.close()
+                return
+            
+            phase_str = phase_row[0]
+            
+            # Check if we're in RACE_RUNNING phase
+            if 'RACE_RUNNING' not in phase_str:
+                conn.close()
+                return
+            
+            # Get current lap and recent events
+            cursor.execute("""
+                SELECT value FROM game_state 
+                WHERE key = 'race_day_current_lap' AND game_id = ?
+            """, (self.game_id,))
+            lap_row = cursor.fetchone()
+            current_lap = int(lap_row[0]) if lap_row else 0
+            
+            cursor.execute("""
+                SELECT value FROM game_state 
+                WHERE key = 'race_day_total_laps' AND game_id = ?
+            """, (self.game_id,))
+            total_lap_row = cursor.fetchone()
+            total_laps = int(total_lap_row[0]) if total_lap_row else 0
+            
+            # Get league tier for audio params
+            cursor.execute("""
+                SELECT value FROM game_state 
+                WHERE key = 'player_league_tier' AND game_id = ?
+            """, (self.game_id,))
+            tier_row = cursor.fetchone()
+            league_tier = int(tier_row[0]) if tier_row else 3
+            
+            conn.close()
+            
+            # Initialize broadcast generator if needed
+            if not self.broadcast_generator or self.broadcast_generator_tier != league_tier:
+                self.broadcast_generator = ftb_broadcast_commentary.BroadcastCommentaryGenerator(
+                    league_tier=league_tier,
+                    player_team_name=self.player_team
+                )
+                self.broadcast_generator_tier = league_tier
+                self.log("ftb_narrator", f"Initialized broadcast generator for tier {league_tier}")
+            
+            # Check for new events to commentate on
+            self._generate_broadcast_commentary_for_lap(current_lap, total_laps)
+            
+        except Exception as e:
+            self.log("ftb_narrator", f"Error checking live race broadcast: {e}")
+    
+    def _generate_broadcast_commentary_for_lap(self, current_lap: int, total_laps: int):
+        """
+        Generate broadcast commentary for the current lap.
+        Reads race events from DB and generates appropriate commentary.
+        """
+        if not self.broadcast_generator:
+            return
+        
+        try:
+            # Track last commentated lap to avoid repeats
+            if not hasattr(self, '_last_broadcast_lap'):
+                self._last_broadcast_lap = 0
+            
+            # Only commentate if lap advanced
+            if current_lap <= self._last_broadcast_lap:
+                return
+            
+            self._last_broadcast_lap = current_lap
+            
+            # Get race events for this lap from DB
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT event_type, data FROM sim_events
+                WHERE category IN ('overtake', 'crash', 'mechanical_dnf', 'fastest_lap')
+                AND json_extract(data, '$.lap_number') = ?
+                AND game_id = ?
+                ORDER BY event_id DESC
+                LIMIT 10
+            """, (current_lap, self.game_id))
+            
+            events = cursor.fetchall()
+            conn.close()
+            
+            # Generate commentary for each event
+            commentary_lines = []
+            
+            for event_type, data_json in events:
+                import json
+                data = json.loads(data_json) if data_json else {}
+                
+                if event_type == 'overtake':
+                    driver = data.get('driver', 'Unknown')
+                    position = data.get('position', 0)
+                    is_player = data.get('team', '') == self.player_team
+                    lines = self.broadcast_generator.generate_overtake_commentary(driver, position, current_lap, is_player)
+                    commentary_lines.extend(lines)
+                
+                elif event_type == 'crash':
+                    driver = data.get('driver', 'Unknown')
+                    team = data.get('team', 'Unknown')
+                    is_player = team == self.player_team
+                    lines = self.broadcast_generator.generate_crash_commentary(driver, team, current_lap, is_player)
+                    commentary_lines.extend(lines)
+                
+                elif event_type == 'mechanical_dnf':
+                    driver = data.get('driver', 'Unknown')
+                    team = data.get('team', 'Unknown')
+                    is_player = team == self.player_team
+                    lines = self.broadcast_generator.generate_dnf_commentary(driver, team, current_lap, is_player)
+                    commentary_lines.extend(lines)
+                
+                elif event_type == 'fastest_lap':
+                    driver = data.get('driver', 'Unknown')
+                    lap_time = data.get('lap_time', 0.0)
+                    is_player = data.get('team', '') == self.player_team
+                    # Generate fastest lap commentary (simplified)
+                    if is_player:
+                        text = f"And {driver} sets the fastest lap of the race so far! That's {lap_time:.3f} seconds."
+                        commentary_lines.append(ftb_broadcast_commentary.CommentaryLine('pbp', text, 'normal', 90))
+            
+            # Lap 1 special commentary
+            if current_lap == 1:
+                lights_out = self.broadcast_generator.generate_lights_out_commentary()
+                commentary_lines = lights_out + commentary_lines
+            
+            # Final lap commentary
+            if current_lap == total_laps:
+                # Get leader from standings
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT value FROM game_state 
+                    WHERE key = 'race_day_standings_p1' AND game_id = ?
+                """, (self.game_id,))
+                leader_row = cursor.fetchone()
+                conn.close()
+                
+                if leader_row:
+                    import json
+                    leader_data = json.loads(leader_row[0])
+                    leader = leader_data.get('driver', 'Unknown')
+                    team = leader_data.get('team', '')
+                    is_player_leading = team == self.player_team
+                    
+                    final_lap = self.broadcast_generator.generate_final_lap_commentary(leader, team, is_player_leading)
+                    commentary_lines.extend(final_lap)
+            
+            # Periodic lap updates (every 5 laps)
+            elif current_lap % 5 == 0:
+                # Get leader and gap
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT value FROM game_state 
+                    WHERE key = 'race_day_standings_p1' AND game_id = ?
+                """, (self.game_id,))
+                leader_row = cursor.fetchone()
+                conn.close()
+                
+                if leader_row:
+                    import json
+                    leader_data = json.loads(leader_row[0])
+                    leader = leader_data.get('driver', 'Unknown')
+                    gap = leader_data.get('gap', 0.0)
+                    
+                    lap_update = self.broadcast_generator.generate_lap_update(current_lap, total_laps, leader, gap)
+                    commentary_lines.extend(lap_update)
+            
+            # Enqueue commentary lines with appropriate voices
+            for line in commentary_lines:
+                # Determine voice based on speaker
+                if line.speaker == 'pbp':
+                    voice = self.pbp_voice_path
+                    commentary_type = CommentaryType.BROADCAST_RACE_START
+                else:  # color commentator
+                    voice = self.color_voice_path
+                    commentary_type = CommentaryType.BROADCAST_OVERTAKE
+                
+                # Enqueue with broadcast-specific handling
+                self._enqueue_broadcast_audio(line.text, commentary_type, voice, line.priority)
+            
+        except Exception as e:
+            self.log("ftb_narrator", f"Error generating broadcast commentary: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _enqueue_broadcast_audio(self, text: str, commentary_type: CommentaryType, voice_path: str, priority: float = 90.0):
+        """
+        Enqueue broadcast commentary with special handling.
+        Uses tier-based audio filtering and higher priority.
+        """
+        if not self.db_enqueue or not text:
+            return
+        
+        try:
+            # Get audio params for current tier
+            tier = self.broadcast_generator_tier if hasattr(self, 'broadcast_generator_tier') else 3
+            audio_params = ftb_race_day.get_broadcast_audio_params(tier) if ftb_race_day else {}
+            
+            # Build segment metadata with broadcast-specific params
+            metadata = {
+                'voice': voice_path or self.voice_path,
+                'priority': priority,
+                'type': 'broadcast',
+                'tier': tier,
+                'audio_filter': audio_params.get('filter', 'broadcast_hq'),
+                'gain': audio_params.get('gain', 1.0),
+                'clarity': audio_params.get('voice_clarity', 1.0)
+            }
+            
+            # Enqueue through runtime
+            self.db_enqueue(
+                text=text,
+                metadata=metadata
+            )
+            
+            self.log("ftb_narrator", f"[BROADCAST] Enqueued: {text[:60]}...")
+            
+        except Exception as e:
+            self.log("ftb_narrator", f"Error enqueuing broadcast audio: {e}")
     
     def _enqueue_audio(self, text: str, commentary_type: CommentaryType):
         """Enqueue commentary to audio system (delegates to priority version)"""

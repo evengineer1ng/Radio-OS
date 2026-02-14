@@ -530,6 +530,7 @@ def duck_external_audio(app_hint: str, level: float, log_fn=None) -> bool:
 # =======================
 
 SHOW_INTERRUPT = threading.Event()
+PBP_ACTIVE = threading.Event()  # Set during live race PBP – blocks narrator from TTS/host pipeline
 WIDGETS = None  # Will be initialized after WidgetRegistry class definition
 STATION_MEMORY: Dict[str, Any] = {}  # Will be set in main()
 
@@ -958,6 +959,10 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None, runtime_stu
             "event_q": event_q,
             "MUSIC_STATE": MUSIC_STATE,  # ✅ add this too (see next section)
             "SHOW_INTERRUPT": SHOW_INTERRUPT,  # ✅ for graceful voice interruption
+            "PBP_ACTIVE": PBP_ACTIVE,  # ✅ blocks narrator in TTS/host pipeline during races
+            "audio_queue": audio_queue,  # ✅ for draining pre-rendered audio on race start
+            "db_connect": db_connect,  # ✅ for flushing queued DB segments
+            "db_enqueue_segment": db_enqueue_segment,  # ✅ for PBP broadcast commentary
         }
 
     for path in glob.glob(os.path.join(plugin_dir, "*.py")):
@@ -966,6 +971,7 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None, runtime_stu
         try:
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod  # Register in sys.modules so other plugins can find it
             spec.loader.exec_module(mod)
 
             # Feed worker
@@ -4881,6 +4887,15 @@ class StationUI:
                         self._dispatch_widget_update(wk, data)
 
                 # -----------------
+                # Activate a widget tab (bring it to front)
+                # -----------------
+                elif evt == "activate_widget_tab":
+                    if isinstance(payload, dict):
+                        wk = (payload.get("widget_key") or "").strip().lower()
+                        if wk:
+                            self._activate_widget_tab(wk)
+
+                # -----------------
                 # Unknown event
                 # -----------------
                 else:
@@ -4964,6 +4979,40 @@ class StationUI:
                         inst.on_update(data)
                 except Exception:
                     pass
+
+    def _activate_widget_tab(self, widget_key: str):
+        """Bring the specified widget tab to front in whichever panel contains it.
+        Also restores the floating window if it's minimized."""
+        widget_key = widget_key.strip().lower()
+        # Search all panels for the widget
+        for panel in (self.panel_left, self.panel_center, self.panel_right):
+            tab_ids = panel._widget_tabs.get(widget_key)
+            if tab_ids:
+                try:
+                    panel.nb.select(tab_ids[0])
+                    print(f"[UI] Activated widget tab '{widget_key}' in panel '{panel.name}'")
+                except Exception as e:
+                    print(f"[UI] Failed to activate tab '{widget_key}': {e}")
+                return
+        # Search floating windows
+        if hasattr(self, 'floating_windows'):
+            for win_id, floating_win in self.floating_windows.items():
+                wp = self.widget_panels.get(win_id)
+                if wp:
+                    tab_ids = wp._widget_tabs.get(widget_key)
+                    if tab_ids:
+                        try:
+                            wp.nb.select(tab_ids[0])
+                            # Restore window if minimized
+                            if floating_win.is_minimized:
+                                floating_win.restore()
+                            floating_win.frame.lift()
+                            print(f"[UI] Activated widget tab '{widget_key}' in floating window '{win_id}'")
+                        except Exception as e:
+                            print(f"[UI] Failed to activate tab '{widget_key}' in floating window: {e}")
+                        return
+        print(f"[UI] Widget tab '{widget_key}' not found in any panel")
+
     def _layout_path(self) -> str:
         """Deprecated - layouts now stored in manifest."""
         return os.path.join(STATION_DIR, "ui_layout.json")
@@ -7476,6 +7525,19 @@ def tts_worker(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                     break
 
                 # -------------------------
+                # PBP mode: reject narrator segments
+                # -------------------------
+                if PBP_ACTIVE.is_set():
+                    seg_source = (seg.get("source") or "feed").lower()
+                    if seg_source == "narrator":
+                        log("tts", f"PBP_ACTIVE – discarding narrator segment")
+                        try:
+                            db_mark_done(conn, seg["id"])
+                        except Exception:
+                            pass
+                        continue
+
+                # -------------------------
                 # Rejection filter
                 # -------------------------
                 is_rejected, reject_reason = check_segment_rejection(seg)
@@ -7776,6 +7838,11 @@ def host_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
             src = (segmeta.get("source") or "feed").strip().lower()
             etype = (segmeta.get("event_type") or "").strip().lower()
             title = (segmeta.get("title") or "")[:80]
+
+            # ---- PBP mode: drop narrator audio items silently ----
+            if PBP_ACTIVE.is_set() and src == "narrator":
+                log("host", f"PBP_ACTIVE – dropping narrator audio item (already rendered)")
+                continue
 
             log("host", f"Playing bundle lines={len(bundle)} src={src} type={etype} title={title}")
 
@@ -8912,7 +8979,31 @@ def main():
         "tk": tk,
         "MUSIC_STATE": MUSIC_STATE,
         "SHOW_INTERRUPT": SHOW_INTERRUPT,
+        "PBP_ACTIVE": PBP_ACTIVE,
+        "audio_queue": audio_queue,
+        "db_connect": db_connect,
+        "db_enqueue_segment": db_enqueue_segment,
     }
+    
+    # ------------------
+    # Flush stale queued audio from previous session
+    # ------------------
+    # If the station was quit mid-race (or mid-show), queued segments
+    # survive in the DB.  Kill them NOW so the PBP guy doesn't start
+    # reading last race's commentary on launch.
+    try:
+        _boot_conn = db_connect()
+        _boot_flushed = _boot_conn.execute(
+            "UPDATE segments SET status='done' WHERE status='queued'"
+        ).rowcount
+        _boot_conn.commit()
+        _boot_conn.close()
+        if _boot_flushed:
+            log("init", f"🧹 Flushed {_boot_flushed} stale queued audio segments from previous session")
+        else:
+            log("init", "✅ Audio queue clean — no stale segments from previous session")
+    except Exception as _boot_flush_err:
+        log("init", f"⚠️  Could not flush stale audio on boot: {_boot_flush_err}")
     
     # ------------------
     # Load Meta Plugins FIRST
@@ -9016,6 +9107,7 @@ def main():
         "LIVE_ROLES": LIVE_ROLES,
         "MUSIC_STATE": MUSIC_STATE,
         "SHOW_INTERRUPT": SHOW_INTERRUPT,
+        "PBP_ACTIVE": PBP_ACTIVE,
         "producer_kick": producer_kick,
         # LLM Services
         "llm_generate": llm_generate,
@@ -9119,6 +9211,7 @@ def main():
             "music_cmd_q": music_cmd_q, # dedicated music command channel
             "MUSIC_STATE": MUSIC_STATE,
             "SHOW_INTERRUPT": SHOW_INTERRUPT,  # for graceful voice interruption
+            "PBP_ACTIVE": PBP_ACTIVE,  # blocks narrator in TTS/host pipeline during races
             "audio_queue_size": lambda: audio_queue.qsize(),
 
             "log": log,
@@ -9152,24 +9245,42 @@ def main():
         }
 
         try:
+            # Inspect the function signature to call with correct args
+            import inspect
+            sig = inspect.signature(worker)
+            param_count = len(sig.parameters)
+            
             # Prefer the new 4-arg calling convention:
             #   worker(stop_event, mem, payload, runtime)
+            if param_count >= 4:
+                worker(stop_event, mem, payload, runtime)
+                return
+            
+            # Back-compat 3-arg:
+            #   worker(stop_event, mem, payload)
+            # or worker(stop_event, mem, runtime)
+            # Try to detect which by parameter names
+            param_names = list(sig.parameters.keys())
+            if param_count == 3:
+                if 'runtime' in param_names:
+                    worker(stop_event, mem, runtime)
+                else:
+                    worker(stop_event, mem, payload)
+                return
+            
+            # Fallback: try 4-arg first, then 3-arg versions
             try:
                 worker(stop_event, mem, payload, runtime)
                 return
             except TypeError:
                 pass
-
-            # Back-compat 3-arg:
-            #   worker(stop_event, mem, payload)
+            
             try:
                 worker(stop_event, mem, payload)
                 return
             except TypeError:
                 pass
-
-            # Rare alt:
-            #   worker(stop_event, mem, runtime)
+            
             worker(stop_event, mem, runtime)
 
         except Exception as e:

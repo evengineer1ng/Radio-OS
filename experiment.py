@@ -659,6 +659,7 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None):
         try:
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod  # Register in sys.modules so other plugins can find it
             spec.loader.exec_module(mod)
 
             # Feed worker

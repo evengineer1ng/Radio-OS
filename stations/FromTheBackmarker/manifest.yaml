@@ -112,12 +112,10 @@ audio:
     budget: 0.15
   voices:
     host: am_adam
-    narrator: bm_fable
-    formula_z_news_anchor: bf_alice
-voices:
-  host: am_adam
-  narrator: bm_lewis
-  formula_z_news_anchor: bf_alice
+    narrator: bm_lewis
+    formula_z_news_anchor: bf_emma
+    formula_z_news: bf_emma
+    news_anchor: bf_emma
 feeds:
   bluesky:
     enabled: false
@@ -150,9 +148,9 @@ feeds:
   flows:
     enabled: false
   ftb_components:
-    enabled: false
+    enabled: true
   ftb_names:
-    enabled: false
+    enabled: true
   ftb_state_db:
     enabled: true
   ftb_audio_engine:
@@ -309,8 +307,8 @@ ui_layout:
       geometry:
         x: 0
         y: 0
-        width: 1491
-        height: 695
+        width: 1493
+        height: 812
       is_minimized: false
       active_tab: null
       tabs: []
@@ -337,12 +335,16 @@ ui_layout:
   panes:
     left:
       tabs:
-      - widget_key: ftb_game
-        title: ftb_game
+      - widget_key: ftb_pbp
+        title: ftb_pbp
+      - widget_key: ftb_data_explorer
+        title: Data Explorer
       - widget_key: ftb_calendar
         title: 📅 Calendar
       - widget_key: transcript
         title: Transcript
+      - widget_key: ftb_game
+        title: ftb_game
     center:
       tabs:
       - widget_key: segment_body

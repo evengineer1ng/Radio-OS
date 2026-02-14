@@ -1,0 +1,532 @@
+"""
+FTB Broadcast Commentary Generator
+
+Generates play-by-play and color commentary for races.
+Two-voice broadcast crew system (not the narrator).
+
+Voice assignments:
+- Play-by-play: Energetic lap-by-lap calls
+- Color: Analysis, driver insights, strategy talk
+"""
+
+from typing import Any, Dict, List, Optional, Tuple, Set
+from dataclasses import dataclass
+import random
+
+
+@dataclass
+class CommentaryLine:
+    """A single commentary line from broadcast crew"""
+    speaker: str  # 'pbp' or 'color'
+    text: str
+    timing: str  # 'pre_lap', 'during_lap', 'post_lap', 'incident'
+    priority: int  # Higher = more important
+
+
+@dataclass
+class RaceContext:
+    """Track the context and storylines of the race"""
+    lap_number: int = 0
+    total_laps: int = 0
+    recent_incidents: List[str] = None
+    battle_zones: List[Tuple[int, int]] = None  # Position ranges with close battles
+    momentum_shifts: Dict[str, int] = None  # Driver name -> momentum (+/- integer)
+    championship_implications: Dict[str, str] = None  # Driver -> context string
+    weather_changing: bool = False
+    safety_car_active: bool = False
+    used_phrases: Set[str] = None  # Track what we've said recently
+    
+    def __post_init__(self):
+        if self.recent_incidents is None:
+            self.recent_incidents = []
+        if self.battle_zones is None:
+            self.battle_zones = []
+        if self.momentum_shifts is None:
+            self.momentum_shifts = {}
+        if self.championship_implications is None:
+            self.championship_implications = {}
+        if self.used_phrases is None:
+            self.used_phrases = set()
+
+
+class BroadcastCommentaryGenerator:
+    """Generates commentary for race events"""
+    
+    def __init__(self, league_tier: int, player_team_name: str):
+        self.league_tier = league_tier
+        self.player_team = player_team_name
+        self.commentary_style = self._get_style_for_tier(league_tier)
+        self.race_context = RaceContext()
+        
+        # Commentator personalities (randomized per race)
+        self.pbp_personality = random.choice(['enthusiastic', 'measured', 'dramatic', 'technical'])
+        self.color_personality = random.choice(['analytical', 'folksy', 'tactical', 'driver_focused'])
+        
+        # Template pools for varied generation
+        self._init_commentary_templates()
+    
+    def _init_commentary_templates(self):
+        """Initialize varied commentary template pools"""
+        
+        # Pre-race openings with personality variations
+        self.pre_race_opens = {
+            'grassroots': [
+                "Alright folks, we're live from {track}. Grid is set, engines are warming up.",
+                "Good {time_of_day} everyone! We're here at {track}, ready to go racing.",
+                "Welcome to {track}! The drivers are on the grid, and we're almost ready.",
+                "Here we are at {track}, and what a grid we've got today.",
+            ],
+            'enthusiast': [
+                "We're live from {track} and the atmosphere is electric!",
+                "Welcome to {track}! The field is assembled and ready to race.",
+                "Good {time_of_day} race fans! {track} plays host today.",
+                "{track} is the venue, and we're minutes from lights out.",
+            ],
+            'professional': [
+                "Good {time_of_day} everyone, we're at {track} and the field is ready to race.",
+                "Welcome to {track}. The grid is formed, drivers are on their marks.",
+                "From {track}, welcome to race coverage. The grid is set.",
+                "We're live at {track}. The starting procedure is underway.",
+            ],
+            'premium': [
+                "Welcome to {track}. The grid is formed, and anticipation builds.",
+                "Good {time_of_day} from {track}, where we're moments from race start.",
+                "{track} awaits. The field is assembled for what promises to be a fascinating race.",
+                "From the grid at {track}, we're ready to bring you all the action.",
+            ],
+            'world_class': [
+                "Welcome to {track}. The grid is formed, and we're moments away from lights out.",
+                "From {track}, welcome. The tension is palpable as we approach the start.",
+                "Good {time_of_day}. {track} plays host, and the field is primed for battle.",
+                "{track} sets the stage. The world's best are moments from green flag racing.",
+            ]
+        }
+        
+        # Lights out calls - personality dependent
+        self.lights_out_calls = {
+            'enthusiastic': [
+                "And it's lights out and away we go!",
+                "Green flag! Here we go racing!",
+                "They're away! Let's go!",
+                "Lights out! The race is on!",
+            ],
+            'measured': [
+                "And we're underway.",
+                "Green flag. The race begins.",
+                "Lights out, and they're racing.",
+                "The race is underway.",
+            ],
+            'dramatic': [
+                "LIGHTS OUT AND AWAY WE GO!",
+                "Green flag! The battle begins!",
+                "They're away! What drama awaits!",
+                "HERE WE GO!",
+            ],
+            'technical': [
+                "Green flag, race start initiated.",
+                "Lights out. Launch phase active.",
+                "Race start, clean getaway.",
+                "Green, they're away.",
+            ]
+        }
+        
+        # Overtake templates with context awareness
+        self.overtake_templates = {
+            'clean_pass': [
+                "{driver} {action} into P{pos}!",
+                "{driver} makes the move! P{pos} now!",
+                "Position change! {driver} up to P{pos}!",
+                "{driver} threads through to P{pos}!",
+                "Great move by {driver}, now P{pos}!",
+            ],
+            'aggressive': [
+                "{driver} {aggressive_verb} through! P{pos}!",
+                "Bold from {driver}! That's P{pos}!",
+                "{driver} doesn't hesitate! P{pos}!",
+                "Aggressive from {driver}, now P{pos}!",
+            ],
+            'player_team': [
+                "YES! {driver} makes it happen! P{pos}!",
+                "There it is! {driver} through to P{pos}!",
+                "COME ON! {driver} takes P{pos}!",
+                "Beautiful! {driver} up to P{pos}!",
+                "{driver} gets it done! P{pos}!",
+            ],
+            'late_race': [
+                "{driver} makes a crucial move to P{pos}!",
+                "Big move with {laps_remaining} to go! {driver} to P{pos}!",
+                "{driver} strikes late! P{pos} now!",
+            ]
+        }
+        
+        # Color commentary follow-ups (varied analysis)
+        self.analysis_comments = {
+            'analytical': [
+                "Look at the positioning there. {detail}.",
+                "That's all about {aspect}. Well executed.",
+                "Notice how {driver} {technique}. Professional.",
+                "The key was {factor}. Textbook stuff.",
+            ],
+            'folksy': [
+                "That's racecraft right there.",
+                "You love to see it. Good, clean racing.",
+                "That's how you get it done.",
+                "Experience showing through there.",
+            ],
+            'tactical': [
+                "Strategic thinking from {driver} there.",
+                "That move was {adjective} - sets up for {implication}.",
+                "Positioning for the next phase now.",
+                "That changes the tactical picture.",
+            ],
+            'driver_focused': [
+                "{driver} has really found {thing} today.",
+                "The confidence from {driver} is evident.",
+                "{driver}'s race pace is {adjective}.",
+                "You can see {driver} in the zone.",
+            ]
+        }
+        
+        # Incident templates (crashes, spins, etc.)
+        self.incident_templates = {
+            'player_urgent': [
+                "Oh no! {driver} is in trouble!",
+                "Problem for {driver}! Big problem!",
+                "{driver} has gone off!",
+                "Contact! {driver} caught up in it!",
+                "NO! {driver} spinning!",
+            ],
+            'other_urgent': [
+                "We've got an incident. {driver} has crashed.",
+                "{driver} into the barriers on lap {lap}!",
+                "Trouble for {driver} from {team}.",
+                "{driver} has binned it!",
+                "Big crash! {driver} involved!",
+            ],
+            'minor': [
+                "{driver} with a moment there.",
+                "Small error from {driver}, but they continue.",
+                "{driver} gets a bit sideways but gathers it up.",
+                "Lock-up for {driver}.",
+            ]
+        }
+        
+        # Dynamic action verbs
+        self.action_verbs = ['slides', 'sweeps', 'dives', 'powers', 'surges', 'slips', 'cuts']
+        self.aggressive_verbs = ['slices', 'barges', 'forces', 'muscles', 'lunges', 'sends it']
+        
+        # Descriptive adjectives
+        self.pace_adjectives = ['strong', 'impressive', 'solid', 'consistent', 'blistering', 'steady']
+        self.move_adjectives = ['calculated', 'bold', 'patient', 'opportunistic', 'clinical']
+    
+    def _select_unique_template(self, templates: List[str], category: str = 'general') -> str:
+        """Select a template and track usage to avoid repetition"""
+        # Filter out recently used phrases
+        available = [t for t in templates if t not in self.race_context.used_phrases]
+        
+        if not available:
+            # If we've exhausted all options, reset and use any
+            self.race_context.used_phrases.clear()
+            available = templates
+        
+        selected = random.choice(available)
+        self.race_context.used_phrases.add(selected)
+        
+        # Limit memory to last 20 phrases
+        if len(self.race_context.used_phrases) > 20:
+            oldest = list(self.race_context.used_phrases)[0]
+            self.race_context.used_phrases.remove(oldest)
+        
+        return selected
+    
+    def _get_time_of_day(self) -> str:
+        """Vary time of day mentions"""
+        return random.choice(['afternoon', 'morning', 'day', 'evening'])
+    
+        """Get commentary style based on league tier"""
+        styles = {
+            1: 'grassroots',     # Casual, local feel
+            2: 'enthusiast',     # Knowledgeable fans
+            3: 'professional',   # Proper broadcast
+            4: 'premium',        # High production value
+            5: 'world_class'     # F1-style coverage
+        }
+        return styles.get(tier, 'professional')
+    
+    def generate_pre_race_commentary(self, grid: List[Tuple], track_name: str) -> List[CommentaryLine]:
+        """Generate pre-race commentary based on grid positions"""
+        lines = []
+        
+        # Opening
+        if self.commentary_style == 'grassroots':
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Alright folks, we're live from {track_name}. Grid is set, engines are warming up.",
+                timing='pre_lap',
+                priority=10
+            ))
+        elif self.commentary_style == 'world_class':
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Welcome to {track_name}. The grid is formed, and we're moments away from lights out.",
+                timing='pre_lap',
+                priority=10
+            ))
+        else:
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Good afternoon everyone, we're at {track_name} and the field is ready to race.",
+                timing='pre_lap',
+                priority=10
+            ))
+        
+        # Pole position callout
+        if grid:
+            pole_team, pole_driver, _ = grid[0]
+            lines.append(CommentaryLine(
+                speaker='color',
+                text=f"{pole_driver.name} starts from pole for {pole_team.name}. Strong quali performance.",
+                timing='pre_lap',
+                priority=9
+            ))
+        
+        # Player team if not on pole
+        player_pos = next((i for i, (t, _, _) in enumerate(grid, 1) 
+                          if t.name == self.player_team), None)
+        if player_pos and player_pos > 1:
+            player_entry = grid[player_pos - 1]
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Our team starts P{player_pos} today. {player_entry[1].name} will be looking to make up ground.",
+                timing='pre_lap',
+                priority=8
+            ))
+        
+        return lines
+    
+    def generate_lights_out_commentary(self) -> CommentaryLine:
+        """Generate lights out commentary"""
+        variants = [
+            "And it's lights out and away we go!",
+            "Lights out! Here we go!",
+            "Green flag! They're racing!",
+            "And we're underway!",
+        ]
+        
+        if self.commentary_style == 'grassroots':
+            text = random.choice([
+                "Green light! Let's go racing!",
+                "They're off!",
+                "Here we go folks!"
+            ])
+        else:
+            text = random.choice(variants)
+        
+        return CommentaryLine(
+            speaker='pbp',
+            text=text,
+            timing='during_lap',
+            priority=10
+        )
+    
+    def generate_overtake_commentary(self, driver_name: str, new_position: int, 
+                                     lap_number: int, is_player_team: bool) -> List[CommentaryLine]:
+        """Generate commentary for an overtake"""
+        lines = []
+        
+        # Main call
+        if is_player_team:
+            variants = [
+                f"Yes! {driver_name} makes the move, up to P{new_position}!",
+                f"{driver_name} goes through! P{new_position} now!",
+                f"Great move by {driver_name}! P{new_position}!",
+            ]
+        else:
+            variants = [
+                f"{driver_name} moves up to P{new_position} on lap {lap_number}.",
+                f"Position change: {driver_name} now P{new_position}.",
+                f"{driver_name} through to P{new_position}.",
+            ]
+        
+        lines.append(CommentaryLine(
+            speaker='pbp',
+            text=random.choice(variants),
+            timing='during_lap',
+            priority=7 if is_player_team else 5
+        ))
+        
+        # Color follow-up (sometimes)
+        if random.random() < 0.3:
+            color_variants = [
+                "Good racecraft there.",
+                "Clean move.",
+                "Well executed.",
+                "That's experience showing.",
+            ]
+            lines.append(CommentaryLine(
+                speaker='color',
+                text=random.choice(color_variants),
+                timing='post_lap',
+                priority=4
+            ))
+        
+        return lines
+    
+    def generate_crash_commentary(self, driver_name: str, team_name: str, 
+                                   lap_number: int, is_player_team: bool) -> List[CommentaryLine]:
+        """Generate commentary for a crash"""
+        lines = []
+        
+        # Urgent call
+        if is_player_team:
+            variants = [
+                f"Oh no! {driver_name} is in trouble!",
+                f"Problem for {driver_name}!",
+                f"{driver_name} has gone off!",
+            ]
+            priority = 10
+        else:
+            variants = [
+                f"We've got a problem. {driver_name} has crashed.",
+                f"{driver_name} into the barriers.",
+                f"Incident for {driver_name} from {team_name}.",
+            ]
+            priority = 7
+        
+        lines.append(CommentaryLine(
+            speaker='pbp',
+            text=random.choice(variants),
+            timing='incident',
+            priority=priority
+        ))
+        
+        # Color analysis
+        analysis_variants = [
+            "That's going to cost them. Significant time lost.",
+            "Damage assessment will be critical here.",
+            "They'll need to get back to the garage.",
+            "Driver's okay, but the car has taken a hit.",
+        ]
+        lines.append(CommentaryLine(
+            speaker='color',
+            text=random.choice(analysis_variants),
+            timing='incident',
+            priority=priority - 1
+        ))
+        
+        return lines
+    
+    def generate_dnf_commentary(self, driver_name: str, team_name: str, 
+                                lap_number: int, is_player_team: bool) -> List[CommentaryLine]:
+        """Generate commentary for a DNF"""
+        lines = []
+        
+        if is_player_team:
+            variants = [
+                f"This is devastating. {driver_name} is out of the race.",
+                f"Retirement for {driver_name}. Heartbreaking.",
+                f"That's it for {driver_name} today. Mechanical failure.",
+            ]
+            priority = 10
+        else:
+            variants = [
+                f"{driver_name} pulls off. That's a DNF for {team_name}.",
+                f"Retirement: {driver_name} from {team_name}.",
+                f"{driver_name} won't finish today. Mechanical issue.",
+            ]
+            priority = 6
+        
+        lines.append(CommentaryLine(
+            speaker='pbp',
+            text=random.choice(variants),
+            timing='incident',
+            priority=priority
+        ))
+        
+        return lines
+    
+    def generate_final_lap_commentary(self, leader_name: str, leader_team: str, 
+                                      is_player_leading: bool) -> List[CommentaryLine]:
+        """Generate final lap commentary"""
+        lines = []
+        
+        if is_player_leading:
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Final lap! {leader_name} is going to win this!",
+                timing='during_lap',
+                priority=10
+            ))
+        else:
+            lines.append(CommentaryLine(
+                speaker='pbp',
+                text=f"Final lap. {leader_name} leads for {leader_team}.",
+                timing='during_lap',
+                priority=8
+            ))
+        
+        return lines
+    
+    def generate_checkered_flag_commentary(self, winner_name: str, winner_team: str,
+                                          is_player_win: bool) -> List[CommentaryLine]:
+        """Generate checkered flag commentary"""
+        lines = []
+        
+        if is_player_win:
+            variants = [
+                f"Checkered flag! {winner_name} wins it! What a result!",
+                f"Victory! {winner_name} takes the win!",
+                f"They've done it! {winner_name} wins for {winner_team}!",
+            ]
+        else:
+            variants = [
+                f"Checkered flag. {winner_name} wins for {winner_team}.",
+                f"And the winner is {winner_name}.",
+                f"{winner_name} takes the victory.",
+            ]
+        
+        lines.append(CommentaryLine(
+            speaker='pbp',
+            text=random.choice(variants),
+            timing='post_lap',
+            priority=10
+        ))
+        
+        return lines
+    
+    def generate_player_result_summary(self, position: int, points: int) -> CommentaryLine:
+        """Generate summary of player team's race"""
+        if position == 1:
+            text = f"Incredible performance. Victory and {points} points."
+        elif position <= 3:
+            text = f"P{position} finish. {points} points. Solid result."
+        elif position <= 10:
+            text = f"P{position} today. {points} points in the bag."
+        else:
+            text = f"P{position} at the flag. Tough day out there."
+        
+        return CommentaryLine(
+            speaker='color',
+            text=text,
+            timing='post_lap',
+            priority=9
+        )
+    
+    def generate_lap_update(self, lap_number: int, total_laps: int, 
+                           leader_name: str, gap_to_player: Optional[float] = None) -> Optional[CommentaryLine]:
+        """Generate periodic lap update (not every lap)"""
+        # Only generate updates for certain laps
+        if lap_number % 5 != 0:  # Every 5 laps
+            return None
+        
+        if gap_to_player is not None and gap_to_player > 0:
+            text = f"Lap {lap_number} of {total_laps}. {leader_name} leads, gap to our team is {gap_to_player:.1f} seconds."
+        else:
+            text = f"Lap {lap_number} of {total_laps}. {leader_name} continues to lead."
+        
+        return CommentaryLine(
+            speaker='pbp',
+            text=text,
+            timing='during_lap',
+            priority=3
+        )

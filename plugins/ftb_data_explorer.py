@@ -16,14 +16,64 @@ IS_FEED = False
 
 def register_widgets(registry: Dict[str, Any], runtime_stub: Any) -> None:
     """Register data explorer query endpoints"""
-    registry['ftb_data_queries'] = {
-        'query_season_summaries': query_season_summaries,
-        'query_race_history': query_race_history,
-        'query_financial_history': query_financial_history,
-        'query_career_stats': query_career_stats,
-        'query_team_outcomes': query_team_outcomes,
-        'query_championship_history': query_championship_history,
-    }
+    
+    # Get the cold (archival) database path from runtime
+    station_dir = runtime_stub.get('STATION_DIR', '')
+    cold_db_path = None
+    
+    # Try to get cold DB path from station directory
+    if station_dir:
+        import os
+        cold_db_path = os.path.join(station_dir, 'ftb_state_cold.db')
+        if not os.path.exists(cold_db_path):
+            print(f"[FTB Data Explorer] Cold DB not found at {cold_db_path}, queries may fail")
+    
+    # Register using the proper WidgetRegistry.register() method
+    # Or if it's a dict, use dict assignment
+    if hasattr(registry, 'register'):
+        # It's a WidgetRegistry object - create a single widget with query methods
+        def data_explorer_factory(parent, runtime):
+            """Factory for data explorer widget"""
+            try:
+                import tkinter as tk
+                from tkinter import ttk
+                
+                frame = ttk.Frame(parent)
+                
+                ttk.Label(frame, text="Data Explorer", font=('Arial', 14, 'bold')).pack(pady=10)
+                ttk.Label(frame, text="Historical data queries available via ftb_cmd_q").pack(pady=5)
+                
+                # Show DB path
+                if cold_db_path:
+                    ttk.Label(frame, text=f"Database: {cold_db_path}", font=('Arial', 9)).pack(pady=5)
+                
+                return frame
+            except Exception as e:
+                print(f"[FTB Data Explorer] Error creating widget: {e}")
+                return None
+        
+        registry.register('ftb_data_explorer', data_explorer_factory, title="Data Explorer")
+    else:
+        # Fallback: treat as dict
+        registry['ftb_data_queries'] = {
+            'query_season_summaries': lambda **kwargs: query_season_summaries(cold_db_path, **kwargs),
+            'query_race_history': lambda **kwargs: query_race_history(cold_db_path, **kwargs),
+            'query_financial_history': lambda **kwargs: query_financial_history(cold_db_path, **kwargs),
+            'query_career_stats': lambda **kwargs: query_career_stats(cold_db_path, **kwargs),
+            'query_team_outcomes': lambda **kwargs: query_team_outcomes(cold_db_path, **kwargs),
+            'query_championship_history': lambda **kwargs: query_championship_history(cold_db_path, **kwargs),
+        }
+    
+    # Also store the query functions directly on the runtime for easy access
+    if hasattr(runtime_stub, '__setitem__'):
+        runtime_stub['ftb_data_queries'] = {
+            'query_season_summaries': lambda **kwargs: query_season_summaries(cold_db_path, **kwargs),
+            'query_race_history': lambda **kwargs: query_race_history(cold_db_path, **kwargs),
+            'query_financial_history': lambda **kwargs: query_financial_history(cold_db_path, **kwargs),
+            'query_career_stats': lambda **kwargs: query_career_stats(cold_db_path, **kwargs),
+            'query_team_outcomes': lambda **kwargs: query_team_outcomes(cold_db_path, **kwargs),
+            'query_championship_history': lambda **kwargs: query_championship_history(cold_db_path, **kwargs),
+        }
 
 
 def query_season_summaries(db_path: str, team_name: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:

@@ -1,0 +1,816 @@
+"""
+FTB Broadcast Commentary Generator - LLM-Based Edition
+
+Generates contextually-aware racing commentary using LLM prompts.
+Two-voice broadcast crew system with tier-specific personalities.
+
+Voice assignments per tier:
+Tier 1 (Grassroots):    play_by_play: am_puck, color: bf_lily
+Tier 2 (Enthusiast):    play_by_play: am_eric, color: af_river  
+Tier 3 (Professional):  play_by_play: am_adam, color: af_bella
+Tier 4 (Premium):       play_by_play: bm_lewis, color: bf_emma
+Tier 5 (World Class):   play_by_play: bm_george, color: bf_alice
+"""
+
+from typing import Any, Dict, List, Optional, Tuple, Set
+from dataclasses import dataclass, field
+import random
+
+
+# Voice configurations for each tier
+TIER_VOICES = {
+    1: {'pbp': 'am_puck', 'color': 'bf_lily'},      # Grassroots
+    2: {'pbp': 'am_eric', 'color': 'af_river'},     # Enthusiast
+    3: {'pbp': 'am_adam', 'color': 'af_bella'},     # Professional
+    4: {'pbp': 'bm_lewis', 'color': 'bf_emma'},     # Premium
+    5: {'pbp': 'bm_george', 'color': 'bf_alice'},   # World Class
+}
+
+
+@dataclass
+class SeasonContext:
+    """Rich season and championship context for LLM prompts"""
+    # Championship standing
+    player_position: int = 0
+    player_points: int = 0
+    championship_leader: str = ""
+    championship_leader_points: int = 0
+    points_gap_to_leader: int = 0
+    
+    # Season progress
+    race_number: int = 0
+    total_races: int = 0
+    races_remaining: int = 0
+    
+    # Recent form
+    last_three_results: List[int] = field(default_factory=list)  # [3, 1, 5] = P3, P1, P5
+    recent_dnfs: int = 0
+    points_last_three: int = 0
+    
+    # Team narrative
+    team_morale: float = 50.0
+    team_momentum: str = "neutral"  # 'rising', 'falling', 'neutral'
+    budget_tier: str = "midfield"   # 'backmarker', 'midfield', 'frontrunner'
+    
+    # Key rivals
+    closest_rival: Optional[str] = None
+    rival_points_gap: int = 0
+    
+    # Championship implications
+    can_win_championship: bool = True
+    mathematically_safe: bool = False
+    relegation_danger: bool = False
+    
+    # Historical context
+    best_finish_this_season: int = 99
+    worst_finish_this_season: int = 99
+    
+    # Track-specific
+    track_name: str = ""
+    player_best_result_here: Optional[int] = None
+    
+    def to_prompt_context(self) -> str:
+        """Convert to natural language context for LLM"""
+        parts = []
+        
+        # Championship situation
+        if self.player_position > 0:
+            parts.append(f"Currently P{self.player_position} in the championship with {self.player_points} points")
+            if self.points_gap_to_leader > 0:
+                parts.append(f"{self.points_gap_to_leader} points behind leader {self.championship_leader}")
+            elif self.player_position == 1:
+                parts.append(f"Leading the championship")
+        
+        # Season progress
+        parts.append(f"Race {self.race_number} of {self.total_races} ({self.races_remaining} races remaining)")
+        
+        # Recent form
+        if self.last_three_results:
+            results_str = ', '.join([f"P{r}" for r in self.last_three_results])
+            parts.append(f"Recent results: {results_str}")
+        
+        # Team situation
+        if self.team_momentum == 'rising':
+            parts.append("Team momentum is building")
+        elif self.team_momentum == 'falling':
+            parts.append("Team struggling recently")
+        
+        # Championship implications
+        if not self.can_win_championship:
+            parts.append("Championship hopes fading")
+        elif self.relegation_danger:
+            parts.append("Fighting to avoid relegation")
+        elif self.races_remaining <= 3 and self.player_position <= 3:
+            parts.append("In championship contention with races running out")
+        
+        return ". ".join(parts) + "."
+
+
+@dataclass
+class CommentaryPrompt:
+    """A prompt for LLM to generate commentary"""
+    speaker: str  # 'pbp' or 'color'
+    prompt: str
+    event_type: str  # 'pre_race', 'lights_out', 'overtake', 'crash', etc.
+    max_tokens: int = 60
+    priority: int = 5
+
+
+class LLMCommentaryGenerator:
+    """Generates contextually-rich commentary prompts for LLM"""
+    
+    def __init__(self, league_tier: int, player_team_name: str, 
+                 season_context: Optional[SeasonContext] = None):
+        self.league_tier = league_tier
+        self.player_team = player_team_name
+        self.season_context = season_context or SeasonContext()
+        
+        # Get tier-specific personalities and voices
+        self.voices = TIER_VOICES.get(league_tier, TIER_VOICES[3])
+        self.commentary_style = self._get_style_for_tier(league_tier)
+        
+        # Commentator personalities for this tier
+        self.pbp_personality = self._get_pbp_personality(league_tier)
+        self.color_personality = self._get_color_personality(league_tier)
+        
+    def _get_style_for_tier(self, tier: int) -> Dict[str, str]:
+        """Get comprehensive style guide for tier"""
+        styles = {
+            1: {
+                'name': 'grassroots',
+                'pbp_style': 'enthusiastic local commentator, casual language, excited about action',
+                'color_style': 'knowledgeable fan perspective, relatable observations, supportive',
+                'broadcast_quality': 'community radio feel, personal connection with drivers',
+                'language_level': 'casual, accessible, some local references',
+                'energy': 'high enthusiasm, genuine excitement for racing',
+            },
+            2: {
+                'name': 'enthusiast',
+                'pbp_style': 'passionate racing fan doing commentary, detailed calls, racing terminology',
+                'color_style': 'deep racing knowledge, driver psychology focus, tactical insights',
+                'broadcast_quality': 'dedicated sports channel, professional but personable',
+                'language_level': 'racing terminology comfortable, fan-oriented',
+                'energy': 'passionate engagement, analytical excitement',
+            },
+            3: {
+                'name': 'professional',
+                'pbp_style': 'experienced sports broadcaster, polished delivery, authoritative',
+                'color_style': 'ex-driver or team insider perspective, technical depth, measured analysis',
+                'broadcast_quality': 'major sports network standard, balanced coverage',
+                'language_level': 'professional broadcast standard, clear explanations',
+                'energy': 'controlled excitement, professional composure',
+            },
+            4: {
+                'name': 'premium',
+                'pbp_style': 'elite sports commentator, dramatic flair, iconic calls for big moments',
+                'color_style': 'championship-level analyst, strategy depth, insider knowledge',
+                'broadcast_quality': 'premium sports network, cinematic production value',
+                'language_level': 'eloquent, sophisticated vocabulary, storytelling',
+                'energy': 'building drama, memorable calls, narrative threading',
+            },
+            5: {
+                'name': 'world_class',
+                'pbp_style': 'legendary F1-style broadcaster, iconic delivery, historical perspective',
+                'color_style': 'world champion analyst, technical mastery, global context',
+                'broadcast_quality': 'world feed standard, multiple language consideration',
+                'language_level': 'broadcast excellence, quotable moments, legacy awareness',
+                'energy': 'controlled intensity, moment recognition, history-making awareness',
+            }
+        }
+        return styles.get(tier, styles[3])
+    
+    def _get_pbp_personality(self, tier: int) -> str:
+        """Get play-by-play personality description for prompts"""
+        personalities = {
+            1: "enthusiastic local announcer who knows all the drivers personally",
+            2: "passionate racing enthusiast with encyclopedic knowledge",
+            3: "experienced professional broadcaster with authoritative voice",
+            4: "elite commentator known for dramatic and memorable calls",
+            5: "legendary voice of motorsport with decades of history",
+        }
+        return personalities.get(tier, personalities[3])
+    
+    def _get_color_personality(self, tier: int) -> str:
+        """Get color commentator personality for prompts"""
+        personalities = {
+            1: "supportive local racing expert who explains things clearly",
+            2: "analytical fan perspective with driver psychology insights",
+            3: "former driver turned analyst with technical expertise",
+            4: "championship-winning strategist with insider knowledge",
+            5: "world champion analyst providing masterclass commentary",
+        }
+        return personalities.get(tier, personalities[3])
+    
+    def get_voice_config(self) -> Dict[str, str]:
+        """Get voice configuration for this tier"""
+        return {
+            'play_by_play': self.voices['pbp'],
+            'color_commentator': self.voices['color'],
+        }
+    
+    def _build_base_prompt(self, speaker: str) -> str:
+        """Build base prompt with personality and style"""
+        style = self.commentary_style
+        
+        if speaker == 'pbp':
+            base = f"""You are the play-by-play commentator: {self.pbp_personality}.
+
+Style: {style['pbp_style']}
+Broadcast quality: {style['broadcast_quality']}
+Language: {style['language_level']}
+Energy: {style['energy']}
+
+{self.season_context.to_prompt_context()}
+
+CRITICAL RULES:
+- 1-2 sentences maximum (40-60 words)
+- Present tense, immediate action
+- NO player references ("our team", "we", "you")
+- Use driver/team names objectively
+- Match the tier style exactly
+- Natural, conversational flow
+"""
+        else:  # color
+            base = f"""You are the color commentator: {self.color_personality}.
+
+Style: {style['color_style']}
+Analysis level: {style['broadcast_quality']}
+Language: {style['language_level']}
+
+{self.season_context.to_prompt_context()}
+
+CRITICAL RULES:
+- 1-2 sentences maximum (40-60 words)
+- Analytical, context-adding perspective
+- NO player references ("our team", "we", "you")
+- Use driver/team names objectively
+- Match the tier style exactly
+- Complement play-by-play with insight
+"""
+        
+        return base
+    
+    def generate_pre_race_prompt(self, grid: List[Tuple], track_name: str) -> List[CommentaryPrompt]:
+        """Generate pre-race commentary prompts"""
+        prompts = []
+        
+        # Update season context
+        self.season_context.track_name = track_name
+        
+        # Opening call
+        pole_info = ""
+        player_grid = ""
+        
+        if grid:
+            pole_team, pole_driver, _ = grid[0]
+            pole_info = f"{pole_driver.name} on pole for {pole_team.name}"
+            
+            # Find player
+            player_pos = next((i for i, (t, _, _) in enumerate(grid, 1) 
+                              if t.name == self.player_team), None)
+            if player_pos:
+                player_entry = grid[player_pos - 1]
+                player_grid = f"{player_entry[1].name} starts P{player_pos} for {self.player_team}"
+        
+        # Play-by-play opening
+        pbp_base = self._build_base_prompt('pbp')
+        prompts.append(CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+TASK: Deliver the race opening. We're at {track_name}, grid is set, moments from lights out.
+
+Key facts: {pole_info}. {player_grid}.
+
+Generate the opening call matching your tier style:""",
+            event_type='pre_race',
+            max_tokens=70,
+            priority=10
+        ))
+        
+        # Color analysis of grid/championship
+        if self.season_context.player_position > 0:
+            color_base = self._build_base_prompt('color')
+            prompts.append(CommentaryPrompt(
+                speaker='color',
+                prompt=f"""{color_base}
+
+TASK: Provide pre-race context about championship implications.
+
+Focus: {self.player_team} starting P{player_pos if player_pos else '?'}, currently P{self.season_context.player_position} in standings.
+
+Generate analytical context matching your tier:""",
+                event_type='pre_race',
+                max_tokens=70,
+                priority=9
+            ))
+        
+        return prompts
+    
+    def generate_lights_out_prompt(self) -> CommentaryPrompt:
+        """Generate lights out call prompt"""
+        pbp_base = self._build_base_prompt('pbp')
+        
+        return CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+TASK: Deliver the iconic lights out call for the race start.
+
+This is THE moment - make it match your tier's style and energy level.
+
+Generate the lights out call:""",
+            event_type='lights_out',
+            max_tokens=40,
+            priority=10
+        )
+    
+    def generate_overtake_prompt(self, driver_name: str, team_name: str, 
+                                 old_pos: int, new_pos: int, lap: int,
+                                 is_player_team: bool) -> List[CommentaryPrompt]:
+        """Generate overtake commentary prompts"""
+        prompts = []
+        
+        # Determine significance
+        is_lead_change = (new_pos == 1)
+        is_top_3 = (new_pos <= 3)
+        position_gain = old_pos - new_pos
+        
+        significance = "crucial" if is_player_team else "notable"
+        if is_lead_change:
+            significance = "race-leading"
+        elif is_top_3 and is_player_team:
+            significance = "podium"
+        
+        # Play-by-play call
+        pbp_base = self._build_base_prompt('pbp')
+        prompts.append(CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+EVENT: {driver_name} ({team_name}) just overtook into P{new_pos} from P{old_pos} on lap {lap}.
+Significance: {significance} move, gained {position_gain} position(s).
+{"THIS IS THE PLAYER'S TEAM - higher excitement but stay objective" if is_player_team else ""}
+
+TASK: Call the overtake with appropriate energy for your tier. 1 sentence.
+
+Generate the overtake call:""",
+            event_type='overtake',
+            max_tokens=50,
+            priority=9 if is_player_team else 6
+        ))
+        
+        # Color analysis (30% chance unless significant move)
+        if random.random() < 0.3 or is_lead_change or (is_top_3 and is_player_team):
+            color_base = self._build_base_prompt('color')
+            
+            # Add strategic context if available
+            strategic_context = ""
+            if self.season_context.team_momentum and is_player_team:
+                strategic_context = f"Team has {self.season_context.team_momentum} momentum. "
+            
+            prompts.append(CommentaryPrompt(
+                speaker='color',
+                prompt=f"""{color_base}
+
+CONTEXT: {driver_name} just moved to P{new_pos}. {strategic_context}
+
+TASK: Provide brief analytical follow-up. What does this mean? Racecraft? Strategy? 1 sentence.
+
+Generate analysis:""",
+                event_type='overtake_analysis',
+                max_tokens=50,
+                priority=5
+            ))
+        
+        return prompts
+    
+    def generate_incident_prompt(self, driver_name: str, team_name: str, 
+                                 incident_type: str, lap: int,
+                                 is_player_team: bool) -> List[CommentaryPrompt]:
+        """Generate incident commentary (crash, spin, mechanical)"""
+        prompts = []
+        
+        # Incident severity for tone
+        is_crash = 'crash' in incident_type.lower() or 'collision' in incident_type.lower()
+        is_mechanical = 'mechanical' in incident_type.lower() or 'dnf' in incident_type.lower()
+        
+        urgency = "URGENT" if is_player_team else "NOTABLE"
+        
+        # Play-by-play urgent call
+        pbp_base = self._build_base_prompt('pbp')
+        prompts.append(CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+INCIDENT: {driver_name} ({team_name}) - {incident_type} on lap {lap}.
+Urgency: {urgency}
+{"PLAYER'S TEAM INVOLVED - convey concern but stay professional" if is_player_team else ""}
+
+TASK: Call the incident with appropriate urgency. React naturally. 1-2 sentences.
+
+Generate incident call:""",
+            event_type='incident',
+            max_tokens=60,
+            priority=10 if is_player_team else 7
+        ))
+        
+        # Color assessment
+        color_base = self._build_base_prompt('color')
+        
+        impact_context = ""
+        if is_player_team and self.season_context.championship_leader:
+            impact_context = f"Championship implications: currently P{self.season_context.player_position}, {self.season_context.points_gap_to_leader} points from lead. "
+        
+        prompts.append(CommentaryPrompt(
+            speaker='color',
+            prompt=f"""{color_base}
+
+INCIDENT: {driver_name} - {incident_type}. {impact_context}
+
+TASK: Assess the situation. Damage? Championship impact? Recovery possible? 1-2 sentences.
+
+Generate assessment:""",
+            event_type='incident_analysis',
+            max_tokens=60,
+            priority=9 if is_player_team else 6
+        ))
+        
+        return prompts
+    
+    def generate_lap_update_prompt(self, lap: int, total_laps: int,
+                                   leader_name: str, leader_team: str,
+                                   player_pos: Optional[int] = None,
+                                   gap_to_leader: Optional[float] = None) -> Optional[CommentaryPrompt]:
+        """Generate periodic lap update prompt"""
+        
+        # Only generate for milestone laps
+        if lap % 5 != 0 and lap not in [1, total_laps - 3, total_laps - 1]:
+            return None
+        
+        is_final_stages = (total_laps - lap) <= 3
+        
+        pbp_base = self._build_base_prompt('pbp')
+        
+        race_phase = "early stages" if lap < total_laps * 0.3 else \
+                     "mid-race" if lap < total_laps * 0.7 else \
+                     "final stages"
+        
+        player_context = ""
+        if player_pos and gap_to_leader is not None:
+            player_context = f"{self.player_team} in P{player_pos}, {gap_to_leader:.1f}s behind leader. "
+        
+        return CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+STATUS: Lap {lap} of {total_laps}. {race_phase}. Leader: {leader_name} ({leader_team}). {player_context}
+
+TASK: Deliver lap update with appropriate context. Don't just state facts - add narrative. 1-2 sentences.
+
+Generate update:""",
+            event_type='lap_update',
+            max_tokens=60,
+            priority=4 if is_final_stages else 3
+        )
+    
+    def generate_final_lap_prompt(self, leader_name: str, leader_team: str,
+                                  player_pos: Optional[int] = None) -> CommentaryPrompt:
+        """Generate final lap drama prompt"""
+        pbp_base = self._build_base_prompt('pbp')
+        
+        is_player_winning = (player_pos == 1) if player_pos else False
+        
+        dramatic_context = "THIS IS IT - FINAL LAP"
+        if is_player_winning:
+            dramatic_context += f" - {self.player_team} LEADING"
+        
+        return CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+MOMENT: {dramatic_context}. {leader_name} ({leader_team}) leads.
+
+TASK: Deliver the final lap call with maximum drama for your tier. This is the moment. 1-2 sentences.
+
+Generate final lap call:""",
+            event_type='final_lap',
+            max_tokens=60,
+            priority=10
+        )
+    
+    def generate_checkered_flag_prompt(self, winner_name: str, winner_team: str,
+                                      player_pos: Optional[int] = None,
+                                      player_points: Optional[int] = None) -> List[CommentaryPrompt]:
+        """Generate race finish commentary"""
+        prompts = []
+        
+        is_player_win = (player_pos == 1) if player_pos else False
+        is_player_podium = (player_pos and player_pos <= 3)
+        
+        # Victory call
+        pbp_base = self._build_base_prompt('pbp')
+        prompts.append(CommentaryPrompt(
+            speaker='pbp',
+            prompt=f"""{pbp_base}
+
+CHECKERED FLAG: {winner_name} ({winner_team}) wins the race!
+{"PLAYER TEAM VICTORY - HISTORIC MOMENT" if is_player_win else ""}
+{"PLAYER PODIUM FINISH" if is_player_podium and not is_player_win else ""}
+
+TASK: Deliver the checkered flag call matching the significance. Iconic moment for your tier. 1-2 sentences.
+
+Generate victory call:""",
+            event_type='checkered_flag',
+            max_tokens=60,
+            priority=10
+        ))
+        
+        # Color wrap-up with championship context
+        if player_pos and self.season_context.player_position > 0:
+            color_base = self._build_base_prompt('color')
+            
+            championship_angle = ""
+            if is_player_win:
+                championship_angle = "Victory changes championship picture. "
+            elif player_pos and player_points:
+                championship_angle = f"P{player_pos} finish adds {player_points} points. "
+            
+            prompts.append(CommentaryPrompt(
+                speaker='color',
+                prompt=f"""{color_base}
+
+RESULT: {self.player_team} finishes P{player_pos}. {championship_angle}
+Championship standing: P{self.season_context.player_position}, {self.season_context.races_remaining} races remaining.
+
+TASK: Wrap up the race with championship implications. Big picture view. 1-2 sentences.
+
+Generate race summary:""",
+                event_type='race_summary',
+                max_tokens=70,
+                priority=9
+            ))
+        
+        return prompts
+    
+    def update_season_context(self, context: SeasonContext):
+        """Update the season context with fresh data"""
+        self.season_context = context
+
+
+# Helper function to get voice configuration for tier
+def get_commentary_voices_for_tier(tier: int) -> Dict[str, str]:
+    """Get the voice configuration for a given tier"""
+    return TIER_VOICES.get(tier, TIER_VOICES[3])
+
+
+# Export
+__all__ = [
+    'LLMCommentaryGenerator',
+    'CommentaryPrompt',
+    'SeasonContext',
+    'get_commentary_voices_for_tier',
+    'TIER_VOICES'
+]
+
+
+# =======================
+# Plugin Metadata
+# =======================
+
+PLUGIN_NAME = "ftb_broadcast_commentary_llm"
+PLUGIN_DESC = "LLM-powered race commentary generation (async)"
+IS_FEED = True
+
+
+# =======================
+# Async Commentary Feed Worker
+# =======================
+
+def feed_worker(stop_event, mem: Dict[str, Any], payload: Dict[str, Any], runtime: Dict[str, Any]) -> None:
+    """
+    Async commentary generator worker.
+    Listens for race events and generates LLM commentary without blocking simulation.
+    """
+    import threading
+    import queue
+    import time
+    
+    log = runtime.get('log', print)
+    event_q = runtime.get('event_q')
+    
+    if not event_q:
+        log("[ftb_commentary_llm] No event queue available")
+        return
+    
+    log("[ftb_commentary_llm] Commentary feed starting...")
+    
+    # State
+    active_race = False
+    commentary_generator = None
+    league_tier = 3  # Default mid-tier
+    player_team = None
+    season_context = SeasonContext()
+    
+    # Event sampling - only process selected events, not all
+    event_sample_rate = 0.3  # Process ~30% of overtakes/incidents for commentary
+    last_commentary_time = 0
+    min_commentary_gap = 8.0  # Minimum 8 seconds between commentary lines
+    
+    # Async commentary queue
+    commentary_queue = queue.Queue(maxsize=10)
+    
+    def _generate_and_speak_commentary(prompt: CommentaryPrompt):
+        """Background thread to generate LLM commentary and speak it"""
+        try:
+            # Import model provider
+            from model_provider import get_model
+            
+            # Get appropriate model (use HOST_MODEL for commentary)
+            model = get_model(role='host')
+            if not model:
+                return
+            
+            # Generate commentary text from LLM
+            response = model.generate_content(prompt.prompt)
+            commentary_text = response.text.strip() if hasattr(response, 'text') else str(response).strip()
+            
+            # Clean up the response
+            if commentary_text.startswith('"') and commentary_text.endswith('"'):
+                commentary_text = commentary_text[1:-1]
+            
+            # Send to narrator for speech
+            voices = TIER_VOICES.get(league_tier, TIER_VOICES[3])
+            voice_id = voices.get(prompt.speaker, voices['pbp'])
+            
+            # Emit speech event
+            runtime.get('event_q').put({
+                'type': 'commentary_speech',
+                'source': 'ftb_commentary',
+                'payload': {
+                    'text': commentary_text,
+                    'voice': voice_id,
+                    'priority': prompt.priority,
+                    'speaker': prompt.speaker
+                }
+            })
+            
+            log(f"[ftb_commentary_llm] {prompt.speaker.upper()}: {commentary_text[:60]}...")
+            
+        except Exception as e:
+            log(f"[ftb_commentary_llm] Commentary generation error: {e}")
+    
+    def _should_generate_commentary(event_type: str) -> bool:
+        """Decide if we should generate commentary for this event (sampling)"""
+        nonlocal last_commentary_time
+        
+        # Always do major events
+        if event_type in ['race_start', 'race_finish', 'lights_out', 'checkered_flag']:
+            return True
+        
+        # Check minimum time gap
+        now = time.time()
+        if now - last_commentary_time < min_commentary_gap:
+            return False
+        
+        # Sample other events
+        if random.random() < event_sample_rate:
+            last_commentary_time = now
+            return True
+        
+        return False
+    
+    # Main event loop
+    try:
+        while not stop_event.is_set():
+            try:
+                # Get station event (non-blocking)
+                station_event = event_q.get(timeout=0.5)
+                
+                # Check for race events
+                if hasattr(station_event, 'type'):
+                    event_type = station_event.type
+                    source = getattr(station_event, 'source', '')
+                    event_payload = getattr(station_event, 'payload', {})
+                    
+                    # Race start - initialize commentary
+                    if event_type == 'race_start' or (source == 'ftb' and event_type == 'race_streaming_started'):
+                        active_race = True
+                        
+                        # Extract race info
+                        league_id = event_payload.get('league_id', '')
+                        player_team = event_payload.get('player_team', '')
+                        
+                        # Determine tier
+                        if 'grassroots' in league_id.lower():
+                            league_tier = 1
+                        elif 'enthusiast' in league_id.lower():
+                            league_tier = 2
+                        elif 'professional' in league_id.lower():
+                            league_tier = 3
+                        elif 'premium' in league_id.lower():
+                            league_tier = 4
+                        elif 'formulaz' in league_id.lower() or 'world' in league_id.lower():
+                            league_tier = 5
+                        
+                        # Create commentary generator
+                        commentary_generator = LLMCommentaryGenerator(
+                            league_tier=league_tier,
+                            player_team_name=player_team or "Unknown Team",
+                            season_context=season_context
+                        )
+                        
+                        log(f"[ftb_commentary_llm] Race started - Tier {league_tier} commentary activated")
+                        
+                        # Generate lights out commentary
+                        if _should_generate_commentary('race_start'):
+                            prompt = commentary_generator.generate_lights_out_prompt()
+                            threading.Thread(
+                                target=_generate_and_speak_commentary,
+                                args=(prompt,),
+                                daemon=True
+                            ).start()
+                    
+                    # Race finish
+                    elif active_race and event_type == 'race_finish':
+                        if commentary_generator and _should_generate_commentary('race_finish'):
+                            winner = event_payload.get('winner', 'Unknown')
+                            winner_team = event_payload.get('winner_team', 'Unknown')
+                            player_pos = event_payload.get('player_position')
+                            
+                            prompts = commentary_generator.generate_checkered_flag_prompt(
+                                winner_name=winner,
+                                winner_team=winner_team,
+                                player_pos=player_pos
+                            )
+                            
+                            for prompt in prompts:
+                                threading.Thread(
+                                    target=_generate_and_speak_commentary,
+                                    args=(prompt,),
+                                    daemon=True
+                                ).start()
+                                time.sleep(0.5)  # Slight stagger
+                        
+                        active_race = False
+                    
+                    # Overtake events
+                    elif active_race and 'overtake' in event_type.lower():
+                        if commentary_generator and _should_generate_commentary('overtake'):
+                            driver = event_payload.get('driver', 'Unknown')
+                            team = event_payload.get('team', 'Unknown')
+                            old_pos = event_payload.get('old_position', 0)
+                            new_pos = event_payload.get('new_position', 0)
+                            lap = event_payload.get('lap', 0)
+                            is_player = event_payload.get('is_player_team', False)
+                            
+                            prompts = commentary_generator.generate_overtake_prompt(
+                                driver_name=driver,
+                                team_name=team,
+                                old_pos=old_pos,
+                                new_pos=new_pos,
+                                lap=lap,
+                                is_player_team=is_player
+                            )
+                            
+                            # Just do play-by-play for overtakes
+                            if prompts:
+                                threading.Thread(
+                                    target=_generate_and_speak_commentary,
+                                    args=(prompts[0],),
+                                    daemon=True
+                                ).start()
+                    
+                    # Crash/incident events
+                    elif active_race and ('crash' in event_type.lower() or 'incident' in event_type.lower()):
+                        if commentary_generator and _should_generate_commentary('incident'):
+                            driver = event_payload.get('driver', 'Unknown')
+                            team = event_payload.get('team', 'Unknown')
+                            severity = event_payload.get('severity', 0.5)
+                            is_player = event_payload.get('is_player_team', False)
+                            
+                            incident_type = 'crash' if severity > 0.5 else 'spin'
+                            
+                            prompts = commentary_generator.generate_incident_prompt(
+                                driver_name=driver,
+                                team_name=team,
+                                incident_type=incident_type,
+                                severity=severity,
+                                is_player_team=is_player
+                            )
+                            
+                            if prompts:
+                                threading.Thread(
+                                    target=_generate_and_speak_commentary,
+                                    args=(prompts[0],),
+                                    daemon=True
+                                ).start()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log(f"[ftb_commentary_llm] Event processing error: {e}")
+    
+    finally:
+        log("[ftb_commentary_llm] Commentary feed stopped")
+

@@ -168,3 +168,68 @@ export async function applyForJob(listingId: number): Promise<any> {
   })
   return res.json()
 }
+
+// ─── New / Load / Save Game ───
+
+export async function newGame(opts: {
+  origin?: string
+  identity?: string[]
+  save_mode?: string
+  tier?: string
+  seed?: number
+  team_name?: string
+  ownership?: string
+  manager_age?: number
+  manager_first_name?: string
+  manager_last_name?: string
+}): Promise<any> {
+  const res = await fetch(`${BASE}/api/new_game`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  })
+  return res.json()
+}
+
+export async function loadGame(path: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/load_game`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  return res.json()
+}
+
+export async function saveGame(path?: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/save_game`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: path || '' }),
+  })
+  return res.json()
+}
+
+export async function deleteSave(filename: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/saves/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+  })
+  return res.json()
+}
+
+export async function tickStep(n: number = 1): Promise<any> {
+  const res = await fetch(`${BASE}/api/tick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n, batch: false }),
+  })
+  return res.json()
+}
+
+export async function tickBatch(n: number = 7): Promise<any> {
+  const res = await fetch(`${BASE}/api/tick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n, batch: true }),
+  })
+  return res.json()
+}

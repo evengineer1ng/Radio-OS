@@ -764,6 +764,80 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q.put({"cmd": "ftb_apply_job", "listing_id": payload.get("listing_id", 0)})
         return {"status": "queued"}
 
+    # ──── REST: New Game ────
+    @app.post("/api/new_game")
+    async def new_game(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        ftb_cmd_q.put({
+            "cmd": "ftb_new_save",
+            "origin": payload.get("origin", "grassroots_hustler"),
+            "identity": payload.get("identity", []),
+            "save_mode": payload.get("save_mode", "replayable"),
+            "tier": payload.get("tier", "grassroots"),
+            "seed": payload.get("seed", 42),
+            "team_name": payload.get("team_name", ""),
+            "ownership": payload.get("ownership", "self_owned"),
+            "manager_age": payload.get("manager_age", 32),
+            "manager_first_name": payload.get("manager_first_name", "Manager"),
+            "manager_last_name": payload.get("manager_last_name", "Unknown"),
+        })
+        return {"status": "queued"}
+
+    # ──── REST: Load Game ────
+    @app.post("/api/load_game")
+    async def load_game(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        path = payload.get("path", "")
+        if not path:
+            return JSONResponse({"error": "path is required"}, 400)
+        ftb_cmd_q.put({"cmd": "ftb_load_save", "path": path})
+        return {"status": "queued", "path": path}
+
+    # ──── REST: Save Game ────
+    @app.post("/api/save_game")
+    async def save_game(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        path = payload.get("path", "")
+        ftb_cmd_q.put({"cmd": "ftb_save", "path": path if path else None})
+        return {"status": "queued"}
+
+    # ──── REST: Delete Save ────
+    @app.delete("/api/saves/{filename}")
+    async def delete_save(filename: str):
+        saves_dir = os.path.join(
+            shared_runtime.get("STATION_DIR", "."), "..", "..", "saves"
+        )
+        saves_dir = os.path.normpath(saves_dir)
+        if not os.path.isdir(saves_dir):
+            root = os.environ.get("RADIO_OS_ROOT", "")
+            saves_dir = os.path.join(root, "saves") if root else ""
+        fp = os.path.join(saves_dir, filename)
+        if not os.path.isfile(fp):
+            return JSONResponse({"error": "File not found"}, 404)
+        try:
+            os.remove(fp)
+            return {"status": "deleted", "file": filename}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    # ──── REST: Tick Controls ────
+    @app.post("/api/tick")
+    async def tick_step(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        n = int(payload.get("n", 1))
+        batch = payload.get("batch", False)
+        cmd_name = "ftb_tick_batch" if batch else "ftb_tick_step"
+        ftb_cmd_q.put({"cmd": cmd_name, "n": n})
+        return {"status": "queued", "cmd": cmd_name, "n": n}
+
     # ──── WebSocket: Live stream ────
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):

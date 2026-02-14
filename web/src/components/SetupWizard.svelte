@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { sendCommand } from '../lib/ws'
+  import { newGame, fetchState } from '../lib/api'
+  import { gameState } from '../lib/stores'
   import { createEventDispatcher } from 'svelte'
 
   const dispatch = createEventDispatcher()
@@ -39,24 +40,38 @@
     seed = String(Math.floor(Math.random() * 999999))
   }
 
-  function startGame() {
+  let starting = false
+
+  async function startGame() {
     if (!confirm('Start this new game?')) return
+    if (starting) return
+    starting = true
 
-    sendCommand({
-      cmd: 'ftb_new_save',
-      origin,
-      identity: playerIdentity.split(',').map(s => s.trim()).filter(Boolean),
-      save_mode: saveMode,
-      tier,
-      seed: parseInt(seed) || 42,
-      team_name: teamName || '',
-      ownership,
-      manager_age: managerAge,
-      manager_first_name: managerFirst || 'Manager',
-      manager_last_name: managerLast || 'Unknown',
-    })
+    try {
+      await newGame({
+        origin,
+        identity: playerIdentity.split(',').map(s => s.trim()).filter(Boolean),
+        save_mode: saveMode,
+        tier,
+        seed: parseInt(seed) || 42,
+        team_name: teamName || '',
+        ownership,
+        manager_age: managerAge,
+        manager_first_name: managerFirst || 'Manager',
+        manager_last_name: managerLast || 'Unknown',
+      })
 
-    dispatch('start')
+      // Wait a moment for the backend to process, then fetch fresh state
+      await new Promise(r => setTimeout(r, 1500))
+      const state = await fetchState()
+      gameState.set(state)
+
+      dispatch('start')
+    } catch (e) {
+      console.error('new game error', e)
+      alert('Failed to start new game. Check console.')
+    }
+    starting = false
   }
 </script>
 
@@ -189,7 +204,9 @@
     {#if step < 4}
       <button class="btn btn-primary" on:click={() => step++}>Next →</button>
     {:else}
-      <button class="btn btn-success btn-lg" on:click={startGame}>🏁 START NEW GAME</button>
+      <button class="btn btn-success btn-lg" disabled={starting} on:click={startGame}>
+        {starting ? '⏳ Creating...' : '🏁 START NEW GAME'}
+      </button>
     {/if}
   </div>
 </div>

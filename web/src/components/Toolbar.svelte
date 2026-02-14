@@ -1,23 +1,43 @@
 <script lang="ts">
-  import { sendCommand, requestState } from '../lib/ws'
-  import { dateStr, tick, phase, notifications, unreadCount, hasGame } from '../lib/stores'
+  import { tickStep, tickBatch, saveGame, fetchState } from '../lib/api'
+  import { gameState, dateStr, tick, phase, notifications, unreadCount, hasGame } from '../lib/stores'
   import { createEventDispatcher } from 'svelte'
 
   const dispatch = createEventDispatcher()
 
   let showNotifications = false
+  let working = false
 
-  function tickStep(n: number) { sendCommand({ cmd: 'ftb_tick_step', n }) }
-  function tickBatch(n: number) { sendCommand({ cmd: 'ftb_tick_batch', n }) }
-  function saveGame() { sendCommand({ cmd: 'ftb_save' }) }
+  async function handleTick(n: number) {
+    if (working) return; working = true
+    try { await tickStep(n); await refreshState() } catch (e) { console.error('tick', e) }
+    working = false
+  }
+
+  async function handleBatch(n: number) {
+    if (working) return; working = true
+    try { await tickBatch(n); await refreshState() } catch (e) { console.error('batch', e) }
+    working = false
+  }
+
+  async function handleSave() {
+    try { await saveGame() } catch (e) { console.error('save', e) }
+  }
+
   function newGame() {
     if (confirm('Start a new game? Current progress will be lost if not saved.')) {
-      sendCommand({ cmd: 'ftb_reset' })
       dispatch('newgame')
     }
   }
 
-  function refreshState() { requestState() }
+  async function refreshState() {
+    try {
+      // Small delay so backend processes queued command
+      await new Promise(r => setTimeout(r, 600))
+      const state = await fetchState()
+      gameState.set(state)
+    } catch (e) { console.error('refresh', e) }
+  }
 </script>
 
 <div class="toolbar">
@@ -29,15 +49,15 @@
 
   {#if $hasGame}
     <div class="toolbar-center">
-      <button class="btn btn-primary btn-sm" on:click={() => tickStep(1)} title="+1 Day">+1</button>
-      <button class="btn btn-primary btn-sm" on:click={() => tickBatch(7)} title="+1 Week">+7</button>
-      <button class="btn btn-primary btn-sm" on:click={() => tickBatch(30)} title="+1 Month">+30</button>
+      <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleTick(1)} title="+1 Day">+1</button>
+      <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleBatch(7)} title="+1 Week">+7</button>
+      <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleBatch(30)} title="+1 Month">+30</button>
     </div>
   {/if}
 
   <div class="toolbar-right">
     <button class="btn btn-ghost btn-sm" on:click={refreshState} title="Refresh">🔄</button>
-    <button class="btn btn-ghost btn-sm" on:click={saveGame} title="Save">💾</button>
+    <button class="btn btn-ghost btn-sm" on:click={handleSave} title="Save">💾</button>
     <button class="btn btn-ghost btn-sm notification-btn" on:click={() => dispatch('notifications')} title="Notifications">
       🔔
       {#if $unreadCount > 0}

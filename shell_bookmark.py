@@ -936,6 +936,90 @@ class RadioShell:
         self.btn_settings.bind("<Button-1>", lambda e: self.open_settings())
         self.btn_settings.pack(side="left", padx=6)
 
+        # Web server toggle button
+        self._web_server_thread = None
+        self._web_server_stop = None
+        self._web_server_url = None
+
+        self.btn_server = tk.Label(
+            right, text="🌐 Launch Server", font=FONT_BODY,
+            bg=UI["panel"], fg=UI["text"], padx=8, pady=4, cursor="hand2"
+        )
+        self.btn_server.bind("<Button-1>", lambda e: self.toggle_web_server())
+        self.btn_server.pack(side="left", padx=6)
+
+        # Auto-launch server if global setting is enabled
+        cfg = get_global_config()
+        if cfg.get("general", {}).get("always_launch_server", False):
+            self.root.after(500, self._auto_launch_server)
+
+    # -----------------------------
+    # Web Server Management
+    # -----------------------------
+    def _auto_launch_server(self):
+        """Auto-launch web server from global setting."""
+        if self._web_server_thread is None:
+            self._start_web_server()
+
+    def toggle_web_server(self):
+        """Toggle the Radio OS web shell server on/off."""
+        if self._web_server_thread and self._web_server_thread.is_alive():
+            self._stop_web_server()
+        else:
+            self._start_web_server()
+
+    def _start_web_server(self):
+        """Start the web shell server in a daemon thread."""
+        import threading
+        try:
+            from web_server import start_web_shell, WEB_SHELL_PORT
+        except ImportError as e:
+            messagebox.showerror("Web Server Error", 
+                f"Could not import web_server module:\n{e}\n\n"
+                "Make sure web_server.py exists in the Radio OS root directory.")
+            return
+
+        self._web_server_stop = threading.Event()
+
+        def _on_start(url):
+            self._web_server_url = url
+
+        cfg = get_global_config()
+        port = int(cfg.get("general", {}).get("web_server_port", WEB_SHELL_PORT))
+
+        self._web_server_thread = threading.Thread(
+            target=start_web_shell,
+            kwargs={
+                "port": port,
+                "stop_event": self._web_server_stop,
+                "callback_on_start": _on_start,
+            },
+            daemon=True,
+        )
+        self._web_server_thread.start()
+
+        self.btn_server.config(text="🌐 Server ON", bg=UI["good"], fg="#000")
+
+        # Show info after a short delay for the server to bind
+        def _show_info():
+            url = self._web_server_url or f"http://127.0.0.1:{port}"
+            messagebox.showinfo("Web Server Started", 
+                f"Radio OS web shell is running!\n\n"
+                f"Local:       http://127.0.0.1:{port}\n"
+                f"Network:   {url}\n"
+                f"Tailscale:  Use your Tailscale IP + :{port}\n\n"
+                f"Open this URL in any browser to manage stations remotely.")
+        self.root.after(1200, _show_info)
+
+    def _stop_web_server(self):
+        """Stop the web shell server."""
+        if self._web_server_stop:
+            self._web_server_stop.set()
+        self._web_server_thread = None
+        self._web_server_stop = None
+        self._web_server_url = None
+        self.btn_server.config(text="🌐 Launch Server", bg=UI["panel"], fg=UI["text"])
+
     # -----------------------------
     # Home view
     # -----------------------------
@@ -1513,6 +1597,31 @@ class RadioShell:
             font=FONT_BODY
         ).pack(anchor="w")
         
+        # Web Server Settings
+        server_frame = tk.LabelFrame(wrap, text="🌐 Web Server (Tailscale / LAN Access)", fg=UI["text"],
+                                      bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        server_frame.pack(fill="x", pady=8)
+        
+        always_server_var = tk.BooleanVar(value=general.get("always_launch_server", False))
+        tk.Checkbutton(
+            server_frame,
+            text="Always launch web server on startup",
+            variable=always_server_var,
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY
+        ).pack(anchor="w")
+        tk.Label(server_frame, text="Starts the Radio OS web shell automatically when the desktop app opens.\n"
+                 "Access stations from any browser on your network or via Tailscale.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(2, 8))
+        
+        tk.Label(server_frame, text="Web Server Port:", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        server_port_var = tk.StringVar(value=str(general.get("web_server_port", 7800)))
+        tk.Entry(server_frame, textvariable=server_port_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], width=10).pack(anchor="w", pady=(2, 4))
+        tk.Label(server_frame, text="(Default: 7800 — accessible via http://your-ip:port)",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        
         # Status poll interval
         poll_frame = tk.LabelFrame(wrap, text="Status Update Interval", fg=UI["text"], 
                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
@@ -1606,6 +1715,8 @@ class RadioShell:
             
             cfg["general"] = {
                 "auto_start_last_station": auto_start_var.get(),
+                "always_launch_server": always_server_var.get(),
+                "web_server_port": int(server_port_var.get() or 7800),
                 "status_poll_ms": int(poll_var.get() or 1000),
                 "theme": new_theme,
                 "ui_scale": new_scale,
@@ -2683,6 +2794,12 @@ class RadioShell:
     def _on_close(self):
         try:
             self.proc.stop()
+        except Exception:
+            pass
+        # Stop web server if running
+        try:
+            if self._web_server_stop:
+                self._web_server_stop.set()
         except Exception:
             pass
         self.root.destroy()

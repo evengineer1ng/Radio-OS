@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { gameState } from '../lib/stores'
+  import { gameState, addToast } from '../lib/stores'
   import { formatCurrency } from '../lib/utils'
-  import { acceptSponsor, declineSponsor, fetchState } from '../lib/api'
+  import { acceptSponsor, declineSponsor, safeRefreshState } from '../lib/api'
 
   $: team = $gameState.player_team
   $: teamName = team?.name || ''
@@ -14,8 +14,10 @@
     working = true
     try {
       await acceptSponsor(index)
-      gameState.set(await fetchState())
-    } catch (e) { console.error('accept sponsor', e) }
+      await new Promise(r => setTimeout(r, 500))
+      await safeRefreshState()
+      addToast('Sponsor accepted ✅', 'success')
+    } catch (e) { console.error('accept sponsor', e); addToast('Accept failed', 'error') }
     working = false
   }
   async function handleDecline(index: number) {
@@ -23,8 +25,10 @@
     working = true
     try {
       await declineSponsor(index)
-      gameState.set(await fetchState())
-    } catch (e) { console.error('decline sponsor', e) }
+      await new Promise(r => setTimeout(r, 500))
+      await safeRefreshState()
+      addToast('Sponsor declined', 'success')
+    } catch (e) { console.error('decline sponsor', e); addToast('Decline failed', 'error') }
     working = false
   }
 </script>

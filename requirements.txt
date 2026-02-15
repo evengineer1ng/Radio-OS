@@ -37,6 +37,12 @@ imageio>=2.31.0                     # Image/video I/O (video_timeline, etc.)
 SpeechRecognition>=3.10.0           # Speech-to-text (if using audio input plugins)
 matplotlib>=3.7.0                   # Visualization/plotting (analysis widgets)
 
+# Web Server (Radio OS Web Shell — optional, for Tailscale/LAN access)
+fastapi>=0.100.0                    # Web API framework
+uvicorn>=0.23.0                     # ASGI server
+httpx>=0.24.0                       # Async HTTP client (station web proxy)
+websockets>=11.0                    # WebSocket client (station WS proxy)
+
 # Vision providers (optional, install ONE):
 openai>=1.3.0                       # For OpenAI GPT-4-Vision / GPT-4o
 anthropic>=0.7.0                    # For Anthropic Claude

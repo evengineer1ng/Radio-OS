@@ -190,11 +190,11 @@ TIER_FEATURES = {
 PENALTY_CONFIG = {
     1: {  # Grassroots - Most forgiving
         'name': 'Grassroots',
-        'crash_investigation_rate': 0.15,  # Only 15% of crashes investigated
-        'track_limits_threshold': 10,  # 10+ violations to trigger penalty
-        'warning_before_penalty_rate': 0.85,  # 85% chance of warning first
-        'fine_multiplier': 0.3,  # Lower fines
-        'grid_penalty_range': (1, 3),  # 1-3 grid positions
+        'crash_investigation_rate': 0.05,  # Only 5% of crashes investigated
+        'track_limits_threshold': 15,  # 15+ violations to trigger penalty
+        'warning_before_penalty_rate': 0.95,  # 95% chance of warning first
+        'fine_multiplier': 0.2,  # Very low fines
+        'grid_penalty_range': (1, 2),  # 1-2 grid positions
         'points_deduction_enabled': False,
         'base_fine_amounts': {
             'causing_collision': 1000,
@@ -205,11 +205,11 @@ PENALTY_CONFIG = {
     },
     2: {  # Formula V - More lenient
         'name': 'Formula V',
-        'crash_investigation_rate': 0.30,
-        'track_limits_threshold': 7,
-        'warning_before_penalty_rate': 0.70,
-        'fine_multiplier': 0.5,
-        'grid_penalty_range': (1, 5),
+        'crash_investigation_rate': 0.12,  # 12% investigation rate
+        'track_limits_threshold': 12,
+        'warning_before_penalty_rate': 0.85,
+        'fine_multiplier': 0.4,
+        'grid_penalty_range': (1, 3),
         'points_deduction_enabled': False,
         'base_fine_amounts': {
             'causing_collision': 2500,
@@ -220,10 +220,10 @@ PENALTY_CONFIG = {
     },
     3: {  # Formula X - Balanced
         'name': 'Formula X',
-        'crash_investigation_rate': 0.50,
-        'track_limits_threshold': 5,
-        'warning_before_penalty_rate': 0.50,
-        'fine_multiplier': 0.7,
+        'crash_investigation_rate': 0.25,  # 25% investigation rate
+        'track_limits_threshold': 8,
+        'warning_before_penalty_rate': 0.65,
+        'fine_multiplier': 0.6,
         'grid_penalty_range': (1, 5),
         'points_deduction_enabled': False,
         'base_fine_amounts': {
@@ -235,13 +235,13 @@ PENALTY_CONFIG = {
     },
     4: {  # Formula Y - Strict
         'name': 'Formula Y',
-        'crash_investigation_rate': 0.70,
-        'track_limits_threshold': 3,
-        'warning_before_penalty_rate': 0.30,
-        'fine_multiplier': 1.0,
-        'grid_penalty_range': (3, 10),
+        'crash_investigation_rate': 0.45,
+        'track_limits_threshold': 5,
+        'warning_before_penalty_rate': 0.40,
+        'fine_multiplier': 0.8,
+        'grid_penalty_range': (2, 8),
         'points_deduction_enabled': True,
-        'points_deduction_threshold': 3,  # 3 penalties in 90 days = points deduction
+        'points_deduction_threshold': 4,  # 4 penalties in 90 days = points deduction
         'base_fine_amounts': {
             'causing_collision': 15000,
             'track_limits': 5000,
@@ -252,13 +252,13 @@ PENALTY_CONFIG = {
     },
     5: {  # Formula Z - Strictest
         'name': 'Formula Z',
-        'crash_investigation_rate': 0.90,
-        'track_limits_threshold': 3,
-        'warning_before_penalty_rate': 0.10,  # Rarely get warnings
-        'fine_multiplier': 1.5,
-        'grid_penalty_range': (5, 15),
+        'crash_investigation_rate': 0.65,
+        'track_limits_threshold': 4,
+        'warning_before_penalty_rate': 0.20,
+        'fine_multiplier': 1.2,
+        'grid_penalty_range': (3, 12),
         'points_deduction_enabled': True,
-        'points_deduction_threshold': 2,  # 2 penalties in 90 days = points loss
+        'points_deduction_threshold': 3,  # 3 penalties in 90 days = points loss
         'base_fine_amounts': {
             'causing_collision': 50000,
             'track_limits': 15000,
@@ -29364,7 +29364,9 @@ class FTBController:
         self.tick_rate = 2.0  # seconds per tick
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
-        self.state_lock = threading.Lock()
+        # RLock (reentrant) because _refresh_widget() acquires the lock and
+        # is frequently called from code paths that already hold it.
+        self.state_lock = threading.RLock()
         self.state_db_path = None
         self.autosave_interval = 10  # ticks
         self.delegate_tick_interval = 60.0  # seconds per tick when delegated
@@ -29376,6 +29378,8 @@ class FTBController:
         self.current_save_path: Optional[str] = None
         self.race_day_thread: Optional[threading.Thread] = None
         self.race_day_stop_event = threading.Event()
+        self._live_race_timer_thread: Optional[threading.Thread] = None
+        self._live_race_timer_stop = threading.Event()
         self.stop_tick_flag = False  # Flag to stop runaway batch ticks
         self._init_state_db()
 
@@ -29652,6 +29656,49 @@ class FTBController:
             name="FTB-Race-Day"
         )
         self.race_day_thread.start()
+
+    # ─── Live-race lap auto-advance timer (web UI) ────────────────
+    def _start_live_race_timer(self, speed: float) -> None:
+        """Start a background thread that sends ftb_advance_race_lap every *speed* seconds."""
+        self._stop_live_race_timer()          # kill any previous timer
+        self._live_race_timer_stop.clear()
+        self._live_race_timer_thread = threading.Thread(
+            target=self._live_race_timer_loop,
+            args=(speed,),
+            daemon=True,
+            name="FTB-LiveRace-Timer",
+        )
+        self._live_race_timer_thread.start()
+        _dbg(f"[FTB RACE TIMER] ⏱️  Timer started – advancing every {speed}s")
+
+    def _stop_live_race_timer(self) -> None:
+        """Signal the timer thread to exit and wait briefly."""
+        self._live_race_timer_stop.set()
+        t = self._live_race_timer_thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+        self._live_race_timer_thread = None
+        _dbg("[FTB RACE TIMER] 🛑 Timer stopped")
+
+    def _live_race_timer_loop(self, speed: float) -> None:
+        """Thread body: sleeps *speed* seconds, then pushes ftb_advance_race_lap."""
+        import time as _time
+        try:
+            while not self._live_race_timer_stop.is_set():
+                # Wait for `speed` seconds (or until stop is signalled)
+                if self._live_race_timer_stop.wait(timeout=speed):
+                    break                     # stop event was set
+                # Push the advance-lap command into the command queue
+                cmd_q = self.runtime.get("ftb_cmd_q")
+                if cmd_q:
+                    cmd_q.put({"cmd": "ftb_advance_race_lap"})
+                else:
+                    _dbg("[FTB RACE TIMER] ⚠️  ftb_cmd_q not found – stopping timer")
+                    break
+        except Exception as _e:
+            _dbg(f"[FTB RACE TIMER] ❌ Timer loop error: {_e}")
+        _dbg("[FTB RACE TIMER] 🏁 Timer loop exited")
+    # ──────────────────────────────────────────────────────────────
 
     def _race_day_worker(self, league: 'League', track: Optional['Track']) -> None:
         if not self.state:
@@ -30301,28 +30348,47 @@ class FTBController:
     def _show_watch_race_dialog(self, race_data: Dict[str, Any]) -> None:
         """
         Show a dialog asking the user if they want to watch the race live.
-        Uses tkinter messagebox for immediate response.
-        This is a BLOCKING call - it waits for user input.
+        In web-only mode (no Tkinter display), default to instant sim.
         """
         _dbg(f"[FTB DIALOG] 🏁 Showing watch race dialog for {race_data.get('track_name', 'Unknown Circuit')}")
         
         try:
+            # Check if we actually have a display / Tk mainloop available.
+            # When running purely as a web backend there is no display, so
+            # attempting tkinter.messagebox will either hang or crash.
+            import os
+            display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+            # On macOS there is no DISPLAY but Tk generally works IF we are
+            # running inside a GUI process.  However if the shell (Tk root)
+            # is not alive, calling messagebox will block forever.
+            import sys
+            has_tk_root = False
+            try:
+                import tkinter as _tk
+                # _default_root is set when a Tk() has been created
+                has_tk_root = _tk._default_root is not None
+            except Exception:
+                pass
+
+            if not has_tk_root:
+                _dbg(f"[FTB DIALOG] No Tk root window — skipping dialog, defaulting to instant sim")
+                if self.state:
+                    self.state._watch_current_race_live = False
+                return
+
             import tkinter.messagebox as messagebox
             
             league_name = race_data.get('league_name', 'Unknown League')
             track_name = race_data.get('track_name', 'Unknown Circuit')
             round_num = race_data.get('round_number', 1)
             
-            # Show blocking dialog
             title = f"🏁 Race Day - Round {round_num}"
             message = f"{league_name}\n{track_name}\n\nWould you like to watch the race unfold live in play-by-play?"
             
-            # This will block until user responds
             result = messagebox.askyesno(title, message)
             
             _dbg(f"[FTB DIALOG] User responded: {'YES (watch live)' if result else 'NO (instant)'}")
             
-            # Set flag directly on state
             if self.state:
                 self.state._watch_current_race_live = result
                 _dbg(f"[FTB DIALOG] Flag set on state: _watch_current_race_live = {result}")
@@ -31206,6 +31272,9 @@ class FTBController:
                     _dbg(f"[FTB] ✓ start_new_game returned, state exists: {self.state is not None}")
                     if self.state:
                         _dbg(f"[FTB] ✓ State initialized: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}")
+                        # Immediate autosave so the game survives a page refresh
+                        self.save_game()
+                        _dbg(f"[FTB] ✓ Autosave after new game creation")
                         # Trigger immediate UI refresh
                         self._refresh_widget()
                         _dbg(f"[FTB] ✓ Triggered UI refresh after new game creation")
@@ -31866,6 +31935,9 @@ class FTBController:
                                         _dbg(f"[FTB RACE DAY] ⚠️  Race start commentary failed: {_e}")
                                         import traceback; traceback.print_exc()
                                     
+                                    # --- Start auto-advance timer (drives lap progression for web UI) ---
+                                    self._start_live_race_timer(speed)
+                                    
                                 else:
                                     _dbg(f"[FTB RACE DAY] ⚠️  Could not find player league for race")
 
@@ -31891,7 +31963,9 @@ class FTBController:
                                     import traceback; traceback.print_exc()
                             
                             if not has_more_laps:
-                                # Race complete
+                                # Race complete — stop the auto-advance timer
+                                self._stop_live_race_timer()
+                                
                                 ftb_race_day.complete_race_stream(self.state)
                                 _dbg(f"[FTB RACE DAY] 🏁 All laps complete!")
                                 
@@ -31912,7 +31986,12 @@ class FTBController:
                     if self.state and self.state.race_day_state:
                         paused = msg.get("paused", True)
                         with self.state_lock:
-                            # Toggle pause state (implementation depends on race playback system)
+                            if paused:
+                                self._stop_live_race_timer()
+                            else:
+                                # Resume — restart timer with current speed
+                                speed = getattr(self.state.race_day_state, 'live_race_speed', 10.0) or 10.0
+                                self._start_live_race_timer(speed)
                             _dbg(f"[FTB RACE DAY] {'⏸️' if paused else '▶️'} Race {'paused' if paused else 'resumed'}")
                 
                 elif cmd == "ftb_complete_race_day":
@@ -31924,6 +32003,9 @@ class FTBController:
                         
                         _skip_phase = self.state.race_day_state.phase
                         _dbg(f"[FTB RACE DAY] ✅ Race complete / skip - processing results (phase was {_skip_phase.name})")
+                        
+                        # --- Stop lap-advance timer if still running ---
+                        self._stop_live_race_timer()
                         
                         # --- Stop engine audio (may be playing if skipping mid-race) ---
                         try:
@@ -32215,7 +32297,7 @@ class FTBController:
                             # Get player team's principal (created during world gen)
                             if not self.state.player_team.principal:
                                 self.log("ftb", "ERROR: Cannot apply focus - player team has no principal")
-                                return
+                                continue
                             
                             # Translate focus text to stat modifiers (currently stubbed - returns empty dict)
                             base_stats = self.state.player_team.principal.current_ratings
@@ -32331,14 +32413,27 @@ class FTBController:
                 
                 elif cmd == "ftb_hire_free_agent":
                     free_agent_id = msg.get("free_agent_id")
-                    if self.state and self.state.player_team and free_agent_id is not None:
+                    entity_name = msg.get("entity_name", "")
+                    _dbg(f"[FTB HIRE] 🔍 Hire request: entity_name='{entity_name}', free_agent_id={free_agent_id}")
+                    if self.state and self.state.player_team and (free_agent_id is not None or entity_name):
                         with self.state_lock:
-                            # Find free agent by id
+                            # Match by entity.entity_id first (stable across serialization),
+                            # then by name as fallback.
                             free_agent = None
                             for fa in self.state.free_agents:
-                                if id(fa) == free_agent_id:
+                                ent = getattr(fa, 'entity', fa)
+                                if free_agent_id is not None and getattr(ent, 'entity_id', None) == free_agent_id:
                                     free_agent = fa
+                                    _dbg(f"[FTB HIRE] ✅ Matched by entity_id={free_agent_id}")
                                     break
+                            if not free_agent and entity_name:
+                                for fa in self.state.free_agents:
+                                    if getattr(getattr(fa, 'entity', fa), 'name', '') == entity_name:
+                                        free_agent = fa
+                                        _dbg(f"[FTB HIRE] ✅ Matched by name='{entity_name}'")
+                                        break
+                            if not free_agent:
+                                _dbg(f"[FTB HIRE] ❌ No free agent matched (id={free_agent_id}, name='{entity_name}', pool size={len(self.state.free_agents)})")
                             
                             if free_agent:
                                 entity = free_agent.entity
@@ -32425,7 +32520,7 @@ class FTBController:
                                 contract = self.state.contracts.get(driver_entity_id)
                                 if not contract:
                                     self.log("ftb", f"ERROR: No contract found for {driver.name}")
-                                    return
+                                    continue
                                 
                                 # Execute buyout
                                 # 1. Pay buyout to original team
@@ -32589,21 +32684,26 @@ class FTBController:
                 
                 elif cmd == "ftb_apply_job":
                     listing_id = msg.get("listing_id")
-                    if self.state and self.state.player_team and listing_id:
+                    if self.state and self.state.player_team and listing_id is not None:
                         with self.state_lock:
-                            # Find job listing by id
+                            # Find job listing by index (web UI sends array index)
+                            vacancies = getattr(self.state.job_board, 'vacancies', [])
                             listing = None
-                            for job in self.state.job_board.vacancies:
-                                if id(job) == listing_id:
-                                    listing = job
-                                    break
+                            if isinstance(listing_id, int) and 0 <= listing_id < len(vacancies):
+                                listing = vacancies[listing_id]
+                            else:
+                                # Fallback: try matching by id() for legacy tkinter callers
+                                for job in vacancies:
+                                    if id(job) == listing_id:
+                                        listing = job
+                                        break
                             
                             if listing:
                                 # Check if can afford
                                 application_cost = 1000.0
                                 if not self.state.player_team.budget.can_afford(application_cost):
                                     self.log("ftb", "Cannot afford job application")
-                                    return
+                                    continue
                                 
                                 # Deduct cost
                                 self.state.player_team.budget.cash -= application_cost
@@ -32774,7 +32874,7 @@ class FTBController:
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
                                 _dbg(f"[FTB CONTROLLER] ❌ Equip FAILED - part not found in inventory: {part_id}")
-                                return
+                                continue
                             
                             _dbg(f"[FTB CONTROLLER] Equipping part: {part.name} ({part.part_type})")
                             _dbg(f"[FTB CONTROLLER] Before: Inventory={len(self.state.player_team.parts_inventory)} parts, Equipped={len(self.state.player_team.equipped_parts)} parts")
@@ -32842,7 +32942,7 @@ class FTBController:
                             if not part:
                                 self.log("ftb", f"Part {part_id} not found in inventory")
                                 _dbg(f"[FTB CONTROLLER] ❌ Sell FAILED - part not found in inventory: {part_id}")
-                                return
+                                continue
                             
                             # Check if part is equipped
                             is_equipped = False
@@ -32854,7 +32954,7 @@ class FTBController:
                             if is_equipped:
                                 self.log("ftb", f"Cannot sell equipped part {part.name}")
                                 _dbg(f"[FTB CONTROLLER] ❌ Sell FAILED - part is equipped: {part.name}")
-                                return
+                                continue
                             
                             _dbg(f"[FTB CONTROLLER] Selling part: {part.name} ({part.part_type})")
                             _dbg(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
@@ -32894,14 +32994,14 @@ class FTBController:
                             if self.state.player_team.budget.cash < cost:
                                 _dbg(f"[FTB CONTROLLER] ❌ Purchase FAILED - insufficient funds: have ${self.state.player_team.budget.cash:,}, need ${cost:,}")
                                 self.log("ftb", f"Cannot afford part {part_id}")
-                                return
+                                continue
                             
                             # Find part in catalog
                             part = self.state.parts_catalog.get(part_id)
                             if not part:
                                 _dbg(f"[FTB CONTROLLER] ❌ Purchase FAILED - part not found in catalog: {part_id}")
                                 self.log("ftb", f"Part {part_id} not found in catalog")
-                                return
+                                continue
                             
                             _dbg(f"[FTB CONTROLLER] Processing purchase: {part.name} (${cost:,})")
                             _dbg(f"[FTB CONTROLLER] Before: Cash=${self.state.player_team.budget.cash:,}, Inventory={len(self.state.player_team.parts_inventory)} parts")
@@ -33004,10 +33104,30 @@ class FTBController:
                                 self.log("ftb", f"Failed to sell {facility}: {result['message']}")
                 
                 elif cmd == "ftb_action":
-                    action_id = msg.get("action_id")
+                    action_name = msg.get("action") or msg.get("action_id", "")
+                    target = msg.get("target")
                     params = msg.get("params", {})
-                    # TODO: Apply action to state
-                    self.log("ftb", f"Action: {action_id} {params}")
+                    cost = msg.get("cost", 0)
+
+                    if self.state and self.state.player_team and action_name:
+                        try:
+                            with self.state_lock:
+                                action = Action(action_name, cost=cost, target=target)
+                                events = FTBSimulation.apply_action(action, self.state.player_team, self.state)
+                                if events:
+                                    self.state.event_history.extend(events)
+                                    self._emit_events(events, skip_narration=True)
+                                    self.state.mark_dirty('all')
+                                    self.log("ftb", f"Action applied: {action_name} target={target} → {len(events)} events")
+                                else:
+                                    self.log("ftb", f"Action {action_name} produced no events")
+                            self._refresh_widget()
+                        except Exception as e:
+                            self.log("ftb", f"ERROR applying action {action_name}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        self.log("ftb", f"Action ignored (no game/team): {action_name}")
                 
                 else:
                     self.log("ftb", f"WARNING: Unknown command '{cmd}' - ignoring")

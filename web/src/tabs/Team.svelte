@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { gameState } from '../lib/stores'
-  import { hireFreeAgent, fireStaff, applyForJob, fetchState } from '../lib/api'
+  import { gameState, addToast } from '../lib/stores'
+  import { hireFreeAgent, fireStaff, applyForJob, safeRefreshState } from '../lib/api'
   import EntityCard from '../components/EntityCard.svelte'
   import { formatCurrency } from '../lib/utils'
 
@@ -18,21 +18,36 @@
     if (working) return
     if (!confirm(`Fire ${name}? This cannot be undone.`)) return
     working = true
-    try { await fireStaff(name); gameState.set(await fetchState()) } catch (e) { console.error('fire', e) }
+    try {
+      await fireStaff(name)
+      await new Promise(r => setTimeout(r, 500))
+      await safeRefreshState()
+      addToast(`Fired ${name}`, 'success')
+    } catch (e) { console.error('fire', e); addToast('Fire failed', 'error') }
     working = false
   }
 
   async function handleHire(name: string, agentId: number) {
     if (working) return
     working = true
-    try { await hireFreeAgent(name, agentId); gameState.set(await fetchState()) } catch (e) { console.error('hire', e) }
+    try {
+      await hireFreeAgent(name, agentId)
+      await new Promise(r => setTimeout(r, 500))
+      await safeRefreshState()
+      addToast(`Hired ${name}`, 'success')
+    } catch (e) { console.error('hire', e); addToast('Hire failed', 'error') }
     working = false
   }
 
   async function handleApply(listingId: number) {
     if (working) return
     working = true
-    try { await applyForJob(listingId); gameState.set(await fetchState()) } catch (e) { console.error('apply', e) }
+    try {
+      await applyForJob(listingId)
+      await new Promise(r => setTimeout(r, 500))
+      await safeRefreshState()
+      addToast('Application submitted', 'success')
+    } catch (e) { console.error('apply', e); addToast('Application failed', 'error') }
     working = false
   }
 

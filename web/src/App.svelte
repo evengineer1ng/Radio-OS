@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { fetchState, fetchSaves, loadGame } from './lib/api'
+  import { fetchState, fetchSaves, loadGame, fetchAudioState, checkAutosave } from './lib/api'
   import {
     gameState, subtitle, notifications, nowPlaying,
     connectionState, activeTab, eventLog, hasGame,
     addToast, lastBatchSummary, widgetUpdates
   } from './lib/stores'
+  import * as webAudio from './lib/webAudio'
+  import { onMessage } from './lib/ws'
 
   // Components
   import Toolbar from './components/Toolbar.svelte'
@@ -56,6 +58,8 @@
   let saves: any[] = []
   let loadingList = false
   let loadingSave = false
+  let pendingGameLoad = false  // true while waiting for backend to create/load game
+  let autoLoadAttempted = false  // true once we've checked for autosave
 
   // ─── REST Polling ───
   let pollInterval: ReturnType<typeof setInterval> | null = null
@@ -63,8 +67,22 @@
   async function pollState() {
     try {
       const state = await fetchState()
-      gameState.set(state)
       connectionState.set('connected')
+
+      // If server returned "busy" (lock contended), skip this update — keep
+      // the existing gameState so the UI doesn't flicker.
+      if (state.status === 'busy') return
+
+      gameState.set(state)
+
+      // If we were waiting for a game to appear and it just did, clear the flag
+      if (pendingGameLoad) {
+        const ready = state.status && state.status !== 'no_game' && state.status !== 'no_controller'
+        if (ready) {
+          console.log('[FTB] Game detected — clearing pendingGameLoad', state.status)
+          pendingGameLoad = false
+        }
+      }
     } catch {
       connectionState.set('disconnected')
     }
@@ -80,12 +98,83 @@
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
   }
 
+  async function tryAutoLoad() {
+    // Wait a moment for the first poll to land
+    await new Promise(r => setTimeout(r, 1500))
+    // If game is already loaded (backend started with state), skip
+    if ($hasGame) { autoLoadAttempted = true; return }
+    try {
+      const info = await checkAutosave()
+      if (info.exists && info.path) {
+        console.log('[FTB] Autosave found, loading:', info.path)
+        pendingGameLoad = true
+        autoLoadAttempted = true  // show "Setting up" screen, not "Checking"
+        await handleLoadSave(info.path)
+        return
+      }
+    } catch (e) {
+      console.warn('[FTB] Autosave check failed:', e)
+    }
+    autoLoadAttempted = true
+  }
+
   onMount(() => {
     connectionState.set('connecting')
     startPolling()
+
+    // Auto-load autosave if no game is loaded
+    tryAutoLoad()
+
+    // Listen for WebSocket audio events
+    const unsubWs = onMessage((msg: any) => {
+      if (msg?.type === 'audio_event') {
+        webAudio.handleAudioEvent(msg.data)
+      }
+    })
+
+    // Poll audio state every 5s for drift correction
+    audioSyncInterval = setInterval(async () => {
+      if (!$hasGame || !webAudio.hasUserInteracted()) return
+      const s = await fetchAudioState()
+      if (s) webAudio.syncFromState(s)
+    }, 5000)
+
+    // Unlock audio on first user interaction
+    const unlock = () => {
+      webAudio.ensureUserInteraction()
+      // If a game is already loaded, start music now
+      if ($hasGame) webAudio.startMusic()
+      document.removeEventListener('click', unlock)
+      document.removeEventListener('touchstart', unlock)
+    }
+    document.addEventListener('click', unlock, { once: false })
+    document.addEventListener('touchstart', unlock, { once: false })
+
+    return () => {
+      unsubWs()
+    }
   })
 
-  onDestroy(stopPolling)
+  let audioSyncInterval: ReturnType<typeof setInterval> | null = null
+
+  onDestroy(() => {
+    stopPolling()
+    if (audioSyncInterval) clearInterval(audioSyncInterval)
+    webAudio.stopAll()
+  })
+
+  // Start music when game first becomes available
+  $: if ($hasGame && webAudio.hasUserInteracted() && !webAudio.isStarted()) {
+    webAudio.startMusic()
+  }
+  // Clear pending flag reactively when game appears
+  $: if ($hasGame && pendingGameLoad) {
+    pendingGameLoad = false
+  }
+  // Stop audio when game disappears (station stopped)
+  $: if (!$hasGame && webAudio.isStarted()) {
+    webAudio.stopAll()
+  }
 
   // ─── Load Game Screen ───
   async function openLoadScreen() {
@@ -98,15 +187,30 @@
   async function handleLoadSave(path: string) {
     if (loadingSave) return
     loadingSave = true
+    pendingGameLoad = true
     try {
       await loadGame(path)
-      await new Promise(r => setTimeout(r, 1500))
-      const state = await fetchState()
-      gameState.set(state)
+      // Poll until the backend has loaded the game (up to 30s)
+      let loaded = false
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 500))
+        try {
+          const state = await fetchState()
+          if (state && state.status && state.status !== 'no_game' && state.status !== 'no_controller') {
+            gameState.set(state)
+            loaded = true
+            break
+          }
+        } catch {}
+      }
+      if (!loaded) {
+        // Don't alert — just keep pendingGameLoad true; background poll will pick it up
+      }
       showLoadScreen = false
     } catch (e) {
       console.error('load save', e)
       alert('Failed to load save.')
+      pendingGameLoad = false
     }
     loadingSave = false
   }
@@ -114,10 +218,12 @@
   function handleNewGame() {
     showLoadScreen = false
     showSetupWizard = true
+    pendingGameLoad = true
   }
 
   function handleSetupStart() {
     showSetupWizard = false
+    // The wizard already set pendingGameLoad; background polling will detect the game.
   }
 
   function formatDate(mtime: number): string {
@@ -132,16 +238,25 @@
 </script>
 
 <div class="app" class:has-game={$hasGame}>
-  <Toolbar on:notifications={() => showNotifs = !showNotifs} on:newgame={handleNewGame} />
+  <Toolbar on:notifications={() => showNotifs = !showNotifs} on:newgame={handleNewGame} on:loadsave={openLoadScreen} />
 
-  {#if !$hasGame && !showSetupWizard && !showLoadScreen}
+  {#if !autoLoadAttempted && !$hasGame}
+    <!-- Still checking for autosave — show loading splash -->
+    <div class="landing">
+      <div class="landing-inner">
+        <h1>🏎️ FROM THE BACKMARKER</h1>
+        <p style="font-size:16px;">⏳ Checking for saved game…</p>
+      </div>
+    </div>
+
+  {:else if !$hasGame && !showSetupWizard && !showLoadScreen && !pendingGameLoad}
     <!-- No game loaded: show landing -->
     <div class="landing">
       <div class="landing-inner">
         <h1>🏎️ FROM THE BACKMARKER</h1>
         <p>Racing Management Simulation</p>
         <div class="landing-actions">
-          <button class="btn btn-primary btn-lg" on:click={() => showSetupWizard = true}>
+          <button class="btn btn-primary btn-lg" on:click={() => { showSetupWizard = true; pendingGameLoad = true }}>
             🆕 New Game
           </button>
           <button class="btn btn-ghost btn-lg" on:click={openLoadScreen}>
@@ -151,8 +266,8 @@
       </div>
     </div>
 
-  {:else if showLoadScreen && !$hasGame}
-    <!-- Load Game Screen -->
+  {:else if showLoadScreen}
+    <!-- Load Game Screen (works from landing or in-game) -->
     <div class="load-screen">
       <div class="load-header">
         <button class="btn btn-ghost btn-sm" on:click={() => showLoadScreen = false}>← Back</button>
@@ -186,6 +301,19 @@
 
   {:else if showSetupWizard}
     <SetupWizard on:start={handleSetupStart} />
+
+  {:else if pendingGameLoad && !$hasGame}
+    <!-- Waiting for backend to create/load the game -->
+    <div class="landing">
+      <div class="landing-inner">
+        <h1>🏎️ FROM THE BACKMARKER</h1>
+        <p style="font-size:16px;">⏳ Setting up your game…</p>
+        <p style="color:var(--c-text-muted);">Generating world, teams, and schedules. This may take a moment.</p>
+        <button class="btn btn-ghost btn-sm" style="margin-top:24px;" on:click={() => { pendingGameLoad = false }}>
+          ← Cancel
+        </button>
+      </div>
+    </div>
 
   {:else}
     <!-- Main Game UI -->
@@ -259,8 +387,10 @@
 
   .main-area {
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     position: relative;
+    -webkit-overflow-scrolling: touch;
   }
 
   /* ─── Landing ─── */
@@ -370,6 +500,7 @@
     flex-shrink: 0;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    padding: 0 24px;
   }
   .tab-nav::-webkit-scrollbar { display: none; }
   .tab-nav-btn {

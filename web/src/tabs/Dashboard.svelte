@@ -6,8 +6,41 @@
   $: team = $gameState.player_team
   $: budget = team?.budget || {}
   $: events = $gameState.recent_events || []
-  $: personalEvents = events.filter((e: any) => e.category !== 'world')
-  $: worldEvents = events.filter((e: any) => e.category === 'world')
+
+  // World event categories are things that happen to the league / other teams / globally
+  const WORLD_CATEGORIES = new Set([
+    'team_spawned', 'team_promoted', 'team_relegated',
+    'ai_driver_poached', 'free_agent_retired',
+    'tier_features_unlocked', 'tier_features_lost',
+    'meta_shift', 'regulation_change',
+    'infrastructure_maintenance',
+  ])
+
+  // World event types
+  const WORLD_TYPES = new Set(['time', 'structural'])
+
+  // Personal = involves the player team directly
+  $: personalEvents = events.filter((e: any) => {
+    // If the event data references the player team, it's personal
+    const teamName = team?.name || ''
+    const desc = (e.description || '').toLowerCase()
+    const isWorldCat = WORLD_CATEGORIES.has(e.category)
+    const mentionsPlayer = teamName && desc.includes(teamName.toLowerCase())
+    // Personal: explicitly mentions player team, or category is not a world category
+    if (mentionsPlayer) return true
+    if (isWorldCat) return false
+    // Default: personal-ish categories
+    return !WORLD_TYPES.has(e.type) || mentionsPlayer
+  })
+
+  $: worldEvents = events.filter((e: any) => {
+    const teamName = team?.name || ''
+    const desc = (e.description || '').toLowerCase()
+    const isWorldCat = WORLD_CATEGORIES.has(e.category)
+    const mentionsPlayer = teamName && desc.includes(teamName.toLowerCase())
+    if (mentionsPlayer && !isWorldCat) return false
+    return isWorldCat || WORLD_TYPES.has(e.type)
+  })
 
   // Pressure indicators
   $: cash = budget.cash || 0

@@ -16,6 +16,9 @@
     const all = $gameState.sponsorships || {}
     return all[teamName] || []
   })()
+
+  // Income streams (media rights, etc.)
+  $: incomeStreams = $gameState.income_streams || []
 </script>
 
 <div class="finance-view">
@@ -34,12 +37,31 @@
     </div>
   </div>
 
+  <!-- Income Streams (Media Rights etc.) -->
+  <div class="card">
+    <div class="section-title">📺 Income Streams</div>
+    {#each incomeStreams as stream}
+      <div class="stream-item">
+        <span class="stream-name">{stream.name}</span>
+        <span class="stream-details">
+          <span class="stream-value">{formatCurrency(stream.amount || 0)}</span>
+          <span class="stream-freq">/{stream.frequency || 'year'}</span>
+        </span>
+      </div>
+    {:else}
+      <div class="empty-state">No income streams</div>
+    {/each}
+  </div>
+
   <div class="card">
     <div class="section-title">💵 Sponsor Income</div>
     {#each sponsorships as sp}
       <div class="sponsor-item">
         <span class="sp-name">{sp.name}</span>
         <span class="sp-value">{formatCurrency(sp.value || 0)}/yr</span>
+        <span class="sp-conf" class:warn={sp.confidence < 50}>
+          {Math.round(sp.confidence ?? 100)}% conf
+        </span>
         <span class="sp-duration">{sp.seasons_remaining} seasons</span>
       </div>
     {:else}
@@ -56,10 +78,17 @@
   .br-item.total { font-weight: 700; border-top: 2px solid var(--c-border); margin-top: 4px; padding-top: 8px; }
   .positive { color: var(--c-success); font-family: var(--font-mono); }
   .negative { color: var(--c-danger); font-family: var(--font-mono); }
-  .sponsor-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 12px; border-bottom: 1px solid var(--c-border); }
-  .sp-name { font-weight: 500; }
+  .sponsor-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 12px; border-bottom: 1px solid var(--c-border); gap: 6px; flex-wrap: wrap; }
+  .sp-name { font-weight: 500; flex: 1; min-width: 0; }
   .sp-value { color: var(--c-success); font-family: var(--font-mono); }
+  .sp-conf { color: var(--c-text-muted); font-family: var(--font-mono); font-size: 11px; }
+  .sp-conf.warn { color: var(--c-danger); }
   .sp-duration { color: var(--c-text-muted); }
+  .stream-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 13px; border-bottom: 1px solid var(--c-border); }
+  .stream-name { font-weight: 600; }
+  .stream-details { display: flex; align-items: baseline; gap: 2px; }
+  .stream-value { color: var(--c-success); font-family: var(--font-mono); font-weight: 600; }
+  .stream-freq { color: var(--c-text-muted); font-size: 11px; }
   .empty-state { text-align: center; color: var(--c-text-muted); padding: 20px; font-size: 13px; }
   @media (max-width: 480px) { .metrics-row { grid-template-columns: 1fr; } }
 </style>

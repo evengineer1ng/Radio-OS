@@ -59,8 +59,24 @@ import requests
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
-import tkinter as tk
-from tkinter import ttk, colorchooser, filedialog, messagebox
+
+# Tkinter — skip if truly headless (e.g. server with no display)
+_HEADLESS_EARLY = os.environ.get("RADIO_OS_HEADLESS", "").strip() in ("1", "true", "yes")
+if _HEADLESS_EARLY:
+    # Provide stubs; will be properly set up later
+    import types as _tk_types
+    class _EarlyStubTk:
+        def __getattr__(self, name): return type('_W', (), {'__init__': lambda *a,**k:None, '__call__': lambda *a,**k:None, '__getattr__': lambda s,n:s, '__bool__': lambda s:False})
+    class _EarlyStubTtk:
+        def __getattr__(self, name): return type('_W', (), {'__init__': lambda *a,**k:None, '__call__': lambda *a,**k:None, '__getattr__': lambda s,n:s, '__bool__': lambda s:False})
+    tk = _EarlyStubTk()   # type: ignore
+    ttk = _EarlyStubTtk()  # type: ignore
+    colorchooser = _EarlyStubTk()  # type: ignore
+    filedialog = _EarlyStubTk()  # type: ignore
+    messagebox = _EarlyStubTk()  # type: ignore
+else:
+    import tkinter as tk
+    from tkinter import ttk, colorchooser, filedialog, messagebox
 import threading
 import asyncio
 import yaml
@@ -121,6 +137,40 @@ GLOBAL_PLUGINS_DIR = os.environ.get("RADIO_OS_PLUGINS", "")
 
 CONTEXT_MODEL = os.environ.get("CONTEXT_MODEL", "")
 HOST_MODEL = os.environ.get("HOST_MODEL", "")
+
+# =======================
+# Headless Mode (web server runtime — no tkinter, audio piped via file)
+# =======================
+HEADLESS = os.environ.get("RADIO_OS_HEADLESS", "").strip() in ("1", "true", "yes")
+
+if HEADLESS:
+    # In headless mode we don't need tkinter at all — provide lightweight stubs
+    # so plugin code that references tk.* widgets doesn't crash on import.
+    print("[bookmark] HEADLESS mode — no tkinter UI, audio piped to file", file=sys.stderr)
+    import types as _types
+
+    class _StubTk:
+        """Minimal stand-in so code that references tk.Tk(), tk.Frame, etc. won't crash."""
+        def __getattr__(self, name):
+            return _StubWidget
+    class _StubWidget:
+        def __init__(self, *a, **kw): pass
+        def __call__(self, *a, **kw): return _StubWidget()
+        def __getattr__(self, name): return _StubWidget()
+        def __bool__(self): return False
+    class _StubTtk:
+        def __getattr__(self, name): return _StubWidget
+
+    # Replace tk/ttk with stubs BEFORE anything else tries to build widgets
+    tk = _StubTk()  # type: ignore
+    ttk = _StubTtk()  # type: ignore
+
+# Audio pipe for headless mode — station writes WAV chunks here,
+# web_server.py AudioBridge reads and streams to WebSocket clients.
+HEADLESS_AUDIO_DIR = ""
+if HEADLESS:
+    HEADLESS_AUDIO_DIR = os.path.join(STATION_DIR, ".audio_pipe")
+    os.makedirs(HEADLESS_AUDIO_DIR, exist_ok=True)
 
 # =======================
 # Live Feed Config Reloader
@@ -2372,72 +2422,121 @@ def speak(text: str, voice_key: str = None):
 
     chunk = 512
 
-    try:
-        with sd.OutputStream(
-            samplerate=sr,
-            channels=data.shape[1],
-            dtype="float32"
-        ) as stream:
+    if HEADLESS:
+        # ─── Headless: write WAV to audio pipe dir for web streaming ───
+        try:
+            import wave as _wave
+            ts_tag = int(time.time() * 1000)
+            wav_path = os.path.join(HEADLESS_AUDIO_DIR, f"seg_{ts_tag}.wav")
+            with _wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(data.shape[1])
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(sr)
+                pcm = (data * 32767).astype(np.int16)
+                wf.writeframes(pcm.tobytes())
 
-            total = len(data)
-            pos = 0
+            # Write a companion JSON with metadata so AudioBridge can pick it up
+            meta_path = wav_path + ".json"
+            with open(meta_path, "w") as mf:
+                json.dump({
+                    "voice": voice_key,
+                    "text": " ".join(words) if words else text,
+                    "duration": len(data) / float(sr) if sr else 0,
+                    "sr": sr,
+                    "ts": ts_tag,
+                }, mf)
 
-            while pos < total:
+            log("audio", f"[headless] wrote {wav_path} ({len(data)} samples)")
 
-                if SHOW_INTERRUPT.is_set():
-                    break
+            # Simulate real-time pacing so subtitle and event timing is preserved
+            duration = len(data) / float(sr) if sr else 0
+            if duration > 0:
+                # Push subtitles progressively
+                total_words = list(words) if words else text.split()
+                word_count = len(total_words)
+                if word_count:
+                    per_word = duration / word_count
+                    for w in total_words:
+                        if SHOW_INTERRUPT.is_set():
+                            break
+                        progress.append(w)
+                        subtitle_q.put(f"{voice_key.upper()}: " + " ".join(progress))
+                        time.sleep(per_word)
+                else:
+                    time.sleep(duration)
 
-                # -----------------------------
-                # MID-PLAY MUSIC CUT
-                # -----------------------------
+        except Exception as e:
+            log("audio", f"[headless] audio write failed: {type(e).__name__}: {e}")
+            return
 
-                try:
-                    # Only cut voice for music if flows plugin is enabled
-                    flows_enabled = MUSIC_STATE.get("flows_enabled", False)
-                    if flows_enabled and MUSIC_STATE.get("playing") and not MUSIC_STATE.get("allow_background_music"):
-                        log("audio", "Music resumed mid-TTS → cutting voice")
+    else:
+        # ─── Normal: stream to sounddevice ───
+        try:
+            with sd.OutputStream(
+                samplerate=sr,
+                channels=data.shape[1],
+                dtype="float32"
+            ) as stream:
+
+                total = len(data)
+                pos = 0
+
+                while pos < total:
+
+                    if SHOW_INTERRUPT.is_set():
                         break
-                except Exception:
-                    pass
+
+                    # -----------------------------
+                    # MID-PLAY MUSIC CUT
+                    # -----------------------------
+
+                    try:
+                        # Only cut voice for music if flows plugin is enabled
+                        flows_enabled = MUSIC_STATE.get("flows_enabled", False)
+                        if flows_enabled and MUSIC_STATE.get("playing") and not MUSIC_STATE.get("allow_background_music"):
+                            log("audio", "Music resumed mid-TTS → cutting voice")
+                            break
+                    except Exception:
+                        pass
 
 
-                end = min(pos + chunk, total)
-                block = data[pos:end]
+                    end = min(pos + chunk, total)
+                    block = data[pos:end]
 
-                stream.write(block)
+                    stream.write(block)
 
-                # -----------------------------
-                # RMS waveform level
-                # -----------------------------
+                    # -----------------------------
+                    # RMS waveform level
+                    # -----------------------------
 
-                samples = block[:, 0]
-                rms = np.sqrt(np.mean(samples * samples))
-                level = min(rms * 6.0, 1.0)
+                    samples = block[:, 0]
+                    rms = np.sqrt(np.mean(samples * samples))
+                    level = min(rms * 6.0, 1.0)
 
-                AUDIO_LEVEL = (_AUDIO_SMOOTH * AUDIO_LEVEL) + ((1 - _AUDIO_SMOOTH) * level)
+                    AUDIO_LEVEL = (_AUDIO_SMOOTH * AUDIO_LEVEL) + ((1 - _AUDIO_SMOOTH) * level)
 
-                pos = end
+                    pos = end
 
 
-                # -----------------------------
-                # Subtitle progression (audio time)
-                # -----------------------------
+                    # -----------------------------
+                    # Subtitle progression (audio time)
+                    # -----------------------------
 
-                audio_t = pos / float(sr)
+                    audio_t = pos / float(sr)
 
-                while words and audio_t >= next_word_at:
+                    while words and audio_t >= next_word_at:
 
-                    progress.append(words.pop(0))
+                        progress.append(words.pop(0))
 
-                    display = f"{voice_key.upper()}: " + " ".join(progress)
+                        display = f"{voice_key.upper()}: " + " ".join(progress)
 
-                    subtitle_q.put(display)
+                        subtitle_q.put(display)
 
-                    next_word_at += word_time
+                        next_word_at += word_time
 
-    except Exception as e:
-        log("audio", f"audio stream failed: {type(e).__name__}: {e}")
-        return
+        except Exception as e:
+            log("audio", f"audio stream failed: {type(e).__name__}: {e}")
+            return
 
 
     # =====================================================
@@ -9048,21 +9147,29 @@ def main():
     # UI
     # ------------------
 
-    log("init", "Creating StationUI")
-    try:
-        ui = StationUI(WIDGETS)
-        ui.root.update_idletasks()
-        ui.root.update()
-        ui.mem = mem  # 📝 Attach for UI editors
+    ui = None  # may stay None in headless mode
+
+    if HEADLESS:
+        log("init", "HEADLESS mode — skipping StationUI")
         mem.pop("_music_resume_at", None)
         mem.pop("_music_resume_cmd", None)
         mem.pop("_music_boundary_active", None)
-        log("init", "StationUI created successfully")
-    except Exception as e:
-        log("ERR", f"Failed to create UI: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+    else:
+        log("init", "Creating StationUI")
+        try:
+            ui = StationUI(WIDGETS)
+            ui.root.update_idletasks()
+            ui.root.update()
+            ui.mem = mem  # 📝 Attach for UI editors
+            mem.pop("_music_resume_at", None)
+            mem.pop("_music_resume_cmd", None)
+            mem.pop("_music_boundary_active", None)
+            log("init", "StationUI created successfully")
+        except Exception as e:
+            log("ERR", f"Failed to create UI: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
     # ------------------
     # Characters
@@ -9139,15 +9246,24 @@ def main():
     log("init", "Setting up stop event and UI close handler")
     stop_event = threading.Event()
 
-    def on_close():
-        stop_event.set()
-        try:
-            ui.root.quit()
-            ui.root.destroy()
-        except Exception:
-            pass
+    if HEADLESS:
+        # In headless mode, handle SIGTERM/SIGINT for clean shutdown
+        import signal as _signal
+        def _headless_stop(*args):
+            log("shutdown", "Headless stop signal received")
+            stop_event.set()
+        _signal.signal(_signal.SIGTERM, _headless_stop)
+        _signal.signal(_signal.SIGINT, _headless_stop)
+    else:
+        def on_close():
+            stop_event.set()
+            try:
+                ui.root.quit()
+                ui.root.destroy()
+            except Exception:
+                pass
 
-    ui.root.protocol("WM_DELETE_WINDOW", on_close)
+        ui.root.protocol("WM_DELETE_WINDOW", on_close)
 
     # ------------------
     # DB seed
@@ -9349,7 +9465,12 @@ def main():
 
     log("init", "All threads started, entering UI mainloop")
     try:
-        ui.root.mainloop()
+        if HEADLESS:
+            # Headless: block on stop_event instead of tkinter mainloop
+            log("init", "HEADLESS — waiting on stop_event (no mainloop)")
+            stop_event.wait()
+        else:
+            ui.root.mainloop()
     finally:
         log("shutdown", "UI mainloop exited, stopping all threads")
         stop_event.set()

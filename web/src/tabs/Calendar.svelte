@@ -12,26 +12,32 @@
 
   const categories = [
     { value: 'all', label: 'All' },
-    { value: 'race', label: '🏁 Races' },
-    { value: 'deadline', label: '⏰ Deadlines' },
-    { value: 'transfer', label: '🔄 Transfers' },
-    { value: 'contract', label: '📝 Contracts' },
-    { value: 'development', label: '🔧 Development' },
+    { value: 'competition', label: '🏁 Races' },
+    { value: 'personnel', label: '� Personnel' },
+    { value: 'financial', label: '� Financial' },
+    { value: 'pressure', label: '⚠️ Pressure' },
   ]
 
   $: filteredDays = filterCategory === 'all'
     ? days
     : days.filter((d: any) => d.events?.some((e: any) => e.category === filterCategory))
 
-  function prevMonth() { sendCommand({ cmd: 'ftb_calendar_nav', direction: 'prev' }) }
-  function nextMonth() { sendCommand({ cmd: 'ftb_calendar_nav', direction: 'next' }) }
+  // Map entry_type/category to CSS class
+  function eventCssClass(evt: any): string {
+    const et = evt.entry_type || ''
+    const cat = evt.category || ''
+    if (et === 'race' || et === 'travel_window') return 'cat-race'
+    if (cat === 'competition') return 'cat-race'
+    if (cat === 'personnel') return 'cat-contract'
+    if (cat === 'financial') return 'cat-deadline'
+    if (cat === 'pressure') return 'cat-transfer'
+    return 'cat-other'
+  }
 </script>
 
 <div class="tab-content scroll-y">
   <div class="calendar-header">
-    <button class="btn btn-ghost btn-sm" on:click={prevMonth}>←</button>
-    <h3>{month} {year}</h3>
-    <button class="btn btn-ghost btn-sm" on:click={nextMonth}>→</button>
+    <h3>📅 {month} {year} — Day {currentDay}</h3>
   </div>
 
   <div class="filter-bar">
@@ -50,7 +56,7 @@
           <div class="day-number">{day.day}</div>
           <div class="day-events">
             {#each (day.events || []) as evt}
-              <div class="calendar-event cat-{evt.category || 'other'}">
+              <div class="calendar-event {eventCssClass(evt)}">
                 <span class="event-name">{evt.name || evt.label || evt}</span>
                 {#if evt.detail}
                   <span class="event-detail">{evt.detail}</span>
@@ -65,7 +71,7 @@
       {/each}
     </div>
   {:else}
-    <p class="muted" style="text-align: center; padding: 32px;">No events for this period.</p>
+    <p class="muted" style="text-align: center; padding: 32px;">No upcoming events in the next 90 days.</p>
   {/if}
 </div>
 

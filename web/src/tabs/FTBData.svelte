@@ -308,8 +308,7 @@
     flex-direction: column;
     gap: 12px;
     padding: 12px;
-    height: 100%;
-    overflow: hidden;
+    min-height: 0;
   }
   
   .tabs-card {

@@ -18,7 +18,7 @@ import os
 import socket
 import threading
 import time
-from collections import deque
+from collections import deque, defaultdict
 from typing import Any, Dict, List, Optional, Set
 
 PLUGIN_NAME = "ftb_web_server"
@@ -132,8 +132,17 @@ def serialize_entity(entity) -> Dict[str, Any]:
         "age": getattr(entity, "age", 0),
         "overall": getattr(entity, "overall_rating", 0) if hasattr(entity, "overall_rating") else 0,
     }
-    # Grab stat dict if available
-    if hasattr(entity, "stats") and isinstance(entity.stats, dict):
+    # Extra useful fields for detail view
+    for attr in ("entity_id", "potential_ceiling", "potential_rating",
+                 "form_momentum", "morale_baseline", "display_name"):
+        val = getattr(entity, attr, None)
+        if val is not None:
+            d[attr] = round(float(val), 1) if isinstance(val, float) else val
+    # Grab stat dict if available — entities use 'current_ratings', fallback to 'stats'
+    ratings = getattr(entity, "current_ratings", None)
+    if ratings and isinstance(ratings, dict):
+        d["stats"] = {k: round(float(v), 1) for k, v in ratings.items() if isinstance(v, (int, float))}
+    elif hasattr(entity, "stats") and isinstance(entity.stats, dict):
         d["stats"] = {k: round(float(v), 1) for k, v in entity.stats.items() if isinstance(v, (int, float))}
     elif hasattr(entity, "to_dict"):
         try:
@@ -152,6 +161,59 @@ def serialize_entity(entity) -> Dict[str, Any]:
     return d
 
 
+def _part_cost(part) -> int:
+    """Calculate part cost using the same formula as FTBSimulation.calculate_part_cost."""
+    base_cost = {
+        'engine': 100000, 'chassis': 150000, 'aero_package': 120000,
+        'suspension': 80000, 'tires': 30000, 'brakes': 50000,
+        'cooling': 60000, 'electronics': 90000, 'transmission': 85000,
+    }
+    cost = base_cost.get(getattr(part, "part_type", ""), 50000)
+    cost *= (1.0 + (getattr(part, "generation", 1) - 1) * 0.25)
+    perf = getattr(part, "performance_score", None)
+    if perf is None:
+        # fallback: average of current_ratings
+        ratings = getattr(part, "current_ratings", None)
+        if ratings and isinstance(ratings, dict):
+            vals = [v for v in ratings.values() if isinstance(v, (int, float))]
+            perf = (sum(vals) / len(vals)) if vals else 50.0
+        else:
+            perf = 50.0
+    cost *= (perf / 50.0)
+    tier_min = getattr(part, "tier_minimum", 1)
+    cost *= (1.0 + (tier_min - 1) * 0.2)
+    return int(cost)
+
+
+def serialize_part(part) -> Dict[str, Any]:
+    """Serialize a Part entity to dict for the web frontend."""
+    if part is None:
+        return None
+    # quality = overall_rating (avg of current_ratings)
+    overall = 0
+    ratings = getattr(part, "current_ratings", None)
+    if ratings and isinstance(ratings, dict):
+        vals = [v for v in ratings.values() if isinstance(v, (int, float))]
+        overall = round(sum(vals) / len(vals), 1) if vals else 0
+    elif hasattr(part, "overall_rating"):
+        overall = round(getattr(part, "overall_rating", 0), 1)
+
+    d: Dict[str, Any] = {
+        "id": getattr(part, "part_id", ""),
+        "name": getattr(part, "name", "") or getattr(part, "display_name", ""),
+        "type": getattr(part, "part_type", ""),
+        "quality": overall,
+        "cost": _part_cost(part),
+        "generation": getattr(part, "generation", 1),
+        "manufacturer_id": getattr(part, "manufacturer_id", ""),
+        "effectiveness": round(getattr(part, "effectiveness_modifier", 1.0), 2),
+    }
+    # Include individual stats
+    if ratings and isinstance(ratings, dict):
+        d["stats"] = {k: round(float(v), 1) for k, v in ratings.items() if isinstance(v, (int, float))}
+    return d
+
+
 def serialize_team(team) -> Dict[str, Any]:
     """Serialize a Team to dict."""
     if team is None:
@@ -167,10 +229,29 @@ def serialize_team(team) -> Dict[str, Any]:
     # Budget
     budget = getattr(team, "budget", None)
     if budget:
+        # Compute weekly expenses: burn_rate * 7 (per-tick → per-week) + staff salaries * 7
+        burn_per_tick = getattr(budget, "burn_rate", 0) or 0
+        staff_per_tick = sum((getattr(budget, "staff_salaries", {}) or {}).values())
+        weekly_expenses = (burn_per_tick + staff_per_tick) * 7
+
+        # Compute weekly income from income_streams
+        weekly_income = 0.0
+        for inc in (getattr(budget, "income_streams", None) or []):
+            amt = getattr(inc, "amount", 0) or 0
+            freq = getattr(inc, "frequency", "")
+            if freq == "monthly":
+                weekly_income += amt / 4.33
+            elif freq == "season":
+                weekly_income += amt / 52
+            elif freq == "per_race":
+                weekly_income += amt / 4  # rough: ~1 race per month
+            else:
+                weekly_income += amt
+
         d["budget"] = {
             "cash": getattr(budget, "cash", 0),
-            "weekly_expenses": getattr(budget, "weekly_expenses", 0),
-            "weekly_income": getattr(budget, "weekly_income", 0),
+            "weekly_expenses": round(weekly_expenses, 2),
+            "weekly_income": round(weekly_income, 2),
         }
     # Roster
     for role in ("drivers", "engineers", "mechanics", "strategist", "principal"):
@@ -188,27 +269,28 @@ def serialize_team(team) -> Dict[str, Any]:
             "name": getattr(car, "name", ""),
             "overall": getattr(car, "overall_rating", 0) if hasattr(car, "overall_rating") else 0,
         }
-        if hasattr(car, "stats") and isinstance(car.stats, dict):
+        # Car stats: use current_ratings (same pattern as entities)
+        car_ratings = getattr(car, "current_ratings", None)
+        if car_ratings and isinstance(car_ratings, dict):
+            d["car"]["stats"] = {k: round(float(v), 1) for k, v in car_ratings.items() if isinstance(v, (int, float))}
+        elif hasattr(car, "stats") and isinstance(car.stats, dict):
             d["car"]["stats"] = {k: round(float(v), 1) for k, v in car.stats.items() if isinstance(v, (int, float))}
-        if hasattr(car, "equipped_parts"):
+
+        # Equipped parts live on the team, not the car: team.equipped_parts is Dict[str, Part]
+        equipped = getattr(team, "equipped_parts", None)
+        if equipped and isinstance(equipped, dict):
+            d["car"]["equipped_parts"] = [serialize_part(p) for p in equipped.values() if p]
+        elif equipped and isinstance(equipped, list):
+            d["car"]["equipped_parts"] = [serialize_part(p) for p in equipped if p]
+        else:
             d["car"]["equipped_parts"] = []
-            for p in (car.equipped_parts or []):
-                d["car"]["equipped_parts"].append({
-                    "id": getattr(p, "part_id", ""),
-                    "name": getattr(p, "name", ""),
-                    "type": getattr(p, "part_type", ""),
-                    "quality": getattr(p, "quality", 0),
-                })
-        if hasattr(car, "parts_inventory"):
+
+        # Parts inventory lives on the team: team.parts_inventory is List[Part]
+        inventory = getattr(team, "parts_inventory", None)
+        if inventory and isinstance(inventory, list):
+            d["car"]["parts_inventory"] = [serialize_part(p) for p in inventory if p]
+        else:
             d["car"]["parts_inventory"] = []
-            for p in (car.parts_inventory or []):
-                d["car"]["parts_inventory"].append({
-                    "id": getattr(p, "part_id", ""),
-                    "name": getattr(p, "name", ""),
-                    "type": getattr(p, "part_type", ""),
-                    "quality": getattr(p, "quality", 0),
-                    "cost": getattr(p, "cost", 0),
-                })
     # Infrastructure
     infra = getattr(team, "infrastructure", None)
     if infra:
@@ -230,7 +312,7 @@ def serialize_team(team) -> Dict[str, Any]:
 
 
 def serialize_game_state(controller) -> Dict[str, Any]:
-    """Full game state snapshot for the REST API. Call with state_lock held."""
+    """Full game state snapshot for the REST API. Lock is acquired by _serialize_with_lock()."""
     state = controller.state
     if state is None:
         return {"status": "no_game", "tick": 0}
@@ -317,16 +399,21 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     out["free_agents"] = []
     for fa in (state.free_agents or [])[:100]:
         entity = getattr(fa, "entity", fa)
-        out["free_agents"].append(serialize_entity(entity))
+        d = serialize_entity(entity)
+        # Use entity_id for stable identification (id(fa) is a Python memory
+        # address that can lose precision in JSON / JavaScript).
+        d["id"] = getattr(entity, "entity_id", None) or id(fa)
+        d["asking_salary"] = getattr(fa, "asking_salary", 0)
+        out["free_agents"].append(d)
 
     # Job board
     jb = getattr(state, "job_board", None)
     if jb:
-        listings = getattr(jb, "listings", [])
+        listings = getattr(jb, "listings", None) or getattr(jb, "vacancies", [])
         out["job_board"] = []
-        for listing in (listings or []):
+        for idx, listing in enumerate(listings or []):
             out["job_board"].append({
-                "id": id(listing),
+                "id": idx,
                 "team_name": getattr(listing, "team_name", ""),
                 "role": getattr(listing, "role", ""),
                 "salary_range": getattr(listing, "salary_range", [0, 0]),
@@ -345,9 +432,9 @@ def serialize_game_state(controller) -> Dict[str, Any]:
 
     # Pending decisions
     out["pending_decisions"] = []
-    for dec in (state.pending_decisions or []):
+    for idx, dec in enumerate(state.pending_decisions or []):
         out["pending_decisions"].append({
-            "id": id(dec),
+            "id": getattr(dec, "decision_id", None) or idx,
             "prompt": getattr(dec, "prompt", ""),
             "options": [
                 {
@@ -367,8 +454,9 @@ def serialize_game_state(controller) -> Dict[str, Any]:
         for sp in (slist or []):
             out["sponsorships"][team_name].append({
                 "name": getattr(sp, "sponsor_name", getattr(sp, "name", "")),
-                "value": getattr(sp, "annual_value", 0),
-                "seasons_remaining": getattr(sp, "seasons_remaining", 0),
+                "value": getattr(sp, "base_payment_per_season", getattr(sp, "annual_value", 0)),
+                "seasons_remaining": getattr(sp, "duration_seasons", getattr(sp, "seasons_remaining", 0)) - getattr(sp, "seasons_active", 0),
+                "confidence": round(getattr(sp, "confidence", 100.0), 1),
             })
 
     # Penalties
@@ -381,16 +469,10 @@ def serialize_game_state(controller) -> Dict[str, Any]:
             "tick": getattr(p, "tick", 0),
         })
 
-    # Parts marketplace (top 50 by quality)
+    # Parts marketplace (top 50 by performance)
     out["parts_marketplace"] = []
     for pid, part in list(state.parts_catalog.items())[:50]:
-        out["parts_marketplace"].append({
-            "id": pid,
-            "name": getattr(part, "name", ""),
-            "type": getattr(part, "part_type", ""),
-            "quality": getattr(part, "quality", 0),
-            "cost": getattr(part, "cost", 0),
-        })
+        out["parts_marketplace"].append(serialize_part(part))
 
     # Manager career stats
     mcs = getattr(state, "manager_career_stats", None)
@@ -423,6 +505,58 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     # Current meta / economic state
     out["current_meta"] = getattr(state, "current_meta", {})
     out["economic_state"] = getattr(state, "economic_state", {})
+
+    # ─── Calendar Projection ─────────────────────────────────────
+    try:
+        projection = state.get_calendar_projection(days_ahead=90)
+        # Group by simulated day-of-year for the Calendar UI
+        # The Calendar tab expects { days: [ { day, events: [ { name, category, detail } ] } ], current_day, month_label, year }
+        day_events: Dict[int, list] = defaultdict(list)
+        for entry in projection:
+            eday = entry.get("entry_day", 0)
+            day_events[eday].append({
+                "name": entry.get("title", ""),
+                "category": entry.get("category", "other"),
+                "detail": entry.get("description", ""),
+                "priority": entry.get("priority", 50),
+                "entry_type": entry.get("entry_type", ""),
+            })
+        days_list = []
+        for day_num in sorted(day_events.keys()):
+            days_list.append({"day": day_num, "events": day_events[day_num]})
+        # Build month label from current date string
+        date_str = state.current_date_str() if hasattr(state, "current_date_str") else ""
+        month_label = ""
+        year_label = ""
+        if date_str:
+            parts = date_str.split()
+            if len(parts) >= 3:
+                month_label = parts[1]  # e.g. "15 March Year3" → "March"
+                year_label = parts[2]
+            elif len(parts) == 2:
+                month_label = parts[0]
+                year_label = parts[1]
+        out["calendar"] = {
+            "days": days_list,
+            "current_day": state.sim_day_of_year,
+            "month_label": month_label,
+            "year": year_label,
+        }
+    except Exception as e:
+        out["calendar"] = {"days": [], "current_day": 0, "month_label": "", "year": ""}
+
+    # ─── Income Streams (for Finance tab) ─────────────────────────
+    if state.player_team:
+        pt_budget = getattr(state.player_team, "budget", None)
+        if pt_budget:
+            streams = getattr(pt_budget, "income_streams", None) or []
+            out["income_streams"] = []
+            for inc in streams:
+                out["income_streams"].append({
+                    "name": getattr(inc, "name", ""),
+                    "amount": getattr(inc, "amount", 0),
+                    "frequency": getattr(inc, "frequency", ""),
+                })
 
     # ─── Race Day State ────────────────────────────────────────────
     rds = getattr(state, "race_day_state", None)
@@ -500,9 +634,9 @@ def serialize_game_state(controller) -> Dict[str, Any]:
             out["pending_sponsor_offers"][team_name].append({
                 "index": idx,
                 "name": getattr(sp, "sponsor_name", getattr(sp, "name", "")),
-                "value": getattr(sp, "annual_value", 0),
-                "seasons_remaining": getattr(sp, "seasons_remaining", 0),
-                "confidence": getattr(sp, "confidence", 100),
+                "value": getattr(sp, "base_payment_per_season", getattr(sp, "annual_value", 0)),
+                "seasons_remaining": getattr(sp, "duration_seasons", getattr(sp, "seasons_remaining", 0)),
+                "confidence": round(getattr(sp, "confidence", 100.0), 1),
                 "sponsor_id": getattr(sp, "sponsor_id", ""),
             })
 
@@ -533,6 +667,23 @@ def serialize_game_state(controller) -> Dict[str, Any]:
 # FastAPI Application
 # ═══════════════════════════════════════════════════════════════════
 
+def _serialize_with_lock(controller) -> Dict[str, Any]:
+    """Serialize game state. Uses a short lock timeout so we never block the
+    web server indefinitely.  If the lock is contended we just return a
+    lightweight 'busy' response instead of hanging."""
+    try:
+        acquired = controller.state_lock.acquire(timeout=0.5)
+        if not acquired:
+            # Lock is held by the game engine — return a non-fatal busy marker
+            # so the frontend keeps its existing state and retries on next poll.
+            return {"status": "busy", "tick": getattr(controller.state, "tick", 0) if controller.state else 0}
+        try:
+            return serialize_game_state(controller)
+        finally:
+            controller.state_lock.release()
+    except Exception as e:
+        return {"status": "no_game", "error": str(e)}
+
 def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     """Build the FastAPI app with all routes."""
     _ensure_imports()
@@ -553,6 +704,42 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
 
     log_fn = shared_runtime.get("log", lambda *a, **k: None)
 
+    # ─── Bridge → broadcaster pump (runs as background task) ───
+    async def bridge_pump():
+        """Drain bridge._broadcast_queue and fan out to all connected WS clients."""
+        bq = bridge._broadcast_queue
+        if not bq:
+            return
+        while True:
+            try:
+                msg = await bq.get()
+                # Fan out to all connected clients
+                dead = set()
+                for ws in list(bridge.connected_clients):
+                    try:
+                        await ws.send_text(msg)
+                    except Exception:
+                        dead.add(ws)
+                bridge.connected_clients -= dead
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(0.1)
+
+    @app.on_event("startup")
+    async def on_startup():
+        loop = asyncio.get_event_loop()
+        bq = asyncio.Queue(maxsize=1000)
+        bridge.set_async_context(loop, bq)
+        app.state.pump_task = asyncio.create_task(bridge_pump())
+        log_fn("web", "Bridge pump started (async context initialized)")
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        task = getattr(app.state, "pump_task", None)
+        if task:
+            task.cancel()
+
     # ──── REST: Health ────
     @app.get("/api/health")
     async def health():
@@ -565,11 +752,14 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         if not controller:
             return JSONResponse({"status": "no_controller"}, 503)
         try:
-            with controller.state_lock:
-                data = serialize_game_state(controller)
+            # Run lock acquisition in a thread so we don't block the async event loop
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: _serialize_with_lock(controller))
             return data
         except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
+            log_fn("web", f"serialize_game_state error: {e}")
+            # Return no_game rather than a bare error so the frontend keeps polling
+            return JSONResponse({"status": "no_game", "error": str(e)}, 200)
 
     # ──── REST: Current subtitle ────
     @app.get("/api/subtitle")
@@ -606,6 +796,53 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
             return {"status": "queued", "action": action}
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
+
+    # ──── REST: Check for autosave ────
+    @app.get("/api/check_autosave")
+    async def check_autosave():
+        """Check if an autosave file exists and return its path + metadata."""
+        # Try multiple locations where autosave could live
+        candidates = []
+        # 1. Controller's own save path (most authoritative)
+        controller = shared_runtime.get("ftb_controller")
+        if controller:
+            csp = getattr(controller, "current_save_path", None)
+            if csp:
+                candidates.append(csp)
+            cap = getattr(controller, "_get_autosave_path", None)
+            if cap:
+                try:
+                    candidates.append(cap())
+                except Exception:
+                    pass
+        # 2. STATION_DIR / ftb_autosave.json
+        station_dir = shared_runtime.get("STATION_DIR", "")
+        if station_dir:
+            candidates.append(os.path.join(station_dir, "ftb_autosave.json"))
+        # 3. RADIO_OS_ROOT / ftb_autosave.json
+        root = os.environ.get("RADIO_OS_ROOT", "")
+        if root:
+            candidates.append(os.path.join(root, "ftb_autosave.json"))
+        # 4. Scan stations/ for any ftb_autosave.json
+        root_dir = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        stations_dir = os.path.join(root_dir, "stations")
+        if os.path.isdir(stations_dir):
+            for sname in os.listdir(stations_dir):
+                p = os.path.join(stations_dir, sname, "ftb_autosave.json")
+                candidates.append(p)
+        # 5. cwd fallback
+        candidates.append(os.path.join(".", "ftb_autosave.json"))
+
+        for path in candidates:
+            path = os.path.normpath(path)
+            if os.path.isfile(path):
+                return {
+                    "exists": True,
+                    "path": path,
+                    "size": os.path.getsize(path),
+                    "mtime": os.path.getmtime(path),
+                }
+        return {"exists": False}
 
     # ──── REST: List save files ────
     @app.get("/api/saves")
@@ -650,8 +887,8 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         if not controller or not controller.state:
             return JSONResponse({"phase": "idle"}, 200)
         try:
-            with controller.state_lock:
-                data = serialize_game_state(controller)
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: _serialize_with_lock(controller))
             return {"race_day": data.get("race_day", {"phase": "idle"}),
                     "play_by_play": data.get("play_by_play", {})}
         except Exception as e:
@@ -679,11 +916,12 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         return {"status": "queued", "speed": speed}
 
     @app.post("/api/race_day/pause")
-    async def race_day_pause():
+    async def race_day_pause(body: dict = {}):
         ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
         if not ftb_cmd_q:
             return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
-        ftb_cmd_q.put({"cmd": "ftb_pause_live_race"})
+        paused = body.get("paused", True)
+        ftb_cmd_q.put({"cmd": "ftb_pause_live_race", "paused": paused})
         return {"status": "queued"}
 
     @app.post("/api/race_day/complete")
@@ -838,6 +1076,60 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q.put({"cmd": cmd_name, "n": n})
         return {"status": "queued", "cmd": cmd_name, "n": n}
 
+    # ──── REST: Audio state for web clients ────
+    @app.get("/api/audio_state")
+    async def get_audio_state():
+        """Return current audio engine state so the browser can mirror it."""
+        controller = shared_runtime.get("ftb_controller")
+        state = controller.state if controller else None
+
+        result: Dict[str, Any] = {
+            "music_variant": "neutral",
+            "music_ducking": False,
+            "music_pbp_muted": False,
+            "engine_league": None,
+            "performance_scalar": 0.0,
+        }
+
+        # Try to read live values from the audio engine singleton
+        try:
+            from plugins.ftb_audio_engine import _audio_engine
+            if _audio_engine:
+                mc = _audio_engine.music_controller
+                result["music_variant"] = mc.current_variant
+                result["music_ducking"] = mc.is_ducking
+                result["music_pbp_muted"] = mc.pbp_muted
+                result["engine_league"] = _audio_engine.world_controller.current_engine_league
+                result["performance_scalar"] = round(_audio_engine.current_scalar, 3)
+        except Exception:
+            pass
+
+        # Also expose whether a live race is active (for engine sounds)
+        if state:
+            rds = getattr(state, "race_day_state", None)
+            result["race_day_active"] = rds is not None and getattr(rds, "live_race_active", False)
+        else:
+            result["race_day_active"] = False
+
+        return result
+
+    # ──── Static: Audio files ────
+    station_dir = shared_runtime.get("STATION_DIR", "") or os.environ.get("STATION_DIR", "")
+    audio_dir_path = os.path.join(station_dir, "audio") if station_dir else ""
+    if not audio_dir_path or not os.path.isdir(audio_dir_path):
+        # Fallback: try to find audio under the station dir via RADIO_OS_ROOT
+        radio_root = os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        for candidate in [
+            os.path.join(radio_root, "stations", "FromTheBackmarker", "audio"),
+            os.path.join(radio_root, "audio"),
+        ]:
+            if os.path.isdir(candidate):
+                audio_dir_path = candidate
+                break
+    if audio_dir_path and os.path.isdir(audio_dir_path):
+        app.mount("/audio", StaticFiles(directory=audio_dir_path), name="audio")
+        log_fn("web", f"📢 Mounted /audio → {audio_dir_path}")
+
     # ──── WebSocket: Live stream ────
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):
@@ -849,17 +1141,14 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         try:
             controller = shared_runtime.get("ftb_controller")
             if controller and hasattr(controller, "state_lock"):
-                with controller.state_lock:
-                    state_data = serialize_game_state(controller)
+                loop = asyncio.get_event_loop()
+                state_data = await loop.run_in_executor(None, lambda: _serialize_with_lock(controller))
                 await ws.send_json({"type": "initial_state", "data": state_data})
 
             # Send current subtitle
             await ws.send_json({"type": "subtitle", "data": {"text": bridge.last_subtitle}})
         except Exception:
             pass
-
-        # Spawn broadcast listener task
-        broadcast_task = asyncio.create_task(_ws_broadcast_listener(ws, bridge))
 
         try:
             while True:
@@ -894,7 +1183,6 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         except Exception:
             pass
         finally:
-            broadcast_task.cancel()
             bridge.connected_clients.discard(ws)
             log_fn("web", f"WebSocket client disconnected ({len(bridge.connected_clients)} total)")
 
@@ -1023,257 +1311,6 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     return app
 
 
-async def _ws_broadcast_listener(ws, bridge: WebBridge):
-    """Coroutine that forwards broadcast messages from the bridge to a single client."""
-    bq = bridge._broadcast_queue
-    if not bq:
-        return
-    try:
-        while True:
-            msg = await bq.get()
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                break
-    except asyncio.CancelledError:
-        pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Per-client broadcast fan-out
-# ═══════════════════════════════════════════════════════════════════
-# The bridge puts messages on a single asyncio.Queue. We need to
-# fan-out to each connected client. We do this with a broadcaster task
-# + per-client queues.
-
-class BroadcastManager:
-    """Manages per-client message queues for WebSocket fan-out."""
-
-    def __init__(self):
-        self._clients: Dict[int, asyncio.Queue] = {}
-        self._lock = asyncio.Lock()
-
-    async def register(self, ws_id: int) -> asyncio.Queue:
-        async with self._lock:
-            q = asyncio.Queue(maxsize=200)
-            self._clients[ws_id] = q
-            return q
-
-    async def unregister(self, ws_id: int):
-        async with self._lock:
-            self._clients.pop(ws_id, None)
-
-    async def broadcast(self, msg: str):
-        async with self._lock:
-            dead = []
-            for ws_id, q in self._clients.items():
-                try:
-                    q.put_nowait(msg)
-                except asyncio.QueueFull:
-                    dead.append(ws_id)
-            for ws_id in dead:
-                self._clients.pop(ws_id, None)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Revised FastAPI app with proper fan-out
-# ═══════════════════════════════════════════════════════════════════
-
-def create_full_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
-    """Build FastAPI app with proper per-client WebSocket broadcasting."""
-    _ensure_imports()
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import JSONResponse, HTMLResponse
-    from fastapi.middleware.cors import CORSMiddleware
-
-    app = FastAPI(title="FTB Web Server", version="1.0.0")
-    
-    # CRITICAL: Test if this simple WebSocket works
-    @app.websocket("/ws/simple")
-    async def websocket_simple_test(websocket: WebSocket):
-        await websocket.accept()
-        await websocket.send_text("Simple WebSocket connected!")
-        try:
-            while True:
-                data = await websocket.receive_text()
-                await websocket.send_text(f"Echo: {data}")
-        except WebSocketDisconnect:
-            pass
-
-    broadcaster = BroadcastManager()
-
-    # TEMPORARILY DISABLE CORS MIDDLEWARE TO TEST
-    # app.add_middleware(
-    #     CORSMiddleware,
-    #     allow_origins=["*"],
-    #     allow_methods=["*"],
-    #     allow_headers=["*"],
-    # )
-
-    log_fn = shared_runtime.get("log", lambda *a, **k: None)
-
-    # ─── Bridge → broadcaster pump (runs as background task) ───
-    async def bridge_pump():
-        """Drain bridge._broadcast_queue and fan out to all clients."""
-        bq = bridge._broadcast_queue
-        if not bq:
-            return
-        while True:
-            try:
-                msg = await bq.get()
-                await broadcaster.broadcast(msg)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(0.1)
-
-    @app.on_event("startup")
-    async def on_startup():
-        loop = asyncio.get_event_loop()
-        bq = asyncio.Queue(maxsize=1000)
-        bridge.set_async_context(loop, bq)
-        app.state.pump_task = asyncio.create_task(bridge_pump())
-        log_fn("web", "Bridge pump started")
-
-    @app.on_event("shutdown")
-    async def on_shutdown():
-        task = getattr(app.state, "pump_task", None)
-        if task:
-            task.cancel()
-
-    # ──── REST endpoints (same as above) ────
-    @app.get("/api/health")
-    async def health():
-        return {"status": "ok", "ts": time.time()}
-
-    @app.get("/api/websocket-test")
-    async def websocket_test():
-        return {"message": "WebSocket handler should be available at /ws/live", "websocket_endpoint": "/ws/live"}
-
-    @app.get("/api/state")
-    async def get_state():
-        controller = shared_runtime.get("ftb_controller")
-        if not controller:
-            return JSONResponse({"status": "no_controller"}, 503)
-        try:
-            with controller.state_lock:
-                data = serialize_game_state(controller)
-            return data
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
-
-    @app.get("/api/subtitle")
-    async def get_subtitle():
-        return {"text": bridge.last_subtitle}
-
-    @app.get("/api/snapshot")
-    async def get_snapshot():
-        return bridge.get_snapshot()
-
-    @app.post("/api/command")
-    async def send_command(cmd: Dict[str, Any]):
-        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
-        if not ftb_cmd_q:
-            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
-        try:
-            ftb_cmd_q.put(cmd)
-            return {"status": "queued", "cmd": cmd.get("cmd", "")}
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
-
-    @app.post("/api/ui_command")
-    async def send_ui_command(cmd: Dict[str, Any]):
-        ui_cmd_q = shared_runtime.get("ui_cmd_q")
-        if not ui_cmd_q:
-            return JSONResponse({"error": "ui_cmd_q not available"}, 503)
-        try:
-            action = cmd.get("action", "")
-            payload = cmd.get("payload", {})
-            ui_cmd_q.put((action, payload))
-            return {"status": "queued", "action": action}
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
-
-    @app.get("/api/saves")
-    async def list_saves():
-        root = os.environ.get("RADIO_OS_ROOT", "")
-        saves_dir = os.path.join(root, "saves") if root else os.path.join(
-            shared_runtime.get("STATION_DIR", "."), "..", "..", "saves"
-        )
-        saves_dir = os.path.normpath(saves_dir)
-        files = []
-        if os.path.isdir(saves_dir):
-            for f in os.listdir(saves_dir):
-                if f.endswith(".json"):
-                    fp = os.path.join(saves_dir, f)
-                    files.append({
-                        "name": f,
-                        "path": fp,
-                        "size": os.path.getsize(fp),
-                        "mtime": os.path.getmtime(fp),
-                    })
-        return {"saves": sorted(files, key=lambda x: x["mtime"], reverse=True)}
-
-    @app.get("/api/notifications")
-    async def get_notifications():
-        try:
-            from plugins import ftb_notifications
-            if hasattr(ftb_notifications, "query_notifications"):
-                notifs = ftb_notifications.query_notifications(limit=100)
-                return {"notifications": notifs}
-        except Exception:
-            pass
-        return {"notifications": []}
-
-    # ──── WebSocket with per-client queue ────
-    @app.websocket("/ws/live")
-    async def websocket_live(ws: WebSocket):
-        log_fn("web", "🔌 WebSocket /ws/live attempt")
-        try:
-            await ws.accept()
-            log_fn("web", "✅ WebSocket /ws/live accepted!")
-            await ws.send_text("WebSocket /ws/live connected!")
-            
-            while True:
-                data = await ws.receive_text()
-                log_fn("web", f"📥 /ws/live received: {data}")
-                await ws.send_text(f"Live echo: {data}")
-        except WebSocketDisconnect:
-            log_fn("web", "🔌 /ws/live disconnected")
-        except Exception as e:
-            log_fn("web", f"❌ /ws/live error: {e}")
-            import traceback
-            log_fn("web", f"Traceback: {traceback.format_exc()}")
-            raise
-
-    # ──── Static files ────
-    radio_root = os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    dist_dir = os.path.join(radio_root, "web", "dist")
-
-    @app.get("/")
-    async def serve_index():
-        index_path = os.path.join(dist_dir, "index.html")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                return HTMLResponse(f.read())
-        return HTMLResponse(
-            "<!DOCTYPE html><html><body style='font-family:system-ui;background:#1a1a2e;color:#e0e0e0;padding:2rem'>"
-            "<h1>📡 FTB Web Server Running</h1>"
-            "<p>Frontend not built yet.</p>"
-            "<pre>cd web\nnpm install\nnpm run build</pre>"
-            f"<p>API: <a href='/api/health' style='color:#4cc9f0'>/api/health</a> · "
-            f"<a href='/api/state' style='color:#4cc9f0'>/api/state</a></p>"
-            "</body></html>"
-        )
-
-    assets_dir = os.path.join(dist_dir, "assets")
-    if os.path.isdir(assets_dir):
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-
-    return app
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Server launcher — called from bookmark.py as a daemon thread target
 # ═══════════════════════════════════════════════════════════════════
@@ -1300,8 +1337,30 @@ def start_web_server(stop_event: threading.Event, shared_runtime: Dict[str, Any]
     """
     _ensure_imports()
     import uvicorn
+    import signal
+    import subprocess
 
     log_fn = shared_runtime.get("log", print)
+
+    # ── Kill any stale process holding our port ──
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{WEB_SERVER_PORT}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        my_pid = str(os.getpid())
+        for pid in pids:
+            if pid and pid != my_pid:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    log_fn("web", f"Killed stale process {pid} on port {WEB_SERVER_PORT}")
+                except (ProcessLookupError, PermissionError):
+                    pass
+        if pids:
+            time.sleep(0.5)  # give OS time to release the socket
+    except Exception as e:
+        log_fn("web", f"Port cleanup skipped: {e}")
 
     bridge = get_bridge()
     shared_runtime["web_bridge"] = bridge

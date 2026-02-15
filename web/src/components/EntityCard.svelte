@@ -1,9 +1,12 @@
 <script lang="ts">
   import StatBar from './StatBar.svelte'
+  import EntityDetail from './EntityDetail.svelte'
 
   export let entity: any = null
   export let compact: boolean = false
   export let onFire: (() => void) | null = null
+
+  let showDetail = false
 
   $: name = entity?.name || 'Unknown'
   $: type = entity?.type || entity?.entity_type || ''
@@ -21,7 +24,8 @@
   }
 </script>
 
-<div class="entity-card" class:compact>
+<!-- svelte-ignore a11y-click-events-have-key-events -->
+<div class="entity-card" class:compact on:click={() => showDetail = true} role="button" tabindex="0">
   <div class="entity-header">
     <span class="entity-icon">{typeIcons[type] || '👤'}</span>
     <div class="entity-info">
@@ -49,9 +53,13 @@
   {/if}
 
   {#if onFire}
-    <button class="btn btn-danger btn-sm fire-btn" on:click={onFire}>Fire</button>
+    <div class="fire-row">
+      <button class="btn btn-danger btn-sm" on:click|stopPropagation={onFire}>🔥 Fire</button>
+    </div>
   {/if}
 </div>
+
+<EntityDetail entity={entity} bind:show={showDetail} />
 
 <style>
   .entity-card {
@@ -60,6 +68,12 @@
     border-radius: var(--radius);
     padding: 10px;
     position: relative;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .entity-card:hover, .entity-card:active {
+    border-color: var(--c-accent);
+    background: var(--c-bg-hover, var(--c-bg-card));
   }
   .entity-card.compact { padding: 8px; }
   .entity-header {
@@ -108,9 +122,11 @@
     padding-top: 6px;
     border-top: 1px solid var(--c-border);
   }
-  .fire-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
+  .fire-row {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--c-border);
+    display: flex;
+    justify-content: flex-end;
   }
 </style>

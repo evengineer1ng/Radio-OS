@@ -1,20 +1,45 @@
 <script lang="ts">
-  import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/api'
+  import { gameState, addToast } from '../lib/stores'
+  import { sendCommand, safeRefreshState } from '../lib/api'
   import { formatCurrency } from '../lib/utils'
 
   $: team = $gameState.player_team
   $: rdProjects = team?.rd_projects || []
   $: infra = team?.infrastructure || {}
 
-  function cancelProject(id: string) {
-    sendCommand({ cmd: 'ftb_cancel_rd_project', project_id: id })
+  let working = false
+
+  async function refreshAfterCommand() {
+    await new Promise(r => setTimeout(r, 500))
+    await safeRefreshState()
   }
-  function upgradeInfra(facility: string) {
-    sendCommand({ cmd: 'ftb_upgrade_infrastructure', facility, amount: 10 })
+
+  async function cancelProject(id: string) {
+    if (working) return; working = true
+    try {
+      await sendCommand({ cmd: 'ftb_cancel_rd_project', project_id: id })
+      await refreshAfterCommand()
+      addToast('R&D project cancelled', 'success')
+    } catch (e) { addToast('Cancel failed', 'error') }
+    working = false
   }
-  function sellInfra(facility: string) {
-    sendCommand({ cmd: 'ftb_sell_infrastructure', facility })
+  async function upgradeInfra(facility: string) {
+    if (working) return; working = true
+    try {
+      await sendCommand({ cmd: 'ftb_upgrade_infrastructure', facility, amount: 10 })
+      await refreshAfterCommand()
+      addToast(`Upgraded ${facility.replace(/_/g, ' ')}`, 'success')
+    } catch (e) { addToast('Upgrade failed', 'error') }
+    working = false
+  }
+  async function sellInfra(facility: string) {
+    if (working) return; working = true
+    try {
+      await sendCommand({ cmd: 'ftb_sell_infrastructure', facility })
+      await refreshAfterCommand()
+      addToast(`Sold ${facility.replace(/_/g, ' ')}`, 'success')
+    } catch (e) { addToast('Sell failed', 'error') }
+    working = false
   }
 </script>
 
@@ -33,7 +58,7 @@
             </div>
             <div class="rd-progress">{Math.round((proj.progress || 0) * 100)}%</div>
           </div>
-          <button class="btn btn-danger btn-sm" on:click={() => cancelProject(proj.id)}>Cancel</button>
+          <button class="btn btn-danger btn-sm" class:working disabled={working} on:click={() => cancelProject(proj.id)}>Cancel</button>
         </div>
       {:else}
         <div class="empty-state">No active projects</div>
@@ -52,8 +77,8 @@
             <span class="infra-quality">Quality: {Math.round(Number(quality))}</span>
           </div>
           <div class="infra-actions">
-            <button class="btn btn-primary btn-sm" on:click={() => upgradeInfra(facility)}>Upgrade</button>
-            <button class="btn btn-ghost btn-sm" on:click={() => sellInfra(facility)}>Sell</button>
+            <button class="btn btn-primary btn-sm" class:working disabled={working} on:click={() => upgradeInfra(facility)}>Upgrade</button>
+            <button class="btn btn-ghost btn-sm" class:working disabled={working} on:click={() => sellInfra(facility)}>Sell</button>
           </div>
         </div>
       {:else}

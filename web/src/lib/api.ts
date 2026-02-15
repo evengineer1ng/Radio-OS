@@ -1,12 +1,44 @@
 /**
  * REST API helpers for FTB web server.
  */
+import { gameState } from './stores'
 
 const BASE = ''  // Same origin — proxied in dev by Vite
 
 export async function fetchState(): Promise<any> {
-  const res = await fetch(`${BASE}/api/state`)
-  return res.json()
+  try {
+    const res = await fetch(`${BASE}/api/state`)
+    let data: any
+    try {
+      data = await res.json()
+    } catch {
+      // Non-JSON response (e.g. HTML error page)
+      return { status: 'no_controller' }
+    }
+    // Normalise error / unavailable responses so callers always see a status field
+    if (!res.ok && !data.status) {
+      return { status: 'no_controller' }
+    }
+    return data
+  } catch {
+    // Network error / fetch failed entirely
+    return { status: 'no_controller' }
+  }
+}
+
+/**
+ * Fetch state and update the gameState store ONLY if the response contains
+ * real game data.  Skips "busy" (lock contended) and error responses so that
+ * the UI never gets wiped with a stub object.
+ */
+export async function safeRefreshState(): Promise<void> {
+  const data = await fetchState()
+  // Only push to the store when we got a full game-state payload.
+  // "busy", "no_game", "no_controller" are lightweight stubs that must NOT
+  // overwrite the rich state the UI is currently showing.
+  if (data && data.status !== 'busy' && data.status !== 'no_controller') {
+    gameState.set(data)
+  }
 }
 
 export async function fetchSubtitle(): Promise<string> {
@@ -42,6 +74,11 @@ export async function fetchSaves(): Promise<any[]> {
   const res = await fetch(`${BASE}/api/saves`)
   const data = await res.json()
   return data.saves || []
+}
+
+export async function checkAutosave(): Promise<{ exists: boolean; path?: string; mtime?: number; size?: number }> {
+  const res = await fetch(`${BASE}/api/check_autosave`)
+  return res.json()
 }
 
 export async function fetchNotifications(): Promise<any[]> {
@@ -85,7 +122,20 @@ export async function raceDayStartLive(speed: number = 10): Promise<any> {
 }
 
 export async function raceDayPause(): Promise<any> {
-  const res = await fetch(`${BASE}/api/race_day/pause`, { method: 'POST' })
+  const res = await fetch(`${BASE}/api/race_day/pause`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paused: true }),
+  })
+  return res.json()
+}
+
+export async function raceDayResume(): Promise<any> {
+  const res = await fetch(`${BASE}/api/race_day/pause`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paused: false }),
+  })
   return res.json()
 }
 
@@ -232,4 +282,15 @@ export async function tickBatch(n: number = 7): Promise<any> {
     body: JSON.stringify({ n, batch: true }),
   })
   return res.json()
+}
+
+// ─── Audio State ───
+export async function fetchAudioState(): Promise<any> {
+  try {
+    const res = await fetch(`${BASE}/api/audio_state`)
+    if (!res.ok) return null
+    return res.json()
+  } catch {
+    return null
+  }
 }

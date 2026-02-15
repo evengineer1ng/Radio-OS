@@ -61,11 +61,21 @@
         manager_last_name: managerLast || 'Unknown',
       })
 
-      // Wait a moment for the backend to process, then fetch fresh state
-      await new Promise(r => setTimeout(r, 1500))
-      const state = await fetchState()
-      gameState.set(state)
-
+      // Poll until the backend has created the game (up to 30s)
+      let loaded = false
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 500))
+        try {
+          const state = await fetchState()
+          if (state && state.status && state.status !== 'no_game' && state.status !== 'no_controller') {
+            gameState.set(state)
+            loaded = true
+            break
+          }
+        } catch {}
+      }
+      // Always dispatch start — the parent's background poll will pick up the game
+      // even if we haven't seen it yet.
       dispatch('start')
     } catch (e) {
       console.error('new game error', e)
@@ -216,6 +226,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    max-height: 100dvh;
     background: var(--c-bg-primary);
   }
   .wizard-header {
@@ -242,7 +253,9 @@
   .wizard-body {
     flex: 1;
     padding: 16px;
+    padding-bottom: 80px;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .wizard-section {
     margin-bottom: 20px;
@@ -338,6 +351,10 @@
     padding: 12px 16px;
     border-top: 1px solid var(--c-border);
     background: var(--c-bg-secondary);
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
   }
   @media (max-width: 480px) {
     .form-grid { grid-template-columns: 1fr; }

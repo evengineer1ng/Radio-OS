@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import { gameState } from '../lib/stores'
-  import { fetchState, raceDayRespond, raceDayStartLive, raceDayPause, raceDayComplete } from '../lib/api'
+  import { safeRefreshState, raceDayRespond, raceDayStartLive, raceDayPause, raceDayResume, raceDayComplete } from '../lib/api'
 
   $: raceDay = $gameState.race_day || { phase: 'idle' }
   $: phase = raceDay.phase || 'idle'
@@ -27,13 +27,14 @@
   $: trackInfo = tracks[trackId] || {}
 
   let raceSpeed = 10
+  let racePaused = false
 
   // Poll for live updates when race day is active
   let pollInterval: ReturnType<typeof setInterval> | null = null
   function startPolling() {
     if (pollInterval) return
     pollInterval = setInterval(async () => {
-      try { gameState.set(await fetchState()) } catch {}
+      try { await safeRefreshState() } catch {}
     }, 1500)
   }
   function stopPolling() {
@@ -44,16 +45,18 @@
 
   async function respondToPrompt(watchLive: boolean) {
     await raceDayRespond(watchLive)
-    setTimeout(async () => { try { gameState.set(await fetchState()) } catch {} }, 500)
+    setTimeout(async () => { try { await safeRefreshState() } catch {} }, 500)
   }
   async function startLive() {
+    racePaused = false
     await raceDayStartLive(raceSpeed)
   }
-  async function pauseRace() { await raceDayPause() }
+  async function pauseRace() { await raceDayPause(); racePaused = true }
+  async function resumeRace() { await raceDayResume(); racePaused = false }
   async function completeRaceDay() {
     await raceDayComplete()
     stopPolling()
-    setTimeout(async () => { try { gameState.set(await fetchState()) } catch {} }, 1000)
+    setTimeout(async () => { try { await safeRefreshState() } catch {} }, 1000)
   }
 
   function formatGap(gap: any): string {
@@ -136,7 +139,11 @@
       <div class="race-header">
         <span class="live-badge">🔴 LIVE</span>
         <span class="lap-counter">Lap {currentLap}/{totalLaps}</span>
-        <button class="btn btn-ghost btn-sm" on:click={pauseRace}>⏸ Pause</button>
+        {#if racePaused}
+          <button class="btn btn-primary btn-sm" on:click={resumeRace}>▶️ Resume</button>
+        {:else}
+          <button class="btn btn-ghost btn-sm" on:click={pauseRace}>⏸ Pause</button>
+        {/if}
       </div>
       <table class="data-table">
         <thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Gap</th></tr></thead>
@@ -232,7 +239,7 @@
 </div>
 
 <style>
-  .raceops-view { display:flex; flex-direction:column; gap:12px; padding:12px; height:100%; overflow-y:auto; }
+  .raceops-view { display:flex; flex-direction:column; gap:12px; padding:12px; }
   .phase-banner { text-align:center; padding:16px; border-radius:var(--radius); font-weight:700; font-size:14px; text-transform:uppercase; background:var(--c-bg-tertiary); }
   .phase-banner.phase-pre_race_prompt { color:var(--c-warning); background:rgba(255,183,77,0.1); }
   .phase-banner.phase-race_running { color:var(--c-danger); background:rgba(244,67,54,0.1); }

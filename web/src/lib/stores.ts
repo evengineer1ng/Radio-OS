@@ -68,7 +68,9 @@ export const budget = derived(gameState, $s => $s.player_team?.budget?.cash ?? 0
 export const tick = derived(gameState, $s => $s.tick)
 export const dateStr = derived(gameState, $s => $s.date_str || '--/--')
 export const phase = derived(gameState, $s => $s.phase)
-export const hasGame = derived(gameState, $s => $s.status !== 'no_game')
+export const hasGame = derived(gameState, $s =>
+  $s.status !== 'no_game' && $s.status !== 'no_controller'
+)
 
 // ─── Batch Summary ───
 export const lastBatchSummary = writable<any | null>(null)

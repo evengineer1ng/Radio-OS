@@ -864,6 +864,9 @@ class FTBAudioEngine:
     
     def _handle_audio_event(self, event: AudioEvent) -> None:
         """Handle a single audio event"""
+        # Also broadcast to web clients so browsers can play audio too
+        self._broadcast_web_audio(event)
+
         if event.audio_type == 'narrator_duck':
             # Narrator started/ended
             if event.metadata.get('started'):
@@ -903,6 +906,32 @@ class FTBAudioEngine:
             state_data = event.metadata.get('state_data', {})
             self.current_scalar = self.performance_calc.calculate(state_data)
     
+    def _broadcast_web_audio(self, event: AudioEvent) -> None:
+        """Push an audio event to the WebBridge so browser clients receive it."""
+        try:
+            bridge = self.runtime.get('web_bridge')
+            if not bridge:
+                return
+            msg: Dict[str, Any] = {
+                'audio_type': event.audio_type,
+                'metadata': event.metadata,
+            }
+            # Enrich with computed fields the browser needs
+            if event.audio_type == 'narrator_duck':
+                msg['ducking'] = bool(event.metadata.get('started'))
+            elif event.audio_type == 'pbp_mode':
+                msg['muted'] = bool(event.metadata.get('active'))
+            elif event.audio_type == 'world':
+                msg['action'] = event.metadata.get('action')
+                if msg['action'] == 'engine_start':
+                    msg['league_tier'] = event.metadata.get('league_tier', 'midformula')
+            elif event.audio_type == 'performance_update':
+                msg['scalar'] = round(self.current_scalar, 3)
+                msg['variant'] = self.music_controller.select_variant(self.current_scalar)
+            bridge.push_event('audio_event', msg)
+        except Exception:
+            pass  # Non-fatal; don't break server-side audio
+
     def emit_audio_event(self, event: AudioEvent) -> None:
         """Queue an audio event for processing"""
         self.audio_event_queue.put(event)

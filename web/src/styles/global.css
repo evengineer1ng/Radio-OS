@@ -99,39 +99,69 @@ html, body {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
   white-space: nowrap;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  position: relative;
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.93);
+  filter: brightness(0.85);
+  transition: all 0.04s ease;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .btn-primary {
   background: var(--c-accent);
   color: #000;
 }
-.btn-primary:hover { background: #5dd9ff; }
-.btn-primary:active { transform: scale(0.97); }
+.btn-primary:hover:not(:disabled) { background: #5dd9ff; }
 
 .btn-success {
   background: var(--c-success);
   color: #000;
 }
-.btn-success:hover { background: #6aee9a; }
+.btn-success:hover:not(:disabled) { background: #6aee9a; }
 
 .btn-danger {
   background: var(--c-danger);
   color: #fff;
 }
-.btn-danger:hover { background: #ff8a8a; }
+.btn-danger:hover:not(:disabled) { background: #ff8a8a; }
 
 .btn-ghost {
   background: transparent;
   color: var(--c-text-secondary);
   border: 1px solid var(--c-border);
 }
-.btn-ghost:hover {
+.btn-ghost:hover:not(:disabled) {
   background: var(--c-bg-hover);
   color: var(--c-text-primary);
+}
+
+/* Working / loading state */
+.btn.working {
+  pointer-events: none;
+  opacity: 0.7;
+}
+.btn.working::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: btn-spin 0.5s linear infinite;
+  margin-left: 4px;
+}
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
 }
 
 .btn-sm {

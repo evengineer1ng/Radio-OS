@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { gameState } from '../lib/stores'
-  import { buyPart, sellPart, equipPart, fetchState } from '../lib/api'
+  import { gameState, addToast } from '../lib/stores'
+  import { buyPart, sellPart, equipPart, safeRefreshState } from '../lib/api'
   import { formatCurrency } from '../lib/utils'
   import StatBar from '../components/StatBar.svelte'
+  import PartDetail from '../components/PartDetail.svelte'
 
   $: team = $gameState.player_team
   $: car = team?.car || null
@@ -18,19 +19,36 @@
   $: partTypes = ['All Types', ...new Set(marketplace.map((p: any) => p.type).filter(Boolean))]
 
   let working = false
+
+  // Detail modal state
+  let selectedPart: any = null
+  let showPartDetail = false
+  let partDetailMode: 'equipped' | 'inventory' | 'marketplace' = 'marketplace'
+
+  function openPartDetail(part: any, mode: 'equipped' | 'inventory' | 'marketplace') {
+    selectedPart = part
+    partDetailMode = mode
+    showPartDetail = true
+  }
+
+  async function refreshAfterCommand() {
+    await new Promise(r => setTimeout(r, 500))
+    await safeRefreshState()
+  }
+
   async function handleEquip(id: string) {
     if (working) return; working = true
-    try { await equipPart(id); gameState.set(await fetchState()) } catch (e) { console.error('equip', e) }
+    try { await equipPart(id); await refreshAfterCommand(); addToast('Part equipped', 'success') } catch (e) { console.error('equip', e); addToast('Equip failed', 'error') }
     working = false
   }
   async function handleSell(id: string) {
     if (working) return; working = true
-    try { await sellPart(id); gameState.set(await fetchState()) } catch (e) { console.error('sell', e) }
+    try { await sellPart(id); await refreshAfterCommand(); addToast('Part sold', 'success') } catch (e) { console.error('sell', e); addToast('Sell failed', 'error') }
     working = false
   }
   async function handleBuy(id: string, cost: number) {
     if (working) return; working = true
-    try { await buyPart(id, cost); gameState.set(await fetchState()) } catch (e) { console.error('buy', e) }
+    try { await buyPart(id, cost); await refreshAfterCommand(); addToast('Part purchased', 'success') } catch (e) { console.error('buy', e); addToast('Buy failed', 'error') }
     working = false
   }
 </script>
@@ -54,7 +72,8 @@
       <div class="section-title">⚙️ Equipped Parts ({equipped.length})</div>
       <div class="parts-list">
         {#each equipped as part}
-          <div class="part-item">
+          <!-- svelte-ignore a11y-click-events-have-key-events -->
+          <div class="part-item clickable" on:click={() => openPartDetail(part, 'equipped')} role="button" tabindex="0">
             <span class="part-name">{part.name || part.type}</span>
             <span class="part-quality">Q{Math.round(part.quality)}</span>
           </div>
@@ -69,15 +88,16 @@
       <div class="section-title">📦 Parts Inventory ({inventory.length})</div>
       <div class="parts-list scroll-y">
         {#each inventory as part}
-          <div class="part-item">
+          <!-- svelte-ignore a11y-click-events-have-key-events -->
+          <div class="part-item clickable" on:click={() => openPartDetail(part, 'inventory')} role="button" tabindex="0">
             <div>
               <span class="part-name">{part.name || part.type}</span>
               <span class="part-type">{part.type}</span>
             </div>
             <div class="part-actions">
               <span class="part-quality">Q{Math.round(part.quality)}</span>
-              <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleEquip(part.id)}>Equip</button>
-              <button class="btn btn-ghost btn-sm" disabled={working} on:click={() => handleSell(part.id)}>Sell</button>
+              <button class="btn btn-primary btn-sm" disabled={working} on:click|stopPropagation={() => handleEquip(part.id)}>Equip</button>
+              <button class="btn btn-ghost btn-sm" disabled={working} on:click|stopPropagation={() => handleSell(part.id)}>Sell</button>
             </div>
           </div>
         {:else}
@@ -99,14 +119,15 @@
     </select>
     <div class="parts-list scroll-y marketplace">
       {#each filteredMarket as part}
-        <div class="part-item">
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <div class="part-item clickable" on:click={() => openPartDetail(part, 'marketplace')} role="button" tabindex="0">
           <div>
             <span class="part-name">{part.name}</span>
             <span class="part-type">{part.type} · Q{Math.round(part.quality)}</span>
           </div>
           <div class="part-actions">
             <span class="part-cost">{formatCurrency(part.cost)}</span>
-            <button class="btn btn-primary btn-sm" disabled={working} on:click={() => handleBuy(part.id, part.cost)}>Buy</button>
+            <button class="btn btn-primary btn-sm" disabled={working} on:click|stopPropagation={() => handleBuy(part.id, part.cost)}>Buy</button>
           </div>
         </div>
       {:else}
@@ -116,6 +137,15 @@
   </div>
 </div>
 
+<PartDetail
+  part={selectedPart}
+  bind:show={showPartDetail}
+  mode={partDetailMode}
+  onEquip={handleEquip}
+  onSell={handleSell}
+  onBuy={handleBuy}
+/>
+
 <style>
   .car-view { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
   .car-overall { font-size: 16px; margin-bottom: 8px; }
@@ -124,6 +154,15 @@
   .part-item {
     display: flex; justify-content: space-between; align-items: center;
     padding: 8px; background: var(--c-bg-tertiary); border-radius: var(--radius-sm); font-size: 12px;
+  }
+  .part-item.clickable {
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    border: 1px solid transparent;
+  }
+  .part-item.clickable:hover, .part-item.clickable:active {
+    border-color: var(--c-accent);
+    background: var(--c-bg-hover, var(--c-bg-tertiary));
   }
   .part-name { font-weight: 500; display: block; }
   .part-type { font-size: 11px; color: var(--c-text-muted); }

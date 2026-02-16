@@ -5501,7 +5501,6 @@ class SimState:
         
         fa = FreeAgent(
             entity=entity,
-            entity_type=entity_type,
             asking_salary=data.get('asking_salary', 50000.0),
             contract_length_preference=data.get('contract_length_preference', 2)
         )
@@ -16592,9 +16591,6 @@ class FTBSimulation:
                         asking_salary = int(per_tick_salary * 365 * 0.8)  # Annual salary with discount
                         free_agent = FreeAgent(
                             entity=driver,
-                            entity_type="Driver",
-                            tier=team.tier,
-                            overall_rating=driver.overall_rating,
                             asking_salary=asking_salary,
                             time_in_pool_days=0,
                             exit_reason="released_silly_season"

@@ -12,6 +12,23 @@ from urllib.parse import urlparse
 
 
 PLUGIN_NAME = "rss"
+PLUGIN_DESC = "Fetch articles from RSS/Atom feeds."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "urls": [],
+    "poll_sec": 180,
+    "priority": 72,
+    "burst_delay": 0.5,
+    "feed_delay": 2.0,
+    "emit_limit": 2,
+    "deep_fetch": {
+        "enabled": False,
+        "timeout_sec": 5,
+        "max_chars": 1500
+    }
+}
 
 # =====================================================
 # Helpers

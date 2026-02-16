@@ -7,6 +7,18 @@ from typing import Any, Dict, List
 # Import runtime objects
 from runtime import StationEvent, event_q
 
+PLUGIN_NAME = "document"
+PLUGIN_DESC = "Watch local text files and inject their content as feed items."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "files": [],
+    "poll_sec": 2.5,
+    "announce_cooldown_sec": 600,
+    "burst_delay": 0.1
+}
+
 
 # --------------------
 # Helpers

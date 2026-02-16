@@ -1497,7 +1497,9 @@ def _console_safe(s: str) -> str:
     except Exception:
         return str(s).encode("utf-8", errors="backslashreplace").decode("utf-8", errors="ignore")
 
-def log(role: str, msg: str) -> None:
+def log(role: str, msg: str = None) -> None:
+    if msg is None:                       # single-arg call: log("some message")
+        role, msg = "FEED", role
     ts = time.strftime("%H:%M:%S")
     with print_lock:
         safe_role = _console_safe(role.upper())

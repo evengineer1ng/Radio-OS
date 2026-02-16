@@ -64,6 +64,7 @@
     <button class="btn btn-ghost btn-sm" on:click={refreshState} title="Refresh">🔄</button>
     <button class="btn btn-ghost btn-sm" class:working={saving} disabled={saving} on:click={handleSave} title="Save">💾</button>
     <button class="btn btn-ghost btn-sm" on:click={() => dispatch('loadsave')} title="Load Save">📂</button>
+    <button class="btn btn-ghost btn-sm" on:click={newGame} title="New Game">🆕</button>
     <button class="btn btn-ghost btn-sm notification-btn" on:click={() => dispatch('notifications')} title="Notifications">
       🔔
       {#if $unreadCount > 0}

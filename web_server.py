@@ -1610,27 +1610,99 @@ function renderFeeds(){
   const el=document.getElementById('feedsList');
   const feeds=Object.entries(wizPlugins).filter(([k,v])=>v.is_feed);
   if(!feeds.length){el.innerHTML='<p style="color:var(--muted)">No feed plugins found.</p>';return;}
+  // Known list-type fields — render as textarea (one item per line)
+  const LIST_FIELDS=new Set(['urls','subreddits','hashtags','symbols','keywords','files']);
+  // Fields that should be hidden from the simple UI (nested objects handled separately)
+  const HIDDEN_FIELDS=new Set(['deep_fetch']);
+  // Friendly labels for common fields
+  const FIELD_LABELS={
+    urls:'Feed URLs (one per line)',subreddits:'Subreddits (one per line)',
+    hashtags:'Hashtags (one per line)',symbols:'Symbols (one per line)',
+    keywords:'Keywords (one per line)',poll_sec:'Poll interval (sec)',
+    limit:'Max items per poll',priority:'Priority (0-100)',
+    burst_delay:'Burst delay (sec)',seen_ttl_sec:'Seen TTL (sec)',
+    feed_delay:'Feed delay (sec)',emit_limit:'Emit limit',
+    identifier:'Username / Handle',password:'App Password',
+    bearer_token:'Bearer Token',access_token:'Access Token',
+    api_key:'API Key',api_secret:'API Secret',page_id:'Page ID',
+    user_address:'Wallet Address',base_url:'API Base URL',
+    source_type:'Source Type',source_path:'Source Path',source_window:'Window Title',
+    capture_interval:'Capture interval (sec)',reaction_frequency:'Reaction frequency',
+    vision_provider:'Vision Provider',vision_model:'Vision Model',
+    vision_endpoint:'Vision Endpoint',vision_api_key:'Vision API Key',
+    mode:'Mode',breakout_pct:'Breakout %',announce_cooldown_sec:'Announce cooldown (sec)',
+    min_emit_gap_sec:'Min emit gap (sec)',min_equity_delta_frac:'Min equity delta',
+    big_equity_delta_frac:'Big equity delta',
+    positions_change_priority:'Positions change priority',
+    equity_change_priority:'Equity change priority',big_move_priority:'Big move priority',
+    flow_songs_min:'Min songs per flow',flow_songs_max:'Max songs per flow',
+    flow_songs_random:'Randomize flow songs',talk_segments_min:'Min talk segments',
+    talk_segments_max:'Max talk segments',talk_segments_random:'Randomize talk segments',
+    min_reaction_gap_sec:'Min reaction gap (sec)',
+    talk_over_video:'Talk over video',max_interpretation_length:'Max interpretation length',
+    interpretation_temperature:'Interpretation temperature',vision_prompt:'Vision prompt'
+  };
+  // Sensitive fields — render as password inputs
+  const SECRET_FIELDS=new Set(['password','bearer_token','access_token','api_key','api_secret','vision_api_key']);
   el.innerHTML=feeds.map(([k,v])=>{
     const cfg=wizFeeds[k]||{};const en=!!cfg.enabled;
-    const fields=v.defaults?Object.entries(v.defaults).filter(([fk])=>fk!=='enabled').map(([fk,fv])=>{
-      const val=cfg[fk]!==undefined?cfg[fk]:fv;
-      const isArr=Array.isArray(fv);
-      return`<div class="form-group" style="flex:1;min-width:180px"><label>${fk}</label><input data-feed="${k}" data-key="${fk}" value="${esc(isArr?JSON.stringify(val):String(val))}" style="width:100%"></div>`;
-    }).join(''):'';
-    return`<div class="card-section" style="margin-bottom:8px;padding:12px 16px;border:1px solid ${en?'var(--good)':'#333'};border-radius:8px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:${fields?'8':'0'}px">
+    let fields='';
+    if(v.defaults){
+      fields=Object.entries(v.defaults).filter(([fk])=>fk!=='enabled'&&!HIDDEN_FIELDS.has(fk)).map(([fk,fv])=>{
+        const val=cfg[fk]!==undefined?cfg[fk]:fv;
+        const label=FIELD_LABELS[fk]||fk;
+        const isArr=Array.isArray(fv);
+        const isBool=typeof fv==='boolean';
+        const isNum=typeof fv==='number';
+        const isSecret=SECRET_FIELDS.has(fk);
+        const isLongText=fk==='vision_prompt';
+        if(isArr||LIST_FIELDS.has(fk)){
+          // Textarea: one item per line
+          const arrVal=Array.isArray(val)?val:(typeof val==='string'&&val?[val]:[]);
+          return`<div class="form-group" style="flex:1 1 100%;min-width:280px"><label>${label}</label><textarea data-feed="${k}" data-key="${fk}" data-type="list" rows="${Math.max(3,Math.min(8,arrVal.length+1))}" style="width:100%;font-family:var(--font-mono,monospace);font-size:12px;resize:vertical" placeholder="One item per line">${esc(arrVal.join('\\n'))}</textarea></div>`;
+        }else if(isBool){
+          return`<div class="form-group" style="flex:0 0 auto;min-width:180px"><label class="toggle" style="margin:0"><input type="checkbox" data-feed="${k}" data-key="${fk}" data-type="bool" ${val?'checked':''}><span>${label}</span></label></div>`;
+        }else if(isNum){
+          return`<div class="form-group" style="flex:1;min-width:140px"><label>${label}</label><input type="number" step="any" data-feed="${k}" data-key="${fk}" data-type="number" value="${val}" style="width:100%"></div>`;
+        }else if(isLongText){
+          return`<div class="form-group" style="flex:1 1 100%;min-width:280px"><label>${label}</label><textarea data-feed="${k}" data-key="${fk}" data-type="string" rows="3" style="width:100%;font-size:12px;resize:vertical">${esc(String(val))}</textarea></div>`;
+        }else if(isSecret){
+          return`<div class="form-group" style="flex:1;min-width:180px"><label>${label}</label><input type="password" data-feed="${k}" data-key="${fk}" data-type="string" value="${esc(String(val))}" style="width:100%" autocomplete="off"></div>`;
+        }else if(typeof fv==='object'&&fv!==null){
+          // Nested object — render as JSON textarea
+          const jsonStr=typeof val==='object'?JSON.stringify(val,null,2):String(val);
+          return`<div class="form-group" style="flex:1 1 100%;min-width:280px"><label>${label} (JSON)</label><textarea data-feed="${k}" data-key="${fk}" data-type="json" rows="4" style="width:100%;font-family:var(--font-mono,monospace);font-size:11px;resize:vertical">${esc(jsonStr)}</textarea></div>`;
+        }else{
+          return`<div class="form-group" style="flex:1;min-width:180px"><label>${label}</label><input data-feed="${k}" data-key="${fk}" data-type="string" value="${esc(String(val))}" style="width:100%"></div>`;
+        }
+      }).join('');
+    }
+    return`<div class="card-section" style="margin-bottom:8px;padding:12px 16px;border:1px solid ${en?'var(--good)':'#333'};border-radius:8px;opacity:${en?'1':'0.7'}">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:${fields?'10':'0'}px">
         <label class="toggle" style="margin:0"><input type="checkbox" ${en?'checked':''} onchange="toggleFeed('${k}',this.checked)"><span style="font-weight:600">${esc(v.display||k)}</span></label>
         <span class="tag">${k}</span><span style="font-size:11px;color:var(--muted)">${esc(v.desc||'')}</span>
       </div>
-      ${fields?'<div class="form-row" style="flex-wrap:wrap">'+fields+'</div>':''}
+      ${fields?'<div class="form-row" style="flex-wrap:wrap;gap:8px">'+fields+'</div>':''}
     </div>`;
   }).join('');
 }
-function toggleFeed(k,en){wizFeeds[k]=wizFeeds[k]||{};wizFeeds[k].enabled=en;renderFeeds();}
+function toggleFeed(k,en){collectFeedValues();wizFeeds[k]=wizFeeds[k]||{};wizFeeds[k].enabled=en;renderFeeds();}
 function collectFeedValues(){
   document.querySelectorAll('[data-feed]').forEach(el=>{
-    const k=el.dataset.feed,fk=el.dataset.key;let v=el.value;
-    try{v=JSON.parse(v);}catch(e){}
+    const k=el.dataset.feed,fk=el.dataset.key,dt=el.dataset.type;
+    let v;
+    if(dt==='list'){
+      // Textarea: split by newlines, trim, remove empties
+      v=el.value.split('\\n').map(s=>s.trim()).filter(Boolean);
+    }else if(dt==='bool'){
+      v=el.checked;
+    }else if(dt==='number'){
+      v=parseFloat(el.value);if(isNaN(v))v=0;
+    }else if(dt==='json'){
+      try{v=JSON.parse(el.value);}catch(e){v=el.value;}
+    }else{
+      v=el.value;
+    }
     wizFeeds[k]=wizFeeds[k]||{};wizFeeds[k][fk]=v;
   });
 }

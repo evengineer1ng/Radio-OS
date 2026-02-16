@@ -6,6 +6,18 @@ from typing import List, Dict, Any
 
 
 PLUGIN_NAME = "reddit"
+PLUGIN_DESC = "Fetch posts from Reddit subreddits."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "subreddits": [],
+    "poll_sec": 30,
+    "limit": 20,
+    "priority": 60,
+    "burst_delay": 0.25,
+    "seen_ttl_sec": 3600
+}
 
 
 # =====================================================

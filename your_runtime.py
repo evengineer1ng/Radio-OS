@@ -20,7 +20,9 @@ except ImportError:
     def now_ts() -> int:
         return int(time.time())
 
-    def log(role: str, msg: str) -> None:
+    def log(role: str, msg: str = None) -> None:
+        if msg is None:                   # single-arg call: log("some message")
+            role, msg = "FEED", role
         ts = time.strftime("%H:%M:%S")
         print(f"[{role.upper():>8} {ts}] {msg}", flush=True)
 

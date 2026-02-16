@@ -7,6 +7,17 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 PLUGIN_NAME = "markets"
+PLUGIN_DESC = "Live cryptocurrency/stock market price tracking and event detection."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "symbols": [],
+    "poll_sec": 15,
+    "breakout_pct": 0.2,
+    "priority": 90,
+    "emit_limit": 2
+}
 
 # =====================================================
 # Helpers

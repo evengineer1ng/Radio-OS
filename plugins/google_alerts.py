@@ -4,6 +4,18 @@ import os, sqlite3, json, hashlib, random
 import html
 import re
 
+PLUGIN_NAME = "google_alerts"
+PLUGIN_DESC = "Ingest Google Alerts RSS feeds into the station."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "urls": [],
+    "poll_sec": 180,
+    "burst_delay": 0.5,
+    "feed_delay": 1.0
+}
+
 
 # =====================================================
 # Helpers

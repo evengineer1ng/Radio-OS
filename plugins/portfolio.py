@@ -5,6 +5,22 @@ import random
 from typing import Any, Dict, Optional, Tuple, List
 
 PLUGIN_NAME = "portfolio_event"
+PLUGIN_DESC = "Track live portfolio positions and equity changes (Hyperliquid)."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "mode": "hyperliquid",
+    "user_address": "",
+    "poll_sec": 6,
+    "min_emit_gap_sec": 20,
+    "min_equity_delta_frac": 0.003,
+    "big_equity_delta_frac": 0.015,
+    "positions_change_priority": 95,
+    "equity_change_priority": 93,
+    "big_move_priority": 98,
+    "base_url": "https://api.hyperliquid.xyz"
+}
 
 # =====================================================
 # Helpers

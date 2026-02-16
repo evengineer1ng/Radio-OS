@@ -19,6 +19,22 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple, Callable
 
+PLUGIN_NAME = "flows"
+PLUGIN_DESC = "Music playback awareness — detects now-playing media and creates talk/music flow."
+IS_FEED = True
+
+FEED_DEFAULTS = {
+    "enabled": False,
+    "reaction_frequency": 0.2,
+    "min_reaction_gap_sec": 20,
+    "flow_songs_min": 2,
+    "flow_songs_max": 4,
+    "flow_songs_random": True,
+    "talk_segments_min": 2,
+    "talk_segments_max": 5,
+    "talk_segments_random": True
+}
+
 # =====================================================
 # Platform detection
 # =====================================================

@@ -11,6 +11,7 @@ build/
 
 # Virtual Environment
 radioenv/
+.venv/
 venv/
 env/
 ENV/
@@ -26,6 +27,8 @@ stations/**/runtime.log
 # Temporary files
 *.tmp
 *.temp
+*.backup
+*.bak
 # *.wav - now committed for audio assets
 *.log
 
@@ -41,9 +44,9 @@ stations/**/runtime.log
 Thumbs.db
 desktop.ini
 
-# User-specific
-test_*.py
-fix_*.py
+# User-specific (root-level scratch files only, not tests/ directory)
+/test_*.py
+/fix_*.py
 ollamatest.py
 
 # Large binary distributions (keep in releases, not repo)

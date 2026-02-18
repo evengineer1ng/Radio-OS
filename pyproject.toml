@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radio-os"
+version = "1.06"
+description = "A desktop-first, content-agnostic AI radio runtime."
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Evan Pelletier"},
+]
+keywords = ["radio", "ai", "tts", "llm", "audio", "streaming", "podcast"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "numpy>=1.24.0",
+    "pygame>=2.5.0",
+    "Pillow>=9.0.0",
+    "customtkinter>=5.2.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "feedparser>=6.0.10",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "httpx>=0.24.0",
+    "websockets>=11.0",
+]
+vision = [
+    "mss>=1.8.0",
+    "pyautogui>=0.9.53",
+    "opencv-python-headless>=4.8.0",
+]
+cloud-llm = [
+    "openai>=1.3.0",
+    "anthropic>=0.7.0",
+    "google-generativeai>=0.3.0",
+]
+audio-extras = [
+    "pydub>=0.25.1",
+    "SpeechRecognition>=3.10.0",
+]
+ml = [
+    "matplotlib>=3.7.0",
+    "imageio>=2.31.0",
+]
+dev = [
+    "pytest>=7.0",
+    "flake8>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/evengineer1ng/Radio-OS"
+Repository = "https://github.com/evengineer1ng/Radio-OS"
+Issues = "https://github.com/evengineer1ng/Radio-OS/issues"
+Changelog = "https://github.com/evengineer1ng/Radio-OS/blob/main/CHANGELOG.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+addopts = "-v --tb=short"
+
+[tool.flake8]
+max-line-length = 120
+exclude = ["radioenv", ".venv", "__pycache__", "node_modules", "web/dist"]
+select = ["E9", "F63", "F7", "F82"]

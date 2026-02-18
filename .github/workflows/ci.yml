@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest
+          pip install -r requirements.txt
+
+      - name: Lint with flake8 (errors only)
+        run: |
+          # Stop the build on syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+            --exclude=radioenv,.venv,__pycache__,node_modules,web/dist
+
+      - name: Check Python syntax (all project files)
+        run: |
+          python -m py_compile bookmark.py
+          python -m py_compile shell_bookmark.py
+          python -m py_compile launcher.py
+          python -m py_compile kernel.py
+          python -m py_compile model_provider.py
+          python -m py_compile voice_provider.py
+          python -m py_compile context_engine.py
+          python -m py_compile your_runtime.py
+          python -m py_compile web_server.py
+
+      - name: Check plugin syntax
+        run: |
+          for f in plugins/*.py; do
+            python -m py_compile "$f" || exit 1
+          done
+          for f in plugins/meta/*.py; do
+            python -m py_compile "$f" || exit 1
+          done
+
+  test:
+    name: Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libsndfile1 portaudio19-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short || true
+        env:
+          RADIO_OS_ROOT: ${{ github.workspace }}

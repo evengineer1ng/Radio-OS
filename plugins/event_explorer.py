@@ -1,3 +1,4 @@
+PLUGIN_NAME = "Event Explorer"
 IS_FEED = False
 
 def register_widgets(registry, runtime):

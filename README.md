@@ -1,5 +1,9 @@
 # Radio OS
 
+[![CI](https://github.com/evengineer1ng/Radio-OS/actions/workflows/ci.yml/badge.svg)](https://github.com/evengineer1ng/Radio-OS/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 A desktop-first, content-agnostic AI radio runtime.  Build custom AI radio stations that pull from live feeds, generate commentary, and stream audio with natural TTS voices.
 
 ![Radio OS](radioos.png)
@@ -55,14 +59,17 @@ Options 3–5 are entirely optional power-user add-ons you can install whenever 
 ## What's Inside
 
 ```
-mac.sh / windows.bat   ← Start here!
-shell.py               ← Desktop UI and process manager
-runtime.py             ← Station engine (feeds, events, audio)
-launcher.py            ← Station process launcher
-plugins/               ← Feed plugins and UI widgets
-stations/              ← Per-station configs and entrypoints
-voices/                ← TTS voice models (ONNX)
-docs/                  ← Developer documentation & release notes
+mac.sh / windows.bat    ← Start here!
+shell_bookmark.py       ← Desktop UI and process manager
+bookmark.py             ← Station runtime engine (feeds, events, audio)
+launcher.py             ← Station process launcher
+model_provider.py       ← LLM provider abstraction
+voice_provider.py       ← TTS provider abstraction
+plugins/                ← Feed plugins and UI widgets
+stations/               ← Per-station configs and entrypoints
+voices/                 ← TTS voice models (ONNX)
+web/                    ← Svelte web frontend
+docs/                   ← Developer documentation & release notes
 ```
 
 ## Stations Included
@@ -195,6 +202,17 @@ def feed_worker(stop_event, mem, cfg, runtime=None):
         ))
         time.sleep(cfg["poll_interval"])
 ```
+
+---
+
+## Contributing
+
+We welcome contributions! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for:
+
+- Development setup
+- Plugin development guide with example code
+- Code style and conventions
+- Pull request process
 
 ---
 

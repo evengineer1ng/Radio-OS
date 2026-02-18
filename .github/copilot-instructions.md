@@ -2,7 +2,7 @@
 
 This repo is a desktop-first, content-agnostic "radio" runtime composed of a UI shell, a station runtime engine, and many small feed plugins. Use these notes to be productive quickly when editing, adding plugins, or changing station configuration.
 
-- **Big picture**: `shell.py` is the desktop UI and process manager; `runtime.py` is the station engine that runs feeds, routes events, and exposes runtime globals; per-station entrypoints live under `stations/<station_id>/` (e.g. `algofm.py`). `launcher.py` can spawn a station process with the correct environment.
+- **Big picture**: `shell_bookmark.py` is the desktop UI and process manager; `bookmark.py` is the station engine that runs feeds, routes events, and exposes runtime globals; per-station entrypoints live under `stations/<station_id>/` (e.g. `ftb_entrypoint.py`). `launcher.py` can spawn a station process with the correct environment.
 
 - **Key env vars and paths**: the runtime and launcher communicate via environment variables. Important ones are `STATION_DIR`, `STATION_DB_PATH`, `STATION_MEMORY_PATH`, `RADIO_OS_ROOT`, `RADIO_OS_PLUGINS`, `RADIO_OS_VOICES`, `CONTEXT_MODEL`, `HOST_MODEL`. `launcher.py` shows an example of how these are set for a station.
 

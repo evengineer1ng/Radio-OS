@@ -69,7 +69,7 @@ export const tick = derived(gameState, $s => $s.tick)
 export const dateStr = derived(gameState, $s => $s.date_str || '--/--')
 export const phase = derived(gameState, $s => $s.phase)
 export const hasGame = derived(gameState, $s =>
-  $s.status !== 'no_game' && $s.status !== 'no_controller'
+  $s.status === 'running'
 )
 
 // ─── Batch Summary ───

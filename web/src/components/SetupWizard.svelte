@@ -1,12 +1,40 @@
 <script lang="ts">
   import { newGame, fetchState } from '../lib/api'
   import { gameState } from '../lib/stores'
-  import { createEventDispatcher } from 'svelte'
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte'
+  import { onMessage } from '../lib/ws'
 
   const dispatch = createEventDispatcher()
 
   // Wizard state
   let step = 1
+
+  // Listen for external step navigation and field changes from Audio CLI
+  let unsubWs: (() => void) | null = null
+  onMount(() => {
+    unsubWs = onMessage((msg: any) => {
+      if (msg?.type === 'navigate' && msg.data?.screen === 'wizard') {
+        const newStep = msg.data.wizard_step
+        if (newStep && newStep >= 1 && newStep <= 4) {
+          step = newStep
+        }
+      }
+      if (msg?.type === 'wizard_field' && msg.data) {
+        const { field, value } = msg.data
+        if (field === 'save_mode' && typeof value === 'string') saveMode = value
+        else if (field === 'seed' && value != null) seed = String(value)
+        else if (field === 'tier' && typeof value === 'string') tier = value
+        else if (field === 'origin' && typeof value === 'string') origin = value
+        else if (field === 'ownership' && typeof value === 'string') ownership = value
+        else if (field === 'team_name' && typeof value === 'string') teamName = value
+        else if (field === 'manager_first' && typeof value === 'string') managerFirst = value
+        else if (field === 'manager_last' && typeof value === 'string') managerLast = value
+        else if (field === 'manager_age' && typeof value === 'number') managerAge = value
+        else if (field === 'player_identity' && typeof value === 'string') playerIdentity = value
+      }
+    })
+  })
+  onDestroy(() => { if (unsubWs) unsubWs() })
 
   // Fields
   let saveMode = 'replayable'
@@ -67,7 +95,8 @@
         await new Promise(r => setTimeout(r, 500))
         try {
           const state = await fetchState()
-          if (state && state.status && state.status !== 'no_game' && state.status !== 'no_controller') {
+          // Only accept a real game state — skip busy, no_game, no_controller
+          if (state && state.status === 'running' && state.player_team) {
             gameState.set(state)
             loaded = true
             break
@@ -98,14 +127,14 @@
       <div class="wizard-section">
         <h3>Save Mode</h3>
         <div class="radio-group">
-          <label class:selected={saveMode === 'replayable'}>
+          <button type="button" class:selected={saveMode === 'replayable'} on:click={() => saveMode = 'replayable'}>
             <input type="radio" bind:group={saveMode} value="replayable" />
             <strong>Replayable</strong> — Deterministic seed, same world every time
-          </label>
-          <label class:selected={saveMode === 'permanent'}>
+          </button>
+          <button type="button" class:selected={saveMode === 'permanent'} on:click={() => saveMode = 'permanent'}>
             <input type="radio" bind:group={saveMode} value="permanent" />
             <strong>Permanent</strong> — Extra entropy, unique every playthrough
-          </label>
+          </button>
         </div>
       </div>
 
@@ -123,11 +152,11 @@
         <h3>Starting Tier</h3>
         <div class="tier-list">
           {#each tiers as t}
-            <label class="tier-option" class:selected={tier === t.value}>
+            <button type="button" class="tier-option" class:selected={tier === t.value} on:click={() => tier = t.value}>
               <input type="radio" bind:group={tier} value={t.value} />
               <strong>{t.label}</strong>
               <span class="tier-desc">{t.desc}</span>
-            </label>
+            </button>
           {/each}
         </div>
       </div>
@@ -138,11 +167,11 @@
         <h3>Origin Story</h3>
         <div class="origin-list">
           {#each origins as o}
-            <label class="origin-option" class:selected={origin === o.value}>
+            <button type="button" class="origin-option" class:selected={origin === o.value} on:click={() => origin = o.value}>
               <input type="radio" bind:group={origin} value={o.value} />
               <strong>{o.label}</strong>
               <span class="origin-desc">{o.desc}</span>
-            </label>
+            </button>
           {/each}
         </div>
       </div>
@@ -180,14 +209,14 @@
           </div>
         </div>
         <div class="radio-group">
-          <label class:selected={ownership === 'self_owned'}>
+          <button type="button" class:selected={ownership === 'self_owned'} on:click={() => ownership = 'self_owned'}>
             <input type="radio" bind:group={ownership} value="self_owned" />
             <strong>Self-Owned</strong> — You own the team
-          </label>
-          <label class:selected={ownership === 'hired_manager'}>
+          </button>
+          <button type="button" class:selected={ownership === 'hired_manager'} on:click={() => ownership = 'hired_manager'}>
             <input type="radio" bind:group={ownership} value="hired_manager" />
             <strong>Hired Manager</strong> — Working for someone else
-          </label>
+          </button>
         </div>
       </div>
 
@@ -271,8 +300,9 @@
     flex-direction: column;
     gap: 6px;
   }
-  .radio-group label, .tier-option, .origin-option {
+  .radio-group button, .tier-option, .origin-option {
     display: block;
+    position: relative;
     padding: 10px 12px;
     background: var(--c-bg-card);
     border: 1px solid var(--c-border);
@@ -280,13 +310,21 @@
     cursor: pointer;
     font-size: 13px;
     transition: all 0.15s;
+    text-align: left;
+    width: 100%;
+    font-family: inherit;
+    color: inherit;
   }
-  .radio-group label.selected, .tier-option.selected, .origin-option.selected {
+  .radio-group button.selected, .tier-option.selected, .origin-option.selected {
     border-color: var(--c-accent);
     background: rgba(76, 201, 240, 0.08);
   }
   .radio-group input, .tier-option input, .origin-option input {
-    display: none;
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
   }
   .tier-list, .origin-list {
     display: flex;

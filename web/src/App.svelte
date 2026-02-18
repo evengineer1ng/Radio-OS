@@ -77,8 +77,7 @@
 
       // If we were waiting for a game to appear and it just did, clear the flag
       if (pendingGameLoad) {
-        const ready = state.status && state.status !== 'no_game' && state.status !== 'no_controller'
-        if (ready) {
+        if (state.status === 'running' && state.player_team) {
           console.log('[FTB] Game detected — clearing pendingGameLoad', state.status)
           pendingGameLoad = false
         }
@@ -125,10 +124,44 @@
     // Auto-load autosave if no game is loaded
     tryAutoLoad()
 
-    // Listen for WebSocket audio events
+    // Listen for WebSocket audio events and navigation commands
     const unsubWs = onMessage((msg: any) => {
       if (msg?.type === 'audio_event') {
         webAudio.handleAudioEvent(msg.data)
+      }
+      // Handle navigation commands from Audio CLI (dynamic button clicking)
+      if (msg?.type === 'navigate') {
+        const data = msg.data || {}
+        const screen = data.screen || ''
+        console.log('[FTB] Navigate message received:', screen, data)
+        if (screen === 'wizard') {
+          showSetupWizard = true
+          showLoadScreen = false
+          pendingGameLoad = true
+        } else if (screen === 'landing') {
+          showSetupWizard = false
+          showLoadScreen = false
+          pendingGameLoad = false
+        } else if (screen === 'loading') {
+          showLoadScreen = false
+          showSetupWizard = false
+          pendingGameLoad = true
+        } else if (screen === 'game') {
+          showSetupWizard = false
+          showLoadScreen = false
+          pendingGameLoad = false
+          // Game was created — trigger immediate poll to pick up state ASAP
+          pollState()
+        }
+      }
+      // Handle tab switching from Audio CLI
+      if (msg?.type === 'switch_tab') {
+        const tab = msg.data?.tab
+        if (tab) {
+          console.log('[FTB] Tab switch received:', tab)
+          activeTab.set(tab)
+          showNotifs = false
+        }
       }
     })
 
@@ -196,7 +229,7 @@
         await new Promise(r => setTimeout(r, 500))
         try {
           const state = await fetchState()
-          if (state && state.status && state.status !== 'no_game' && state.status !== 'no_controller') {
+          if (state && state.status === 'running' && state.player_team) {
             gameState.set(state)
             loaded = true
             break
@@ -221,9 +254,23 @@
     pendingGameLoad = true
   }
 
-  function handleSetupStart() {
+  async function handleSetupStart() {
     showSetupWizard = false
-    // The wizard already set pendingGameLoad; background polling will detect the game.
+    // Aggressively poll until the game state appears (up to 60s).
+    // The wizard's own poll may have missed it if the engine was busy.
+    for (let i = 0; i < 120; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      try {
+        const state = await fetchState()
+        if (state && state.status === 'running' && state.player_team) {
+          gameState.set(state)
+          pendingGameLoad = false
+          return
+        }
+      } catch {}
+    }
+    // If we still haven't loaded after 60s, clear pending so user isn't stuck
+    pendingGameLoad = false
   }
 
   function formatDate(mtime: number): string {

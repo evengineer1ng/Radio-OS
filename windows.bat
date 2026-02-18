@@ -1,416 +1,265 @@
 @echo off
-REM Radio OS Windows Launcher
-REM Detects first-run vs subsequent runs and handles setup accordingly
+REM ============================================================
+REM  Radio OS — Windows Launcher
+REM  A friendly menu that always greets you the same way.
+REM ============================================================
 
 setlocal enabledelayedexpansion
-
 set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
-REM ========================================
-REM Check for first-time vs subsequent run
-REM ========================================
-
-if exist ".radio_os_setup_complete" (
-    goto :subsequent_run
-) else (
-    goto :first_run
-)
-
-REM ========================================
-REM FIRST-TIME SETUP
-REM ========================================
-:first_run
-
+:menu
 echo.
 echo ========================================
-echo       Radio OS - First Time Setup
+echo         Radio OS Launcher
 echo ========================================
 echo.
-echo Welcome to Radio OS! This setup will:
-echo   1. Install Python dependencies
-echo   2. Download Ollama AI models (optional, ~8-12GB)
-echo   3. Download Piper TTS + voice models (optional, ~100-400MB)
-echo   4. Install PyTorch for ML features (optional, ~2GB)
+echo   1)  Boot Radio OS
+echo   2)  Install / update core dependencies
+echo   -----------------------------------------
+echo   3)  Install Ollama   (local AI models, optional)
+echo   4)  Install Piper    (offline TTS, optional)
+echo   5)  Install PyTorch  (ML features, optional)
 echo.
-echo Total setup may take 15-45 minutes depending on your connection.
+echo   q)  Quit
 echo.
+set /p CHOICE="  Choose [1-5, q]: "
 
-REM Python check
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo [!] Python is not installed or not in your PATH.
-    echo.
-    echo [*] Radio OS requires Python 3.10 or newer.
-    echo.
-    echo     Download: https://www.python.org/downloads/
-    echo     IMPORTANT: Check "Add Python to PATH" during installation
-    echo.
-    echo     Or via winget: winget install -e --id Python.Python.3.11
-    echo.
-    pause
-    exit /b 1
-)
+if "%CHOICE%"=="1" goto :do_boot
+if "%CHOICE%"=="2" goto :do_install_core
+if "%CHOICE%"=="3" goto :do_install_ollama
+if "%CHOICE%"=="4" goto :do_install_piper
+if "%CHOICE%"=="5" goto :do_install_pytorch
+if /i "%CHOICE%"=="q" goto :quit
+echo   Invalid choice. Pick 1-5 or q.
+goto :menu
 
-echo [+] Python found
+REM ========================================
+REM  1. Boot Radio OS
+REM ========================================
+:do_boot
 echo.
-
-REM User confirmation
-set /p PROCEED="You are about to install Python tools to enable Radio OS. Proceed? (Y/n): "
-if /i not "%PROCEED%"=="Y" if /i not "%PROCEED%"=="" (
-    echo.
-    echo Setup cancelled by user.
-    pause
-    exit /b 0
-)
-
-echo.
-echo ========================================
-echo   Step 1/5: Python Dependencies
-echo ========================================
+echo   Launching Radio OS...
 echo.
 
-REM Create venv if needed
 if not exist "radioenv\" (
-    echo [*] Creating virtual environment...
-    python -m venv radioenv
-    if errorlevel 1 (
-        echo [!] Failed to create venv. Ensure Python 3.10+ is installed.
-        pause
-        exit /b 1
-    )
-    echo [+] Virtual environment created
-)
-
-REM Activate venv
-call radioenv\Scripts\activate.bat
-if errorlevel 1 (
-    echo [!] Failed to activate virtual environment.
-    pause
-    exit /b 1
-)
-
-echo [+] Virtual environment activated
-echo.
-echo [*] Installing dependencies (this may take a few minutes)...
-python -m pip install --upgrade pip -q
-pip install -r requirements.txt
-if errorlevel 1 (
-    echo [!] Failed to install dependencies.
-    echo [!] Check your internet connection and try again.
-    pause
-    exit /b 1
-)
-
-echo [+] Dependencies installed successfully
-echo.
-
-REM ========================================
-REM Step 2: Ollama Setup
-REM ========================================
-echo ========================================
-echo   Step 2/5: Ollama AI Models
-echo ========================================
-echo.
-echo Ollama is free AI Large Language Model software which runs on
-echo your GPU locally. It enables Radio OS stations to generate content.
-echo.
-echo Download size: ~8-12GB (may take 10-30 minutes)
-echo.
-echo Alternative: Skip this and manually configure ChatGPT, Claude,
-echo or Gemini API keys later (see README.md for details).
-echo.
-set /p INSTALL_OLLAMA="Install Ollama + AI models now? (Y/n): "
-
-if /i "%INSTALL_OLLAMA%"=="Y" (
-    goto :install_ollama
-) else if /i "%INSTALL_OLLAMA%"=="" (
-    goto :install_ollama
-) else (
-    echo [*] Skipping Ollama installation
-    echo [!] You'll need to configure alternative AI endpoints manually
-    goto :skip_ollama
-)
-
-:install_ollama
-echo.
-echo [*] Downloading Ollama installer (~500MB)...
-echo [*] This may take 2-5 minutes depending on your connection
-set OLLAMA_INSTALLER=%TEMP%\OllamaSetup.exe
-
-REM Download Ollama using PowerShell with progress
-powershell -Command "Write-Host '  Downloading from https://ollama.com/download/OllamaSetup.exe' -ForegroundColor Cyan; $URI = 'https://ollama.com/download/OllamaSetup.exe'; $OutFile = '%OLLAMA_INSTALLER%'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $webClient = New-Object System.Net.WebClient; Register-ObjectEvent -InputObject $webClient -EventName DownloadProgressChanged -SourceIdentifier WebClient.DownloadProgressChanged -Action { $Global:downloadData = $EventArgs; Write-Progress -Activity 'Downloading Ollama' -Status ('{0:N2} MB / {1:N2} MB' -f ($Global:downloadData.BytesReceived / 1MB), ($Global:downloadData.TotalBytesToReceive / 1MB)) -PercentComplete $Global:downloadData.ProgressPercentage } | Out-Null; Register-ObjectEvent -InputObject $webClient -EventName DownloadFileCompleted -SourceIdentifier WebClient.DownloadFileCompleted -Action { Write-Progress -Activity 'Downloading Ollama' -Completed } | Out-Null; $webClient.DownloadFileAsync($URI, $OutFile); while ($webClient.IsBusy) { Start-Sleep -Milliseconds 100 }; Unregister-Event -SourceIdentifier WebClient.DownloadProgressChanged; Unregister-Event -SourceIdentifier WebClient.DownloadFileCompleted; $webClient.Dispose(); Write-Host '  [+] Download complete' -ForegroundColor Green } catch { Write-Host '  [!] Download failed: ' $_.Exception.Message -ForegroundColor Red; exit 1 }"
-if errorlevel 1 (
-    echo [!] Failed to download Ollama installer
-    echo [!] You can manually download from: https://ollama.ai/download
-    goto :skip_ollama
-)
-
-echo [+] Download complete
-echo [*] Installing Ollama (this may take a moment)...
-
-REM Run installer silently
-start /wait "" "%OLLAMA_INSTALLER%" /S
-if errorlevel 1 (
-    echo [!] Ollama installation may have failed
-    echo [!] Try manual installation: https://ollama.ai/download
-    goto :skip_ollama
-)
-
-REM Clean up installer
-del "%OLLAMA_INSTALLER%" 2>nul
-
-echo [+] Ollama installed successfully
-echo.
-echo ========================================
-echo   Downloading AI Models (~8-12GB)
-echo ========================================
-echo [*] This is the largest download and may take 10-30 minutes
-echo [*] Ollama will show its own progress bars for each model
-echo [*] Models: qwen3:8b, llama3.1:8b, deepseek-r1:8b, rnj-1:8b, nomic-embed-text
-echo.
-
-REM Wait a moment for Ollama service to start
-echo [*] Starting Ollama service...
-timeout /t 5 /nobreak >nul
-echo.
-
-REM Pull essential models
-echo [*] Model 1/5: Pulling qwen3:8b...
-ollama pull qwen3:8b
-echo.
-
-echo [*] Model 2/5: Pulling llama3.1:8b...
-ollama pull llama3.1:8b
-echo.
-
-echo [*] Model 3/5: Pulling deepseek-r1:8b...
-ollama pull deepseek-r1:8b
-echo.
-
-echo [*] Model 4/5: Pulling rnj-1:8b...
-ollama pull rnj-1:8b
-echo.
-
-echo [*] Model 5/5: Pulling nomic-embed-text:v1.5...
-ollama pull nomic-embed-text:v1.5
-echo.
-
-echo [+] All AI models downloaded successfully
-
-:skip_ollama
-echo.
-
-REM ========================================
-REM Step 3: Piper TTS Setup
-REM ========================================
-echo ========================================
-echo   Step 3/5: Piper Text-to-Speech
-echo ========================================
-echo.
-echo Piper is free text-to-speech software. Radio OS uses it to
-echo generate voice audio for station hosts and characters.
-echo Our enhanced setup provides an interactive voice selection menu.
-echo.
-echo Download size: ~20-400MB depending on voice selection
-echo.
-echo Alternative: Skip this and configure ElevenLabs or other
-echo TTS APIs manually later (see README.md).
-echo.
-set /p INSTALL_PIPER="Install Piper + voices now? (Recommended) (Y/n): "
-
-if /i "%INSTALL_PIPER%"=="Y" (
-    goto :install_piper
-) else if /i "%INSTALL_PIPER%"=="" (
-    goto :install_piper
-) else (
-    echo [*] Skipping Piper installation
-    echo [!] Stations will not have audio without TTS configured
-    goto :skip_piper
-)
-
-:install_piper
-echo.
-echo [*] Running enhanced Piper TTS setup...
-echo [*] This will download Piper 2023.11.14-2 + voice models with interactive selection
-echo.
-
-REM Run the enhanced Python setup script
-python setup.py
-if errorlevel 1 (
-    echo [!] Failed to run enhanced Piper setup
-    echo [!] Falling back to manual configuration...
-    goto :skip_piper
-)
-
-echo.
-echo [+] Enhanced Piper setup completed successfully
-echo.
-
-REM Set up environment variables for the session
-echo [*] Configuring environment variables...
-set PIPER_BIN=%SCRIPT_DIR%voices\piper\piper.exe
-set VOICES_DIR=%SCRIPT_DIR%voices
-
-REM Inject paths into station manifests if tools are available
-if exist "tools\inject_manifest_paths.py" (
-    echo [*] Configuring station manifests...
-    python tools\inject_manifest_paths.py --piper-bin "%PIPER_BIN%" --voices-dir "%VOICES_DIR%"
-    if errorlevel 1 (
-        echo [!] Warning: Manifest path injection failed
-        echo [!] You may need to manually configure voice paths
-    ) else (
-        echo [+] Station manifests configured
-    )
-) else (
-    echo [*] Manual setup: Set PIPER_BIN=%PIPER_BIN% in your station manifests
-)
-
-:skip_piper
-echo.
-
-REM ========================================
-REM Step 4: PyTorch (Optional ML)
-REM ========================================
-echo ========================================
-echo   Step 4/5: PyTorch ML Features
-echo ========================================
-echo.
-echo PyTorch enables advanced ML features for the "From the Backmarker"
-echo station (AI-powered team management and decision making).
-echo.
-echo Download size: ~2GB
-echo.
-echo The station works without PyTorch using simpler AI. This is
-echo optional and only needed if you want ML-powered features.
-echo.
-set /p INSTALL_PYTORCH="Install PyTorch now? (Y/n): "
-
-if /i "%INSTALL_PYTORCH%"=="Y" (
-    goto :install_pytorch
-) else if /i "%INSTALL_PYTORCH%"=="" (
-    goto :install_pytorch
-) else (
-    echo [*] Skipping PyTorch installation
-    echo [*] From the Backmarker will use basic AI (you can install later with: pip install torch)
-    goto :skip_pytorch
-)
-
-:install_pytorch
-echo.
-echo ========================================
-echo   PyTorch Installation (~2GB Download)
-echo ========================================
-echo [*] This is a large package that will take 5-15 minutes
-echo [*] You'll see progress bars from pip - this is normal!
-echo [*] Download speed depends on your internet connection
-echo.
-echo [*] Starting PyTorch installation...
-echo.
-pip install torch>=2.0.0 --progress-bar on
-if errorlevel 1 (
-    echo [!] PyTorch installation failed
-    echo [*] Continuing without PyTorch (From the Backmarker will use basic AI)
-) else (
-    echo [+] PyTorch installed - FTB ML features enabled
-)
-
-:skip_pytorch
-echo.
-
-REM ========================================
-REM Finalize Setup
-REM ========================================
-echo ========================================
-echo   Step 5/5: Finalizing Setup
-echo ========================================
-echo.
-echo [*] Creating setup completion marker...
-echo Setup completed on %date% %time% > .radio_os_setup_complete
-
-echo.
-echo ========================================
-echo   Setup Complete!
-echo ========================================
-echo.
-echo Radio OS is ready to launch. You can now:
-echo   - Launch stations from the Radio OS Shell
-echo   - Create custom stations in the stations/ directory
-echo   - Configure additional feeds and plugins
-echo.
-echo See README.md for more information and troubleshooting.
-echo.
-echo [*] Launching Radio OS Shell...
-echo.
-timeout /t 3 /nobreak >nul
-
-python shell_bookmark.py
-goto :eof
-
-REM ========================================
-REM SUBSEQUENT RUN
-REM ========================================
-:subsequent_run
-
-echo.
-echo ========================================
-echo       Radio OS Launcher
-echo ========================================
-echo.
-
-REM Activate venv
-if not exist "radioenv\" (
-    echo [!] Virtual environment missing! Re-run first-time setup.
-    del .radio_os_setup_complete
-    goto :first_run
+    echo   [!] No virtual environment found. Run option 2 first.
+    goto :menu
 )
 
 call radioenv\Scripts\activate.bat
 if errorlevel 1 (
-    echo [!] Failed to activate virtual environment.
-    pause
-    exit /b 1
+    echo   [!] Failed to activate virtual environment.
+    goto :menu
 )
 
-REM Quick dependency check
 python -c "import yaml, sounddevice" >nul 2>&1
 if errorlevel 1 (
-    echo [!] Dependencies check failed. Some packages may be missing.
-    echo.
-    set /p REINSTALL="Reinstall dependencies now? (Y/n): "
-    if /i "%REINSTALL%"=="Y" (
-        goto :reinstall_deps
-    ) else if /i "%REINSTALL%"=="" (
-        goto :reinstall_deps
-    ) else (
-        echo [*] Continuing without reinstall (may cause errors)
-    )
+    echo   [!] Some core packages are missing. Run option 2 to install them.
+    goto :menu
 )
 
-goto :launch_shell
+python shell_bookmark.py
+goto :menu
 
-:reinstall_deps
+REM ========================================
+REM  2. Install core dependencies
+REM ========================================
+:do_install_core
 echo.
-echo [*] Reinstalling dependencies...
+echo   Installing core dependencies
+echo.
+
+REM --- Check Python ---
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo   [!] Python is not installed or not in your PATH.
+    echo.
+    echo       Radio OS requires Python 3.10 or newer.
+    echo       Download: https://www.python.org/downloads/
+    echo       IMPORTANT: Check "Add Python to PATH" during installation
+    echo.
+    goto :menu
+)
+echo   [+] Python found
+echo.
+
+REM --- Create venv ---
+if not exist "radioenv\" (
+    echo   [*] Creating virtual environment...
+    python -m venv radioenv
+    if errorlevel 1 (
+        echo   [!] Failed to create venv. Ensure Python 3.10+ is installed.
+        goto :menu
+    )
+    echo   [+] Virtual environment created
+)
+
+call radioenv\Scripts\activate.bat
+if errorlevel 1 (
+    echo   [!] Failed to activate virtual environment.
+    goto :menu
+)
+echo   [+] Virtual environment activated
+echo.
+
+echo   [*] Upgrading pip...
 python -m pip install --upgrade pip -q
+
+echo   [*] Installing requirements.txt (this may take a few minutes)...
 pip install -r requirements.txt
 if errorlevel 1 (
-    echo [!] Reinstall failed. Check your internet connection.
-    pause
-    exit /b 1
+    echo   [!] Install failed. Check your internet connection.
+    goto :menu
 )
-echo [+] Dependencies reinstalled
 
-:launch_shell
-echo [*] Launching Radio OS Shell...
 echo.
-python shell_bookmark.py
+echo   [+] Core dependencies installed successfully!
+echo       You can now choose option 1 to boot Radio OS.
+goto :menu
 
+REM ========================================
+REM  3. Install Ollama
+REM ========================================
+:do_install_ollama
+echo.
+echo   Ollama — Local AI Models
+echo.
+echo   Ollama lets you run large-language models on your own machine.
+echo   This is optional — you can use OpenAI / Claude / Gemini API keys instead.
+echo.
+echo   Download size: ~500 MB installer + 4-12 GB per model.
+echo.
+set /p CONFIRM="  Proceed? (Y/n): "
+if /i not "%CONFIRM%"=="Y" if not "%CONFIRM%"=="" (
+    echo   Skipped.
+    goto :menu
+)
+
+echo.
+echo   [*] Downloading Ollama installer...
+set OLLAMA_INSTALLER=%TEMP%\OllamaSetup.exe
+
+powershell -Command "$ProgressPreference='Continue'; Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile '%OLLAMA_INSTALLER%'"
+if errorlevel 1 (
+    echo   [!] Download failed. Get it manually: https://ollama.ai/download
+    goto :menu
+)
+
+echo   [+] Download complete
+echo   [*] Running installer...
+start /wait "" "%OLLAMA_INSTALLER%" /S
+del "%OLLAMA_INSTALLER%" 2>nul
+echo   [+] Ollama installed
+echo.
+
+echo   Which models would you like to pull?
+echo     a) Recommended starter set  (qwen3:8b, llama3.1:8b)           ~8 GB
+echo     b) Full set                 (+ deepseek-r1:8b, nomic-embed)  ~16 GB
+echo     s) Skip model downloads for now
+echo.
+set /p MODEL_CHOICE="  Choice (a/b/s): "
+
+timeout /t 3 /nobreak >nul
+
+if /i "%MODEL_CHOICE%"=="a" (
+    echo   [*] Pulling qwen3:8b...
+    ollama pull qwen3:8b
+    echo   [*] Pulling llama3.1:8b...
+    ollama pull llama3.1:8b
+) else if /i "%MODEL_CHOICE%"=="b" (
+    echo   [*] Pulling qwen3:8b...
+    ollama pull qwen3:8b
+    echo   [*] Pulling llama3.1:8b...
+    ollama pull llama3.1:8b
+    echo   [*] Pulling deepseek-r1:8b...
+    ollama pull deepseek-r1:8b
+    echo   [*] Pulling nomic-embed-text:v1.5...
+    ollama pull nomic-embed-text:v1.5
+) else (
+    echo   Skipped model downloads.
+)
+
+echo   [+] Ollama setup complete.
+goto :menu
+
+REM ========================================
+REM  4. Install Piper TTS
+REM ========================================
+:do_install_piper
+echo.
+echo   Piper — Offline Text-to-Speech
+echo.
+echo   Piper is a free, fast, offline TTS engine.
+echo   This is optional — Radio OS also supports Kokoro (built-in),
+echo   ElevenLabs, and OpenAI TTS.
+echo.
+echo   Download size: 20-400 MB depending on voices selected.
+echo.
+set /p CONFIRM="  Proceed? (Y/n): "
+if /i not "%CONFIRM%"=="Y" if not "%CONFIRM%"=="" (
+    echo   Skipped.
+    goto :menu
+)
+
+if not exist "radioenv\" (
+    echo   [!] Run option 2 first to set up the virtual environment.
+    goto :menu
+)
+call radioenv\Scripts\activate.bat
+
+echo   [*] Running Piper setup wizard...
+python setup.py
+
+REM Auto-configure manifests
+set PIPER_BIN=%SCRIPT_DIR%voices\piper\piper.exe
+set VOICES_DIR=%SCRIPT_DIR%voices
+if exist "tools\inject_manifest_paths.py" (
+    echo   [*] Configuring station manifests...
+    python tools\inject_manifest_paths.py --piper-bin "%PIPER_BIN%" --voices-dir "%VOICES_DIR%" 2>nul
+)
+
+echo   [+] Piper setup complete.
+goto :menu
+
+REM ========================================
+REM  5. Install PyTorch
+REM ========================================
+:do_install_pytorch
+echo.
+echo   PyTorch — ML Features
+echo.
+echo   PyTorch enables advanced machine-learning features for the
+echo   "From the Backmarker" station.  The station works fine without it
+echo   (it falls back to simpler AI).
+echo.
+echo   Download size: ~2 GB
+echo.
+set /p CONFIRM="  Proceed? (Y/n): "
+if /i not "%CONFIRM%"=="Y" if not "%CONFIRM%"=="" (
+    echo   Skipped.
+    goto :menu
+)
+
+if not exist "radioenv\" (
+    echo   [!] Run option 2 first to set up the virtual environment.
+    goto :menu
+)
+call radioenv\Scripts\activate.bat
+
+echo   [*] Installing PyTorch (this may take 5-15 minutes)...
+pip install torch>=2.0.0 --progress-bar on
+if errorlevel 1 (
+    echo   [!] PyTorch install failed. You can try again later.
+) else (
+    echo   [+] PyTorch installed — ML features enabled.
+)
+goto :menu
+
+REM ========================================
+:quit
+echo.
+echo   Goodbye!
+echo.
 endlocal
-goto :eof
-
-REM ========================================
-REM HELPER FUNCTIONS
-REM ========================================
-
-REM Helper functions removed - now using enhanced setup.py
+exit /b 0

@@ -1,1 +1,1 @@
-{"station": "HockeyFM", "host": "Gabs", "db_queued": 24, "db_claimed": 0, "audio_q": 8, "threads": {"producer_kick_set": true}, "last_event": null, "last_title": null, "last_source": null, "ts": 1770990178}
+{"station": "HockeyFM", "host": "Gabs", "db_queued": 33, "db_claimed": 0, "audio_q": 8, "threads": {"producer_kick_set": false}, "last_event": null, "last_title": null, "last_source": null, "ts": 1771391154}

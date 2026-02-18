@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tickStep, tickBatch, saveGame, fetchState } from '../lib/api'
+  import { tickStep, tickBatch, saveGame, fetchState, fetchSaves } from '../lib/api'
   import { gameState, dateStr, tick, phase, notifications, unreadCount, hasGame, addToast } from '../lib/stores'
   import { createEventDispatcher } from 'svelte'
 
@@ -8,6 +8,10 @@
   let showNotifications = false
   let working = false
   let saving = false
+  let showSaveModal = false
+  let saveName = ''
+  let existingSaves: any[] = []
+  let loadingSaves = false
 
   async function handleTick(n: number) {
     if (working) return; working = true
@@ -21,10 +25,36 @@
     working = false
   }
 
+  async function openSaveModal() {
+    // Generate a default name from team + date
+    const gs = $gameState as any
+    const team = gs?.player_team_name || gs?.team?.name || 'save'
+    const day = gs?.date_str || `T${gs?.tick || 0}`
+    saveName = `${team} - ${day}`.replace(/[\/\\:*?"<>|]/g, '_')
+    showSaveModal = true
+    loadingSaves = true
+    try { existingSaves = await fetchSaves() } catch { existingSaves = [] }
+    loadingSaves = false
+  }
+
   async function handleSave() {
-    if (saving) return; saving = true
-    try { await saveGame(); addToast('Game saved ✅', 'success') } catch (e) { console.error('save', e); addToast('Save failed', 'error') }
+    if (saving || !saveName.trim()) return
+    saving = true
+    try {
+      await saveGame(saveName.trim())
+      addToast(`Saved as "${saveName.trim()}" ✅`, 'success')
+      showSaveModal = false
+    } catch (e) {
+      console.error('save', e)
+      addToast('Save failed', 'error')
+    }
     saving = false
+  }
+
+  function overwriteSave(name: string) {
+    // Strip .json extension for display, keep for save
+    saveName = name.replace(/\.json$/, '')
+    handleSave()
   }
 
   function newGame() {
@@ -62,7 +92,7 @@
 
   <div class="toolbar-right">
     <button class="btn btn-ghost btn-sm" on:click={refreshState} title="Refresh">🔄</button>
-    <button class="btn btn-ghost btn-sm" class:working={saving} disabled={saving} on:click={handleSave} title="Save">💾</button>
+    <button class="btn btn-ghost btn-sm" class:working={saving} disabled={saving} on:click={openSaveModal} title="Save Game">💾</button>
     <button class="btn btn-ghost btn-sm" on:click={() => dispatch('loadsave')} title="Load Save">📂</button>
     <button class="btn btn-ghost btn-sm" on:click={newGame} title="New Game">🆕</button>
     <button class="btn btn-ghost btn-sm notification-btn" on:click={() => dispatch('notifications')} title="Notifications">
@@ -73,6 +103,49 @@
     </button>
   </div>
 </div>
+
+{#if showSaveModal}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click|self={() => showSaveModal = false}>
+    <div class="save-modal">
+      <div class="save-modal-header">
+        <h3>💾 Save Game</h3>
+        <button class="btn btn-ghost btn-sm" on:click={() => showSaveModal = false}>✕</button>
+      </div>
+      <div class="save-modal-body">
+        <label class="save-label" for="save-name-input">Save name</label>
+        <div class="save-input-row">
+          <input
+            id="save-name-input"
+            class="save-input"
+            type="text"
+            bind:value={saveName}
+            placeholder="Enter save name…"
+            on:keydown={(e) => e.key === 'Enter' && handleSave()}
+          />
+          <button class="btn btn-primary" disabled={saving || !saveName.trim()} on:click={handleSave}>
+            {saving ? '⏳ Saving…' : '💾 Save'}
+          </button>
+        </div>
+
+        {#if existingSaves.length > 0}
+          <div class="existing-saves">
+            <label class="save-label">Or overwrite existing save</label>
+            <div class="existing-saves-list">
+              {#each existingSaves as save}
+                <button class="existing-save-item" on:click={() => overwriteSave(save.name)}>
+                  <span class="existing-save-name">{save.name.replace(/\.json$/, '')}</span>
+                  <span class="existing-save-meta">{new Date(save.mtime * 1000).toLocaleString()}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .toolbar {
@@ -151,5 +224,111 @@
     position: absolute;
     top: -4px;
     right: -4px;
+  }
+
+  /* ─── Save Modal ─── */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .save-modal {
+    background: var(--c-bg-secondary);
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    width: 440px;
+    max-width: 90vw;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+  .save-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--c-border);
+  }
+  .save-modal-header h3 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .save-modal-body {
+    padding: 18px;
+    overflow-y: auto;
+  }
+  .save-label {
+    display: block;
+    font-size: 12px;
+    color: var(--c-text-secondary);
+    margin-bottom: 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .save-input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .save-input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    background: var(--c-bg);
+    color: var(--c-text);
+    font-size: 14px;
+    outline: none;
+  }
+  .save-input:focus {
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 2px rgba(76, 201, 240, 0.15);
+  }
+  .existing-saves {
+    margin-top: 8px;
+  }
+  .existing-saves-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .existing-save-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    background: var(--c-bg);
+    color: var(--c-text);
+    cursor: pointer;
+    font-size: 13px;
+    text-align: left;
+    transition: background 0.15s;
+  }
+  .existing-save-item:hover {
+    background: var(--c-bg-tertiary);
+    border-color: var(--c-accent);
+  }
+  .existing-save-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+  .existing-save-meta {
+    font-size: 11px;
+    color: var(--c-text-muted);
+    white-space: nowrap;
   }
 </style>

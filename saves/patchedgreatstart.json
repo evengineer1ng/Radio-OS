@@ -107,7 +107,9 @@
           "political_awareness": 38.159104438555595,
           "mettle": 25.053068360205387
         },
-        "performance_history": []
+        "performance_history": [],
+        "morale_baseline": 41.99514715448264,
+        "morale_last_updated": 0
       },
       {
         "name": "Sang-Hyun Moss",
@@ -152,7 +154,9 @@
           "political_awareness": 33.6133547905045,
           "mettle": 25.456496628509047
         },
-        "performance_history": []
+        "performance_history": [],
+        "morale_baseline": 41.93587118514738,
+        "morale_last_updated": 0
       }
     ],
     "engineers": [
@@ -191,7 +195,9 @@
           "knowledge_transfer": 28.821815389859633,
           "mettle": 44.01351525268695
         },
-        "performance_history": []
+        "performance_history": [],
+        "morale_baseline": 43.45067576263435,
+        "morale_last_updated": 0
       }
     ],
     "mechanics": [
@@ -224,10 +230,12 @@
           "burnout_rate": 44.2645085610815,
           "focus_retention": 36.814218819431154,
           "weekend_consistency": 57.56069448592271,
-          "morale": 30.564010662400072,
+          "morale": 53.24754706688244,
           "mettle": 39.95094133764879
         },
-        "performance_history": []
+        "performance_history": [],
+        "morale_baseline": 43.24754706688244,
+        "morale_last_updated": 0
       }
     ],
     "strategist": {
@@ -259,10 +267,12 @@
         "pit_window_precision": 17.458476996838204,
         "call_latency": 30.87663934870089,
         "multi_car_coordination": 34.9880144852795,
-        "morale": 41.38768002432255,
+        "morale": 53.040478933570114,
         "mettle": 35.80957867140223
       },
-      "performance_history": []
+      "performance_history": [],
+      "morale_baseline": 43.040478933570114,
+      "morale_last_updated": 0
     },
     "principal": {
       "name": "Ezen Alessandro",
@@ -218111,5 +218121,11 @@
         "exclusivity_clauses": []
       }
     ]
-  }
+  },
+  "free_agents": [],
+  "job_board": {
+    "vacancies": []
+  },
+  "_last_race_results": {},
+  "_last_race_contexts": {}
 }

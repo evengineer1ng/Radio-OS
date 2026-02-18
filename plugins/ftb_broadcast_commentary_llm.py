@@ -144,8 +144,8 @@ EVENT_BASE_WEIGHT = {
     "crash":                 6.0,
     "mechanical_dnf":        7.0,
     "player_dnf":           10.0,
-    "midfield_overtake":     3.0,
-    "position_swap_back":    2.0,
+    "midfield_overtake":     4.5,
+    "position_swap_back":    2.5,
 }
 
 
@@ -412,16 +412,16 @@ class CommentaryPrompt:
 @dataclass
 class BeatConfig:
     """Tunable knobs for the beat dispatcher."""
-    min_gap_sec: float = 6.0
-    silence_min: float = 5.0
-    silence_max: float = 8.0
-    max_beats_per_lap: int = 2
+    min_gap_sec: float = 3.0
+    silence_min: float = 2.0
+    silence_max: float = 4.0
+    max_beats_per_lap: int = 3
     late_race_lap_threshold: int = 5
-    late_race_min_gap: float = 4.0
-    late_race_max_beats: int = 3
-    color_probability: float = 0.35
-    late_race_color_probability: float = 0.55
-    narration_threshold: float = 4.0
+    late_race_min_gap: float = 2.0
+    late_race_max_beats: int = 4
+    color_probability: float = 0.5
+    late_race_color_probability: float = 0.65
+    narration_threshold: float = 2.5
     final_lap_always: bool = True
 
 
@@ -623,13 +623,15 @@ class LLMCommentaryGenerator:
                 f"Ongoing narrative:\n{narrative_block}\n"
                 f"{memory_block}\n"
                 "CRITICAL RULES:\n"
-                "- 1-2 sentences maximum (40-60 words)\n"
+                "- ONE sentence only (15-25 words max). Be punchy and direct.\n"
                 "- Present tense, immediate action\n"
                 '- NO player references ("our team", "we", "you")\n'
                 "- Use driver/team names objectively\n"
                 "- Match the tier style exactly\n"
-                "- Natural, conversational flow - interpret, don't recite telemetry\n"
-                "- You may refer back to earlier events for narrative continuity\n"
+                "- Interpret, don't recite telemetry — give the moment meaning\n"
+                "- NEVER start with interjections like 'Whoa', 'Oh', 'Wow', 'Well' or 'And'. "
+                "Jump straight into the action with a driver name, team name, or race verb.\n"
+                "- Vary your sentence structure every time. No two calls should open the same way.\n"
             )
         else:
             return (
@@ -640,13 +642,15 @@ class LLMCommentaryGenerator:
                 f"Ongoing narrative:\n{narrative_block}\n"
                 f"{season_block}{memory_block}\n"
                 "CRITICAL RULES:\n"
-                "- 1-2 sentences maximum (40-60 words)\n"
+                "- ONE sentence only (15-25 words max). Tight insight, no filler.\n"
                 "- Analytical, context-adding perspective: strategy, momentum, psychology\n"
                 '- NO player references ("our team", "we", "you")\n'
                 "- Use driver/team names objectively\n"
                 "- Do NOT restate positions - interpret what they mean\n"
                 "- Match the tier style exactly\n"
                 "- Complement play-by-play with insight, not repetition\n"
+                "- NEVER start with interjections like 'Whoa', 'Oh', 'Wow', 'Well' or 'And'. "
+                "Lead with analysis — a driver name, a strategic observation, or a stat.\n"
             )
 
     # ---------- Pre-race ----------
@@ -681,12 +685,12 @@ class LLMCommentaryGenerator:
             speaker="pbp",
             prompt=(
                 f"{pbp_base}\n"
-                f"TASK: Deliver the race opening. We're at {track_name}, grid is set, moments from lights out.\n"
+                f"TASK: ONE sentence race opening. We're at {track_name}, moments from lights out.\n"
                 f"Key facts: {pole_info}. {player_grid}. {stakes}\n"
                 "Generate the opening call:"
             ),
             event_type="pre_race",
-            max_tokens=70,
+            max_tokens=40,
             priority=10,
         ))
 
@@ -696,12 +700,12 @@ class LLMCommentaryGenerator:
                 speaker="color",
                 prompt=(
                     f"{color_base}\n"
-                    "TASK: Set the scene - championship implications, track characteristics, what to watch for.\n"
+                    "TASK: ONE sentence — championship stakes and what to watch for.\n"
                     f"{self.player_team} starts P{player_pos or '?'}, currently P{self.season_context.player_position} in standings.\n"
                     "Generate pre-race analysis:"
                 ),
                 event_type="pre_race",
-                max_tokens=70,
+                max_tokens=35,
                 priority=9,
             ))
         return prompts
@@ -757,11 +761,11 @@ class LLMCommentaryGenerator:
                 f"Significance: {significance}\n"
                 f"{secondary_desc}\n"
                 f"{player_note}\n\n"
-                "TASK: Call this moment. Interpret it, don't just recite. 1-2 sentences.\n"
+                "TASK: Call this moment in ONE punchy sentence. Interpret it, don't recite.\n"
                 "Generate commentary:"
             ),
             event_type=primary.event_class,
-            max_tokens=55,
+            max_tokens=35,
             priority=min(10, int(primary.final_weight)),
         ))
 
@@ -775,11 +779,11 @@ class LLMCommentaryGenerator:
                     f"{color_base}\n"
                     f"CONTEXT: {primary.description} (lap {lap}).\n"
                     f"{color_angle}\n\n"
-                    "TASK: Provide analytical follow-up. Interpret - don't repeat the play-by-play. 1-2 sentences.\n"
+                    "TASK: ONE sentence of sharp analysis. Don't repeat the play-by-play.\n"
                     "Generate analysis:"
                 ),
                 event_type=primary.event_class + "_analysis",
-                max_tokens=55,
+                max_tokens=35,
                 priority=max(3, min(8, int(primary.final_weight) - 2)),
             ))
 
@@ -792,9 +796,8 @@ class LLMCommentaryGenerator:
         remaining = total_laps - lap
         is_milestone = (lap % 5 == 0) or remaining in (5, 3, 1) or lap == 1
 
-        if narrative.laps_since_commentary < 2 and not is_milestone:
-            return None
-        if not is_milestone and narrative.laps_since_commentary < 3:
+        # Only suppress if we JUST spoke and it's not a milestone
+        if narrative.laps_since_commentary < 1 and not is_milestone:
             return None
 
         pbp_base = self._build_base_prompt("pbp", narrative)
@@ -808,11 +811,11 @@ class LLMCommentaryGenerator:
                 f"{pbp_base}\n"
                 f"STATUS: Lap {lap}/{total_laps}. {narrative.race_phase.upper()} phase. {player_ctx}\n"
                 f"{narrative.to_narrative_summary()}\n\n"
-                "TASK: Paint the picture - don't just state facts. Thread the narrative. 1-2 sentences.\n"
+                "TASK: ONE sentence painting the race picture. Thread the narrative, don't list facts.\n"
                 "Generate:"
             ),
             event_type="lap_update",
-            max_tokens=60,
+            max_tokens=35,
             priority=5 if remaining <= 5 else 3,
         )
 
@@ -832,11 +835,11 @@ class LLMCommentaryGenerator:
                 f"{pbp_base}\n"
                 f"MOMENT: {drama}. {narrative.leader} ({narrative.leader_team}) leads.\n"
                 f"{narrative.to_narrative_summary()}\n\n"
-                "TASK: Deliver the final lap call with escalated drama. This is the climax. 1-2 sentences.\n"
+                "TASK: ONE sentence — the final lap call. Peak drama, maximum intensity.\n"
                 "Generate:"
             ),
             event_type="final_lap",
-            max_tokens=60,
+            max_tokens=40,
             priority=10,
         )
 
@@ -862,11 +865,11 @@ class LLMCommentaryGenerator:
                 f"CHECKERED FLAG: {winner_name} ({winner_team}) wins!\n"
                 f"{player_flag}\n"
                 f"Race narrative: {narrative.to_narrative_summary()}\n\n"
-                "TASK: Deliver the finish call. Make it iconic. 1-2 sentences.\n"
+                "TASK: ONE iconic finish call. Make it land.\n"
                 "Generate:"
             ),
             event_type="checkered_flag",
-            max_tokens=60,
+            max_tokens=40,
             priority=10,
         ))
 
@@ -885,11 +888,11 @@ class LLMCommentaryGenerator:
                     f"RESULT: {self.player_team} finishes P{player_pos}. {championship_angle}\n"
                     f"Championship: P{self.season_context.player_position}, {self.season_context.races_remaining} races remaining.\n"
                     f"Race story: {narrative.to_narrative_summary()}\n\n"
-                    "TASK: Wrap the race - championship picture, momentum, what this means. 1-2 sentences.\n"
+                    "TASK: ONE sentence — what this result means for the championship.\n"
                     "Generate:"
                 ),
                 event_type="race_summary",
-                max_tokens=70,
+                max_tokens=40,
                 priority=9,
             ))
 

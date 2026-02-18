@@ -22,46 +22,64 @@ try:
 except ImportError:
     HAS_PIL = False
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+# --- Detect boot mode early (before importing tkinter) ---
+import argparse as _argparse
+_boot_parser = _argparse.ArgumentParser(add_help=False)
+_boot_parser.add_argument("--desktop", action="store_true")
+_boot_parser.add_argument("--web", action="store_true")
+_boot_args, _ = _boot_parser.parse_known_args()
 
-# --- Cross-platform Button Shim ---
-if sys.platform == "darwin":
-    class StyledButton(tk.Label):
-        def __init__(self, parent, *args, **kwargs):
-            self.command = kwargs.pop("command", None)
-            self.disabled = False
-            if "padx" not in kwargs: kwargs["padx"] = 10
-            if "pady" not in kwargs: kwargs["pady"] = 5
-            if "cursor" not in kwargs: kwargs["cursor"] = "hand2"
-            state = kwargs.pop("state", "normal")
-            super().__init__(parent, *args, **kwargs)
-            if state == "disabled": self.configure(state="disabled")
-            self.bind("<Button-1>", self._on_click)
-            self.bind("<Enter>", self._on_hover)
-            self.bind("<Leave>", self._on_leave)
-            self._orig_bg = kwargs.get("bg", kwargs.get("background", "SystemButtonFace"))
-            self._hover_bg = self._adjust_color(self._orig_bg, 20)
-        def _adjust_color(self, hex_color, amount=20):
-            if not isinstance(hex_color, str) or not hex_color.startswith("#") or len(hex_color) != 7: return hex_color 
-            try:
-                r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
-                return f"#{min(255, max(0, r+amount)):02x}{min(255, max(0, g+amount)):02x}{min(255, max(0, b+amount)):02x}"
-            except: return hex_color
-        def _on_click(self, event):
-            if self.command and not self.disabled: self.after(5, self.command)
-        def _on_hover(self, event):
-            if not self.disabled: self.config(bg=self._hover_bg)
-        def _on_leave(self, event):
-            if not self.disabled: self.config(bg=self._orig_bg)
-        def configure(self, **kwargs):
-            if "command" in kwargs: self.command = kwargs.pop("command")
-            if "state" in kwargs:
-                self.disabled = (kwargs.pop("state") == "disabled")
-                self.config(cursor="arrow" if self.disabled else "hand2", fg="#666666" if self.disabled else kwargs.get("fg", "#ffffff"))
-            super().configure(**kwargs)
-        config = configure
-    tk.Button = StyledButton
+BOOT_MODE = "desktop" if _boot_args.desktop else ("web" if _boot_args.web else "headless")
+
+# Only import tkinter when running in desktop mode
+if BOOT_MODE == "desktop":
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+
+    # --- Cross-platform Button Shim ---
+    if sys.platform == "darwin":
+        class StyledButton(tk.Label):
+            def __init__(self, parent, *args, **kwargs):
+                self.command = kwargs.pop("command", None)
+                self.disabled = False
+                if "padx" not in kwargs: kwargs["padx"] = 10
+                if "pady" not in kwargs: kwargs["pady"] = 5
+                if "cursor" not in kwargs: kwargs["cursor"] = "hand2"
+                state = kwargs.pop("state", "normal")
+                super().__init__(parent, *args, **kwargs)
+                if state == "disabled": self.configure(state="disabled")
+                self.bind("<Button-1>", self._on_click)
+                self.bind("<Enter>", self._on_hover)
+                self.bind("<Leave>", self._on_leave)
+                self._orig_bg = kwargs.get("bg", kwargs.get("background", "SystemButtonFace"))
+                self._hover_bg = self._adjust_color(self._orig_bg, 20)
+            def _adjust_color(self, hex_color, amount=20):
+                if not isinstance(hex_color, str) or not hex_color.startswith("#") or len(hex_color) != 7: return hex_color 
+                try:
+                    r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+                    return f"#{min(255, max(0, r+amount)):02x}{min(255, max(0, g+amount)):02x}{min(255, max(0, b+amount)):02x}"
+                except: return hex_color
+            def _on_click(self, event):
+                if self.command and not self.disabled: self.after(5, self.command)
+            def _on_hover(self, event):
+                if not self.disabled: self.config(bg=self._hover_bg)
+            def _on_leave(self, event):
+                if not self.disabled: self.config(bg=self._orig_bg)
+            def configure(self, **kwargs):
+                if "command" in kwargs: self.command = kwargs.pop("command")
+                if "state" in kwargs:
+                    self.disabled = (kwargs.pop("state") == "disabled")
+                    self.config(cursor="arrow" if self.disabled else "hand2", fg="#666666" if self.disabled else kwargs.get("fg", "#ffffff"))
+                super().configure(**kwargs)
+            config = configure
+        tk.Button = StyledButton
+else:
+    # Headless / web mode — provide lightweight stubs so the rest of the
+    # module can be parsed without a display server.
+    tk = None   # type: ignore
+    ttk = None  # type: ignore
+    messagebox = None  # type: ignore
+    filedialog = None  # type: ignore
 
 BASE = os.path.dirname(__file__)
 STATIONS_DIR = os.path.join(BASE, "stations")
@@ -948,10 +966,23 @@ class RadioShell:
         self.btn_server.bind("<Button-1>", lambda e: self.toggle_web_server())
         self.btn_server.pack(side="left", padx=6)
 
+        # ── Audio CLI mic button ──
+        self._audio_cli_session = None
+        self.btn_mic = tk.Label(
+            right, text="🎤 Audio CLI", font=FONT_BODY,
+            bg=UI["panel"], fg=UI["text"], padx=8, pady=4, cursor="hand2"
+        )
+        self.btn_mic.bind("<Button-1>", lambda e: self._toggle_audio_cli())
+        self.btn_mic.pack(side="left", padx=6)
+
         # Auto-launch server if global setting is enabled
         cfg = get_global_config()
         if cfg.get("general", {}).get("always_launch_server", False):
             self.root.after(500, self._auto_launch_server)
+
+        # Auto-start Audio CLI listener if enabled in settings
+        if cfg.get("general", {}).get("audio_cli_enabled", False):
+            self.root.after(1000, self._auto_start_audio_cli)
 
     # -----------------------------
     # Web Server Management
@@ -1019,6 +1050,71 @@ class RadioShell:
         self._web_server_stop = None
         self._web_server_url = None
         self.btn_server.config(text="🌐 Launch Server", bg=UI["panel"], fg=UI["text"])
+
+    # -----------------------------
+    # Audio CLI Management
+    # -----------------------------
+    def _auto_start_audio_cli(self):
+        """Auto-start Audio CLI listener from global setting."""
+        if self._audio_cli_session is None:
+            self._init_audio_cli()
+        if self._audio_cli_session and not self._audio_cli_session.is_running:
+            self._audio_cli_session.start_listener()
+            self.btn_mic.config(text="🎤 Audio CLI (ON)", bg="#1a3a1a", fg=UI["good"])
+
+    def _toggle_audio_cli(self):
+        """Toggle Audio CLI listener on/off."""
+        if self._audio_cli_session is None:
+            self._init_audio_cli()
+
+        if self._audio_cli_session is None:
+            messagebox.showerror("Audio CLI", 
+                "Audio CLI could not be initialized.\n\n"
+                "Make sure sounddevice is installed and a microphone is available.")
+            return
+
+        if self._audio_cli_session.is_running:
+            self._audio_cli_session.stop_listener()
+            self.btn_mic.config(text="🎤 Audio CLI", bg=UI["panel"], fg=UI["text"])
+        else:
+            self._audio_cli_session.start_listener()
+            self.btn_mic.config(text="🎤 Audio CLI (ON)", bg="#1a3a1a", fg=UI["good"])
+
+    def _init_audio_cli(self):
+        """Initialize the Audio CLI session object."""
+        try:
+            from audio_cli import AudioCLISession
+
+            # Read default mode from global config
+            acli_cfg = get_global_config().get("audio_cli", {})
+            default_mode = acli_cfg.get("default_mode", "tkinter")
+            web_url = acli_cfg.get("web_url", "http://127.0.0.1:7800")
+
+            if default_mode == "web":
+                self._audio_cli_session = AudioCLISession(shell=None, web_url=web_url)
+            else:
+                self._audio_cli_session = AudioCLISession(self)
+
+            # Wire up session callbacks
+            def on_start():
+                self.root.after(0, lambda: self.btn_mic.config(
+                    text="🎤 ACTIVE", bg="#3a1a1a", fg=UI["danger"]))
+
+            def on_end():
+                self.root.after(0, lambda: self.btn_mic.config(
+                    text="🎤 Audio CLI (ON)", bg="#1a3a1a", fg=UI["good"]))
+
+            def on_status(text):
+                self.root.after(0, lambda t=text: self.mode_lbl.config(
+                    text=f"Audio CLI: {t}"))
+
+            self._audio_cli_session.on_session_start = on_start
+            self._audio_cli_session.on_session_end = on_end
+            self._audio_cli_session.on_status_change = on_status
+
+        except Exception as e:
+            print(f"[AudioCLI] Init failed: {e}")
+            self._audio_cli_session = None
 
     # -----------------------------
     # Home view
@@ -1547,6 +1643,10 @@ class RadioShell:
         nb.add(st, text="Storage")
         self._build_storage_tools(st)
 
+        acli = tk.Frame(nb, bg=UI["bg"])
+        nb.add(acli, text="Audio CLI")
+        self._build_audio_cli_settings(acli)
+
         env = tk.Frame(nb, bg=UI["bg"])
         nb.add(env, text="Environment")
         self._build_environment_settings(env)
@@ -1622,6 +1722,25 @@ class RadioShell:
         tk.Label(server_frame, text="(Default: 7800 — accessible via http://your-ip:port)",
                  fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
         
+        # Audio CLI Settings
+        audio_cli_frame = tk.LabelFrame(wrap, text="🎤 Audio CLI (Voice Control)", fg=UI["text"],
+                                         bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        audio_cli_frame.pack(fill="x", pady=8)
+        
+        audio_cli_var = tk.BooleanVar(value=general.get("audio_cli_enabled", False))
+        tk.Checkbutton(
+            audio_cli_frame,
+            text="Enable Audio CLI on startup",
+            variable=audio_cli_var,
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY
+        ).pack(anchor="w")
+        tk.Label(audio_cli_frame, text="Voice-command interface. Say 'Hey Radio OS' to activate,\n"
+                 "'Thanks Radio OS' to deactivate. Requires microphone access.\n"
+                 "Uses whisper.cpp (set WHISPER_CPP_BIN / WHISPER_CPP_MODEL env vars)\n"
+                 "or falls back to Google Speech Recognition.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(2, 8))
+
         # Status poll interval
         poll_frame = tk.LabelFrame(wrap, text="Status Update Interval", fg=UI["text"], 
                                     bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
@@ -1717,6 +1836,7 @@ class RadioShell:
                 "auto_start_last_station": auto_start_var.get(),
                 "always_launch_server": always_server_var.get(),
                 "web_server_port": int(server_port_var.get() or 7800),
+                "audio_cli_enabled": audio_cli_var.get(),
                 "status_poll_ms": int(poll_var.get() or 1000),
                 "theme": new_theme,
                 "ui_scale": new_scale,
@@ -2225,6 +2345,311 @@ class RadioShell:
         
         tk.Button(info_frame, text="Open Config Directory", bg=UI["card"], fg=UI["text"], 
                  relief="flat", command=open_config_dir, font=FONT_BODY).pack(anchor="w", pady=(8, 0))
+
+    def _build_audio_cli_settings(self, parent: tk.Frame) -> None:
+        """Build the Audio CLI settings panel (default interface mode, wake phrases, etc.)."""
+
+        # Make scrollable
+        scrollbar = tk.Scrollbar(parent, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        canvas = tk.Canvas(parent, bg=UI["bg"], highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar.configure(command=canvas.yview)
+
+        scroll_frame = tk.Frame(canvas, bg=UI["bg"])
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        tk.Label(scroll_frame, text="Audio CLI Settings", font=FONT_H2, fg=UI["text"], bg=UI["bg"]).pack(
+            anchor="w", padx=14, pady=(14, 4)
+        )
+        tk.Label(scroll_frame, text="Configure voice-command interface behaviour, default mode, and wake phrases",
+                font=FONT_SMALL, fg=UI["muted"], bg=UI["bg"]).pack(anchor="w", padx=14, pady=(0, 8))
+
+        wrap = tk.Frame(scroll_frame, bg=UI["bg"])
+        wrap.pack(fill="both", expand=True, padx=14, pady=8)
+
+        cfg = get_global_config()
+        acli_cfg = cfg.get("audio_cli", {})
+
+        # ── Default Interface Mode ──
+        mode_frame = tk.LabelFrame(wrap, text="🖥  Default Interface Mode", fg=UI["text"],
+                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        mode_frame.pack(fill="x", pady=8)
+
+        tk.Label(mode_frame,
+                 text="Choose which interface Audio CLI controls by default when started.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(0, 6))
+
+        mode_var = tk.StringVar(value=acli_cfg.get("default_mode", "tkinter"))
+
+        mode_select_frame = tk.Frame(mode_frame, bg=UI["panel"])
+        mode_select_frame.pack(fill="x", pady=(0, 4))
+
+        tk.Radiobutton(
+            mode_select_frame, text="Desktop (tkinter)  — control the desktop shell directly",
+            variable=mode_var, value="tkinter",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w"
+        ).pack(anchor="w", pady=2)
+
+        tk.Radiobutton(
+            mode_select_frame, text="Web  — control Radio OS via the web server REST API",
+            variable=mode_var, value="web",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w"
+        ).pack(anchor="w", pady=2)
+
+        tk.Label(mode_frame,
+                 text="You can always switch modes at runtime by saying\n"
+                      "'switch to web mode' or 'switch to desktop mode'.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(4, 0))
+
+        # ── Audio Output Mode (Speaker / Headphone) ──
+        audio_mode_frame = tk.LabelFrame(wrap, text="🔊  Audio Output Mode", fg=UI["text"],
+                                          bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        audio_mode_frame.pack(fill="x", pady=8)
+
+        tk.Label(audio_mode_frame,
+                 text="Choose how Audio CLI handles its own voice output and mic input.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(0, 6))
+
+        audio_mode_var = tk.StringVar(value=acli_cfg.get("audio_output_mode", "speaker"))
+
+        audio_mode_select = tk.Frame(audio_mode_frame, bg=UI["panel"])
+        audio_mode_select.pack(fill="x", pady=(0, 4))
+
+        tk.Radiobutton(
+            audio_mode_select,
+            text="Speaker  — mic is muted while speaking, barge-in disabled\n"
+                 "          (prevents self-interruption on laptop / desktop speakers)",
+            variable=audio_mode_var, value="speaker",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w", justify="left"
+        ).pack(anchor="w", pady=2)
+
+        tk.Radiobutton(
+            audio_mode_select,
+            text="Headphone  — mic stays live, barge-in enabled\n"
+                 "             (you can interrupt narration by speaking)",
+            variable=audio_mode_var, value="headphone",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w", justify="left"
+        ).pack(anchor="w", pady=2)
+
+        tk.Label(audio_mode_frame,
+                 text="You can also switch at runtime by saying\n"
+                      "'switch to speaker mode' or 'switch to headphone mode'.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(4, 0))
+
+        # ── Web Server URL (used for web mode) ──
+        url_frame = tk.LabelFrame(wrap, text="🌐 Web Server URL", fg=UI["text"],
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        url_frame.pack(fill="x", pady=8)
+
+        tk.Label(url_frame,
+                 text="Base URL of the Radio OS web server (used when default mode is Web).",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        url_var = tk.StringVar(value=acli_cfg.get("web_url", "http://127.0.0.1:7800"))
+        tk.Entry(url_frame, textvariable=url_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], font=FONT_BODY, width=40).pack(anchor="w", pady=(4, 2))
+        tk.Label(url_frame, text="(Default: http://127.0.0.1:7800)",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # ── Wake / Exit Phrases ──
+        phrase_frame = tk.LabelFrame(wrap, text="🎙  Wake & Exit Phrases", fg=UI["text"],
+                                      bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        phrase_frame.pack(fill="x", pady=8)
+
+        tk.Label(phrase_frame, text="Wake phrase (activates session):", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        wake_var = tk.StringVar(value=acli_cfg.get("wake_phrase", "hey radio"))
+        tk.Entry(phrase_frame, textvariable=wake_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], font=FONT_BODY, width=30).pack(anchor="w", pady=(2, 8))
+
+        tk.Label(phrase_frame, text="Exit phrase (ends session):", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        exit_var = tk.StringVar(value=acli_cfg.get("exit_phrase", "thanks radio"))
+        tk.Entry(phrase_frame, textvariable=exit_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], font=FONT_BODY, width=30).pack(anchor="w", pady=(2, 4))
+
+        # ── Silence Timeout ──
+        silence_frame = tk.LabelFrame(wrap, text="⏱  Silence Timeout", fg=UI["text"],
+                                       bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        silence_frame.pack(fill="x", pady=8)
+
+        tk.Label(silence_frame,
+                 text="Re-narrate UI state after this many seconds of silence:",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        silence_var = tk.StringVar(value=str(acli_cfg.get("silence_timeout_sec", 77)))
+        tk.Entry(silence_frame, textvariable=silence_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], width=10).pack(anchor="w", pady=(2, 4))
+        tk.Label(silence_frame, text="(Default: 77 seconds)",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # ── STT Engine Preference ──
+        stt_frame = tk.LabelFrame(wrap, text="🗣  Speech-to-Text Engine", fg=UI["text"],
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        stt_frame.pack(fill="x", pady=8)
+
+        tk.Label(stt_frame,
+                 text="Preferred STT backend (whisper.cpp is used when binary & model paths\n"
+                      "are set in Environment tab; otherwise Google Speech Recognition).",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(0, 6))
+
+        stt_var = tk.StringVar(value=acli_cfg.get("stt_engine", "auto"))
+
+        tk.Radiobutton(
+            stt_frame, text="Auto  — whisper.cpp if available, otherwise Google SR",
+            variable=stt_var, value="auto",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w"
+        ).pack(anchor="w", pady=2)
+
+        tk.Radiobutton(
+            stt_frame, text="whisper.cpp only",
+            variable=stt_var, value="whisper",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w"
+        ).pack(anchor="w", pady=2)
+
+        tk.Radiobutton(
+            stt_frame, text="Google Speech Recognition only",
+            variable=stt_var, value="google",
+            bg=UI["panel"], fg=UI["text"], selectcolor=UI["bg"],
+            font=FONT_BODY, anchor="w"
+        ).pack(anchor="w", pady=2)
+
+        # ── LLM Provider for Audio CLI ──
+        llm_frame = tk.LabelFrame(wrap, text="🤖 Command Parser LLM", fg=UI["text"],
+                                   bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
+        llm_frame.pack(fill="x", pady=8)
+
+        acli_llm = acli_cfg.get("llm", {})
+        global_models = cfg.get("default_models", {})
+
+        # Resolve what's currently active for the status display
+        active_provider = (acli_llm.get("provider") or "").strip().lower()
+        if not active_provider or active_provider == "default":
+            active_provider_display = global_models.get("provider", "ollama")
+            active_model_display = (global_models.get("model") or global_models.get("host_model")
+                                    or global_models.get("producer_model") or "llama3.1:8b")
+            source_label = "inherited from Models tab"
+        else:
+            active_provider_display = active_provider
+            active_model_display = acli_llm.get("model", "") or "(using global model)"
+            source_label = "Audio CLI override"
+
+        # Current status display
+        status_text = f"Currently using:  {active_provider_display} / {active_model_display}  ({source_label})"
+        tk.Label(llm_frame, text=status_text,
+                 fg=UI["good"], bg=UI["panel"], font=FONT_BODY).pack(anchor="w", pady=(0, 8))
+
+        tk.Label(llm_frame,
+                 text="Choose which LLM processes voice commands.\n"
+                      "Set to 'default' to use the global provider from the Models tab,\n"
+                      "or pick a specific provider and model for Audio CLI only.",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL, justify="left").pack(anchor="w", pady=(0, 6))
+
+        # Provider dropdown
+        tk.Label(llm_frame, text="Provider:", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        acli_provider_var = tk.StringVar(value=acli_llm.get("provider", "default"))
+        acli_provider_options = ["default", "ollama", "anthropic", "openai", "google"]
+        acli_provider_combo = ttk.Combobox(llm_frame, textvariable=acli_provider_var,
+                                           values=acli_provider_options, state="readonly", width=30)
+        acli_provider_combo.pack(anchor="w", pady=(2, 8))
+
+        # Model name
+        tk.Label(llm_frame, text="Model Name (leave empty to use global):", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+        acli_model_var = tk.StringVar(value=acli_llm.get("model", ""))
+        tk.Entry(llm_frame, textvariable=acli_model_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], font=FONT_BODY, width=40).pack(anchor="w", pady=(2, 4))
+        tk.Label(llm_frame,
+                 text="Examples: llama3.1:8b, gpt-4o-mini, claude-3-haiku-20240307, gemini-1.5-flash",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # Endpoint override (for ollama)
+        tk.Label(llm_frame, text="Endpoint (ollama only, leave empty for global):", fg=UI["text"],
+                 bg=UI["panel"], font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
+        acli_endpoint_var = tk.StringVar(value=acli_llm.get("endpoint", ""))
+        tk.Entry(llm_frame, textvariable=acli_endpoint_var, bg=UI["card"], fg=UI["text"],
+                 insertbackground=UI["text"], font=FONT_BODY, width=50).pack(anchor="w", pady=(2, 4))
+        tk.Label(llm_frame,
+                 text="e.g. http://127.0.0.1:11434/api/generate — only needed if different from Models tab",
+                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
+
+        # ── Save / Reset ──
+        def save_audio_cli_settings():
+            cfg = get_global_config()
+            acli_settings = {
+                "default_mode": mode_var.get(),
+                "audio_output_mode": audio_mode_var.get(),
+                "web_url": url_var.get().strip() or "http://127.0.0.1:7800",
+                "wake_phrase": wake_var.get().strip() or "hey radio",
+                "exit_phrase": exit_var.get().strip() or "thanks radio",
+                "silence_timeout_sec": int(silence_var.get() or 77),
+                "stt_engine": stt_var.get(),
+            }
+            # LLM override — only save if not "default" or if model/endpoint specified
+            llm_override = {}
+            prov = acli_provider_var.get().strip().lower()
+            mdl = acli_model_var.get().strip()
+            ep = acli_endpoint_var.get().strip()
+            if prov and prov != "default":
+                llm_override["provider"] = prov
+            if mdl:
+                llm_override["model"] = mdl
+            if ep:
+                llm_override["endpoint"] = ep
+            if llm_override:
+                acli_settings["llm"] = llm_override
+
+            cfg["audio_cli"] = acli_settings
+            save_global_config(cfg)
+            messagebox.showinfo("Success",
+                "Audio CLI settings saved!\n\n"
+                "Changes take effect the next time Audio CLI is started.")
+
+        def reset_audio_cli_settings():
+            if messagebox.askyesno("Reset Audio CLI Settings",
+                                   "This will reset all Audio CLI settings to defaults.\n\nAre you sure?"):
+                cfg = get_global_config()
+                cfg.pop("audio_cli", None)
+                save_global_config(cfg)
+                # Reset UI to defaults
+                mode_var.set("tkinter")
+                audio_mode_var.set("speaker")
+                url_var.set("http://127.0.0.1:7800")
+                wake_var.set("hey radio")
+                exit_var.set("thanks radio")
+                silence_var.set("77")
+                stt_var.set("auto")
+                acli_provider_var.set("default")
+                acli_model_var.set("")
+                acli_endpoint_var.set("")
+                messagebox.showinfo("Reset Complete", "Audio CLI settings have been reset to defaults.")
+
+        button_frame = tk.Frame(wrap, bg=UI["bg"])
+        button_frame.pack(fill="x", pady=16)
+
+        tk.Button(button_frame, text="Save Audio CLI Settings", font=FONT_BODY, bg=UI["accent"],
+                 fg="#000", relief="flat", command=save_audio_cli_settings).pack(side="left", padx=(0, 8))
+
+        tk.Button(button_frame, text="Reset All", font=FONT_BODY, bg=UI["card"],
+                 fg=UI["text"], relief="flat", command=reset_audio_cli_settings).pack(side="left")
 
     def _build_environment_settings(self, parent: tk.Frame) -> None:
         """Build the Environment Variables settings panel."""
@@ -2794,6 +3219,12 @@ class RadioShell:
     def _on_close(self):
         try:
             self.proc.stop()
+        except Exception:
+            pass
+        # Stop Audio CLI if running
+        try:
+            if self._audio_cli_session and self._audio_cli_session.is_running:
+                self._audio_cli_session.stop_listener()
         except Exception:
             pass
         # Stop web server if running
@@ -6799,8 +7230,319 @@ class EditorWindow:
         self.shell.refresh_stations(select_id=self.station.station_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Headless Shell — runtime-first boot (no tkinter)
+# ═══════════════════════════════════════════════════════════════════════════
+class HeadlessShell:
+    """
+    Lightweight process manager that runs the station runtime, web server,
+    and Audio CLI without any graphical UI.  This is the default boot path.
+    """
+
+    def __init__(self, *, launch_web: bool = False):
+        import threading, signal
+
+        self._stop = threading.Event()
+        self.proc = StationProcess()
+        self.stations: List[StationInfo] = load_stations()
+        self._web_thread = None
+        self._web_stop = None
+        self._web_url = None
+        self._audio_cli_session = None
+        self._launch_web = launch_web
+        self._plugins: Optional[Dict[str, Dict[str, Any]]] = None
+
+        # Graceful shutdown on SIGINT / SIGTERM
+        signal.signal(signal.SIGINT, lambda *_: self._shutdown())
+        signal.signal(signal.SIGTERM, lambda *_: self._shutdown())
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    def _find_station(self, station_id: str) -> Optional[StationInfo]:
+        for s in self.stations:
+            if s.station_id == station_id:
+                return s
+        return None
+
+    # ── plugin management (headless / web) ───────────────────────────────
+
+    def get_plugins(self) -> Dict[str, Dict[str, Any]]:
+        """Discover and cache available plugins."""
+        if self._plugins is None:
+            self._plugins = discover_plugins()
+        return self._plugins
+
+    def refresh_plugins(self) -> Dict[str, Dict[str, Any]]:
+        """Re-discover plugins (invalidates cache)."""
+        self._plugins = discover_plugins()
+        return self._plugins
+
+    def get_station_feeds(self, station_id: str) -> Dict[str, Any]:
+        """Return feed config for a station, merged with plugin metadata."""
+        station = self._find_station(station_id)
+        if not station:
+            return {}
+        feeds_cfg = station.manifest.get("feeds", {}) or {}
+        plugins = self.get_plugins()
+        result: Dict[str, Any] = {}
+        for name, cfg in feeds_cfg.items():
+            if not isinstance(cfg, dict):
+                cfg = {}
+            meta = plugins.get(name, {})
+            result[name] = {
+                "enabled": bool(cfg.get("enabled", False)),
+                "config": {k: v for k, v in cfg.items() if k != "enabled"},
+                "plugin_display": meta.get("display", name),
+                "plugin_desc": meta.get("desc", ""),
+                "has_plugin": name in plugins,
+            }
+        # Available but not configured
+        for name, meta in plugins.items():
+            if name not in result and meta.get("is_feed", True):
+                result[name] = {
+                    "enabled": False,
+                    "config": meta.get("defaults", {}) or {},
+                    "plugin_display": meta.get("display", name),
+                    "plugin_desc": meta.get("desc", ""),
+                    "has_plugin": True,
+                }
+        return result
+
+    def toggle_feed(self, station_id: str, feed_name: str, enabled: bool) -> bool:
+        """Enable or disable a feed for a station. Returns True on success."""
+        station = self._find_station(station_id)
+        if not station:
+            return False
+        mp = station_manifest_path(station.path)
+        cfg = safe_read_yaml(mp)
+        feeds = cfg.setdefault("feeds", {})
+        if feed_name not in feeds or not isinstance(feeds.get(feed_name), dict):
+            plugins = self.get_plugins()
+            defaults = (plugins.get(feed_name, {}).get("defaults") or {}).copy()
+            feeds[feed_name] = defaults
+        feeds[feed_name]["enabled"] = bool(enabled)
+        safe_write_yaml(mp, cfg)
+        station.manifest = cfg
+        return True
+
+    def update_feed_config(self, station_id: str, feed_name: str,
+                           updates: Dict[str, Any]) -> bool:
+        """Update config keys for a feed. Returns True on success."""
+        station = self._find_station(station_id)
+        if not station:
+            return False
+        mp = station_manifest_path(station.path)
+        cfg = safe_read_yaml(mp)
+        feeds = cfg.setdefault("feeds", {})
+        if feed_name not in feeds or not isinstance(feeds.get(feed_name), dict):
+            feeds[feed_name] = {}
+        feeds[feed_name].update(updates)
+        safe_write_yaml(mp, cfg)
+        station.manifest = cfg
+        return True
+
+    def bulk_set_feeds(self, station_id: str,
+                       feed_states: Dict[str, bool]) -> List[str]:
+        """Enable/disable multiple feeds at once. Returns list of changed names."""
+        station = self._find_station(station_id)
+        if not station:
+            return []
+        mp = station_manifest_path(station.path)
+        cfg = safe_read_yaml(mp)
+        feeds = cfg.setdefault("feeds", {})
+        plugins = self.get_plugins()
+        changed = []
+        for name, enabled in feed_states.items():
+            if name not in feeds or not isinstance(feeds.get(name), dict):
+                defaults = (plugins.get(name, {}).get("defaults") or {}).copy()
+                feeds[name] = defaults
+            feeds[name]["enabled"] = bool(enabled)
+            changed.append(name)
+        safe_write_yaml(mp, cfg)
+        station.manifest = cfg
+        return changed
+
+    # ── web server ──────────────────────────────────────────────────────
+
+    def _start_web_server(self):
+        import threading
+        try:
+            from web_server import start_web_shell, WEB_SHELL_PORT
+        except ImportError as e:
+            print(f"[RadioOS] Web server unavailable: {e}")
+            return
+
+        self._web_stop = threading.Event()
+
+        def _on_start(url):
+            self._web_url = url
+
+        cfg = get_global_config()
+        port = int(cfg.get("general", {}).get("web_server_port", WEB_SHELL_PORT))
+
+        self._web_thread = threading.Thread(
+            target=start_web_shell,
+            kwargs={
+                "port": port,
+                "stop_event": self._web_stop,
+                "callback_on_start": _on_start,
+            },
+            daemon=True,
+        )
+        self._web_thread.start()
+        print(f"[RadioOS] Web server starting on port {port} …")
+
+    # ── audio CLI ───────────────────────────────────────────────────────
+
+    def _start_audio_cli(self):
+        try:
+            from audio_cli import AudioCLISession
+
+            acli_cfg = get_global_config().get("audio_cli", {})
+            default_mode = acli_cfg.get("default_mode", "web")
+            web_url = acli_cfg.get("web_url", "http://127.0.0.1:7800")
+
+            if default_mode == "web" or self._launch_web:
+                self._audio_cli_session = AudioCLISession(shell=None, web_url=web_url)
+            else:
+                # In headless mode without web, fall back to web mode anyway
+                self._audio_cli_session = AudioCLISession(shell=None, web_url=web_url)
+
+            self._audio_cli_session.start_listener()
+            print("[RadioOS] Audio CLI listener started.")
+        except Exception as e:
+            print(f"[RadioOS] Audio CLI init failed: {e}")
+            self._audio_cli_session = None
+
+    # ── lifecycle ───────────────────────────────────────────────────────
+
+    def _shutdown(self):
+        print("\n[RadioOS] Shutting down …")
+        self._stop.set()
+
+        # Stop Audio CLI
+        try:
+            if self._audio_cli_session and self._audio_cli_session.is_running:
+                self._audio_cli_session.stop_listener()
+        except Exception:
+            pass
+
+        # Stop web server
+        try:
+            if self._web_stop:
+                self._web_stop.set()
+        except Exception:
+            pass
+
+        # Stop station process
+        try:
+            self.proc.stop()
+        except Exception:
+            pass
+
+    def run(self):
+        import time, webbrowser
+
+        print(f"╔══════════════════════════════════════════════════╗")
+        print(f"║  📻 Radio OS {RADIO_OS_VERSION}  —  headless runtime        ║")
+        print(f"╚══════════════════════════════════════════════════╝")
+
+        # 1. Start the web server (needed for Audio CLI web mode + remote control)
+        self._start_web_server()
+
+        # 2. If --web, open browser once server is ready
+        if self._launch_web:
+            cfg = get_global_config()
+            try:
+                from web_server import WEB_SHELL_PORT
+            except ImportError:
+                WEB_SHELL_PORT = 7800
+            port = int(cfg.get("general", {}).get("web_server_port", WEB_SHELL_PORT))
+            url = f"http://127.0.0.1:{port}"
+
+            def _open_browser():
+                import time as _t
+                _t.sleep(1.5)  # give server a moment to bind
+                webbrowser.open(url)
+                print(f"[RadioOS] Opened {url} in default browser.")
+
+            import threading
+            threading.Thread(target=_open_browser, daemon=True).start()
+
+        # 3. Start Audio CLI listener
+        self._start_audio_cli()
+
+        print("[RadioOS] Running. Launch stations via web UI or Audio CLI.")
+        print("[RadioOS] Press Ctrl-C to stop.")
+        print()
+
+        # 5. Block until stopped
+        try:
+            while not self._stop.is_set():
+                # Check for station switch requests (same logic as desktop _tick)
+                self._check_station_switch()
+                self._stop.wait(timeout=1.0)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self._shutdown()
+
+    def _check_station_switch(self):
+        """Mirror RadioShell._check_station_switch for headless mode."""
+        if not self.proc or not self.proc.proc:
+            return
+        ret = self.proc.proc.poll()
+        if ret == 20:
+            try:
+                rq_path = os.path.join(BASE, ".switch_request")
+                if os.path.exists(rq_path):
+                    with open(rq_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    try:
+                        os.remove(rq_path)
+                    except Exception:
+                        pass
+                    target_id = data.get("station_id")
+                    if target_id:
+                        print(f"[RadioOS] Switching to station: {target_id}")
+                        self.proc.stop()
+                        st = self._find_station(target_id)
+                        if st:
+                            self.proc.launch(st)
+                        else:
+                            print(f"[RadioOS] Station {target_id} not found.")
+            except Exception as e:
+                print(f"[RadioOS] Switch failed: {e}")
+
+
 # -----------------------------
 # Entrypoint
 # -----------------------------
 if __name__ == "__main__":
-    RadioShell().run()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Radio OS — runtime-first boot",
+        epilog=(
+            "Boot modes:\n"
+            "  (default)   Headless — web server + Audio CLI, no window\n"
+            "  --desktop   Launch the classic tkinter desktop shell\n"
+            "  --web       Headless + open web UI in default browser\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--desktop", action="store_true",
+                        help="Launch the tkinter desktop shell")
+    parser.add_argument("--web", action="store_true",
+                        help="Headless mode + open web UI in default browser")
+    args = parser.parse_args()
+
+    if args.desktop:
+        # Classic tkinter desktop shell
+        RadioShell().run()
+    elif args.web:
+        # Headless with web browser opened
+        HeadlessShell(launch_web=True).run()
+    else:
+        # Default: fully headless — web server + Audio CLI, no window
+        HeadlessShell(launch_web=False).run()

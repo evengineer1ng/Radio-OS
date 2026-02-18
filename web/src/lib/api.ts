@@ -36,7 +36,7 @@ export async function safeRefreshState(): Promise<void> {
   // Only push to the store when we got a full game-state payload.
   // "busy", "no_game", "no_controller" are lightweight stubs that must NOT
   // overwrite the rich state the UI is currently showing.
-  if (data && data.status !== 'busy' && data.status !== 'no_controller') {
+  if (data && data.status === 'running' && data.player_team) {
     gameState.set(data)
   }
 }
@@ -250,11 +250,11 @@ export async function loadGame(path: string): Promise<any> {
   return res.json()
 }
 
-export async function saveGame(path?: string): Promise<any> {
+export async function saveGame(name?: string, path?: string): Promise<any> {
   const res = await fetch(`${BASE}/api/save_game`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: path || '' }),
+    body: JSON.stringify({ name: name || '', path: path || '' }),
   })
   return res.json()
 }
@@ -264,6 +264,28 @@ export async function deleteSave(filename: string): Promise<any> {
     method: 'DELETE',
   })
   return res.json()
+}
+
+// ─── UI Navigation (Audio CLI dynamic button clicking) ───
+
+export async function navigateScreen(target: string, step?: number): Promise<any> {
+  const body: Record<string, any> = { target }
+  if (step !== undefined) body.step = step
+  const res = await fetch(`${BASE}/api/navigate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return res.json()
+}
+
+export async function fetchUIScreen(): Promise<any> {
+  try {
+    const res = await fetch(`${BASE}/api/ui_screen`)
+    return res.json()
+  } catch {
+    return { screen: 'landing', wizard_step: 1, buttons: [] }
+  }
 }
 
 export async function tickStep(n: number = 1): Promise<any> {
@@ -293,4 +315,52 @@ export async function fetchAudioState(): Promise<any> {
   } catch {
     return null
   }
+}
+
+// ─── R&D / Development ───
+export async function fetchRDCatalog(): Promise<any[]> {
+  try {
+    const res = await fetch(`${BASE}/api/rd_catalog`)
+    const data = await res.json()
+    return data.catalog || []
+  } catch {
+    return []
+  }
+}
+
+export async function startRDProject(projectId: string, budget: number = 0): Promise<any> {
+  const res = await fetch(`${BASE}/api/rd/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId, budget }),
+  })
+  return res.json()
+}
+
+export async function cancelRDProject(projectId: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/rd/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId }),
+  })
+  return res.json()
+}
+
+// ─── Infrastructure ───
+export async function upgradeInfrastructure(facility: string, amount: number = 10): Promise<any> {
+  const res = await fetch(`${BASE}/api/infrastructure/upgrade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility, amount }),
+  })
+  return res.json()
+}
+
+export async function sellInfrastructure(facility: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/infrastructure/sell`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility }),
+  })
+  return res.json()
 }

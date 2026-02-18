@@ -42,7 +42,10 @@
           <div class="sp-name">{sp.name}</div>
           <div class="sp-details">
             <span class="sp-value">{formatCurrency(sp.value || 0)}/yr</span>
-            <span class="sp-duration">{sp.seasons_remaining} seasons left</span>
+            <span class="sp-duration">{sp.seasons_remaining} season{sp.seasons_remaining !== 1 ? 's' : ''} left</span>
+            {#if sp.confidence < 100}
+              <span class="sp-confidence" class:low={sp.confidence < 50}>{Math.round(sp.confidence)}% confidence</span>
+            {/if}
           </div>
         </div>
       {:else}
@@ -60,8 +63,8 @@
             <div class="sp-name">{offer.name}</div>
             <div class="sp-details">
               <span class="sp-value">{formatCurrency(offer.value || 0)}/yr</span>
-              {#if offer.seasons}<span class="sp-duration">{offer.seasons} season{offer.seasons > 1 ? 's' : ''}</span>{/if}
-              {#if offer.confidence}<span class="sp-confidence">{Math.round(offer.confidence * 100)}% confidence</span>{/if}
+              {#if offer.seasons_remaining}<span class="sp-duration">{offer.seasons_remaining} season{offer.seasons_remaining > 1 ? 's' : ''}</span>{/if}
+              {#if offer.confidence}<span class="sp-confidence">{Math.round(offer.confidence)}% confidence</span>{/if}
             </div>
           </div>
           <div class="offer-actions">
@@ -89,5 +92,6 @@
   .sp-value { color: var(--c-success); font-family: var(--font-mono); }
   .sp-duration { color: var(--c-text-muted); }
   .sp-confidence { color: var(--c-accent); font-size: 11px; }
+  .sp-confidence.low { color: var(--c-danger); }
   .empty-state { text-align: center; color: var(--c-text-muted); padding: 20px; font-size: 13px; }
 </style>

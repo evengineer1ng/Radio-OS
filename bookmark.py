@@ -2180,7 +2180,36 @@ def save_memory(mem: Dict[str, Any]) -> None:
 audio_lock = threading.Lock()
 
 
+def _get_audio_duck_volume() -> float:
+    """
+    Read the Audio CLI ducking flag.  Returns the volume multiplier
+    station audio should use:
+      • 1.0  — no ducking (flag absent, Audio CLI inactive)
+      • ~0.20 — session active but narration not speaking
+      • ~0.05 — narration is actively speaking (duck harder)
+    """
+    try:
+        _flag_path = os.path.join(
+            os.environ.get("RADIO_OS_ROOT", os.path.dirname(os.path.abspath(__file__))),
+            ".audio_cli_suppress"
+        )
+        if not os.path.exists(_flag_path):
+            return 1.0
+        with open(_flag_path, "r") as f:
+            data = json.load(f)
+        if not data.get("active", False):
+            return 1.0
+        if data.get("speaking", False):
+            return 0.05          # narration playing — duck hard
+        return float(data.get("duck_volume", 0.20))  # session active, not speaking
+    except Exception:
+        return 1.0
+
+
 def play_wav(path: str) -> None:
+    # Audio CLI ducking — lower volume instead of suppressing
+    _duck = _get_audio_duck_volume()
+
     for _ in range(10):
         if os.path.exists(path) and os.path.getsize(path) > 44:
             break
@@ -2193,6 +2222,10 @@ def play_wav(path: str) -> None:
 
     if data.ndim == 1:
         data = data.reshape(-1, 1)
+
+    # Apply ducking volume if Audio CLI session is active
+    if _duck < 1.0:
+        data = data * _duck
 
     sd.play(data, sr)
     sd.wait()
@@ -2266,6 +2299,11 @@ _AUDIO_SMOOTH = 0.85   # 0.7 = snappy, 0.9 = smooth
 def speak(text: str, voice_key: str = None):
 
     global AUDIO_LEVEL
+
+    # -----------------------------
+    # Audio CLI ducking
+    # -----------------------------
+    _duck = _get_audio_duck_volume()
 
     # -----------------------------
     # Normalize
@@ -2400,6 +2438,9 @@ def speak(text: str, voice_key: str = None):
     if getattr(data, "ndim", 0) == 1:
         data = data.reshape(-1, 1)
 
+    # Apply Audio CLI ducking (lower station voice volume when session active)
+    if _duck < 1.0:
+        data = data * _duck
 
     # =====================================================
     # Subtitle pacing (audio timeline)
@@ -2618,6 +2659,9 @@ def play_audio_bundle(bundle):
 
 def play_file_audio(audio_item: AudioItem) -> None:
     """Play file-based audio (music/sfx/world/ui) from AudioItem fields."""
+    # Audio CLI ducking — lower volume instead of suppressing
+    _duck = _get_audio_duck_volume()
+
     if not HAS_PYGAME or not pygame.mixer.get_init():
         return
     
@@ -2632,6 +2676,8 @@ def play_file_audio(audio_item: AudioItem) -> None:
             sound = pygame.mixer.Sound(audio_item.music_track)
             channel = pygame.mixer.find_channel()
             if channel:
+                if _duck < 1.0:
+                    channel.set_volume(_duck)
                 channel.play(sound)
         
         # World audio (engines, crashes)
@@ -2639,6 +2685,8 @@ def play_file_audio(audio_item: AudioItem) -> None:
             sound = pygame.mixer.Sound(audio_item.world_audio)
             channel = pygame.mixer.find_channel()
             if channel:
+                if _duck < 1.0:
+                    channel.set_volume(_duck)
                 channel.play(sound)
         
         # UI audio (tactile feedback)
@@ -2646,6 +2694,8 @@ def play_file_audio(audio_item: AudioItem) -> None:
             sound = pygame.mixer.Sound(audio_item.ui_audio)
             channel = pygame.mixer.find_channel()
             if channel:
+                if _duck < 1.0:
+                    channel.set_volume(_duck)
                 channel.play(sound)
         
         # SFX files (play each)
@@ -2654,6 +2704,8 @@ def play_file_audio(audio_item: AudioItem) -> None:
                 sound = pygame.mixer.Sound(sfx_path)
                 channel = pygame.mixer.find_channel()
                 if channel:
+                    if _duck < 1.0:
+                        channel.set_volume(_duck)
                     channel.play(sound)
         
         # Ambient loop (continuous background)
@@ -2661,6 +2713,8 @@ def play_file_audio(audio_item: AudioItem) -> None:
             sound = pygame.mixer.Sound(audio_item.ambient_loop)
             channel = pygame.mixer.find_channel()
             if channel:
+                if _duck < 1.0:
+                    channel.set_volume(_duck)
                 channel.play(sound, loops=-1)  # Loop indefinitely
     
     except Exception as e:
@@ -9066,6 +9120,21 @@ def main():
     # Create shared runtime stub for plugins
     # ------------------
     
+    # Create call_llm adapter early so feed plugins / controllers can use it
+    def _shared_call_llm(model: str, prompt: str, max_tokens: int = 200, temperature: float = 0.7, system: str = "", **kwargs) -> Dict[str, Any]:
+        """Adapter: call_llm(model, prompt, ...) -> llm_generate(prompt, system, model, ...)"""
+        response = llm_generate(
+            prompt=prompt,
+            system=system,
+            model=model,
+            num_predict=max_tokens,
+            temperature=temperature,
+            **kwargs
+        )
+        if isinstance(response, str):
+            return {"response": response, "text": response}
+        return response
+
     shared_runtime = {
         "event_q": event_q,
         "ui_q": ui_q,
@@ -9084,6 +9153,8 @@ def main():
         "audio_queue": audio_queue,
         "db_connect": db_connect,
         "db_enqueue_segment": db_enqueue_segment,
+        "call_llm": _shared_call_llm,
+        "llm_generate": llm_generate,
     }
     
     # ------------------

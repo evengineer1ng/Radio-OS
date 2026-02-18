@@ -92,12 +92,12 @@ except ImportError:
     _dbg("[FTB] Warning: Could not import ftb_race_day")
     ftb_race_day = None
 
-# Import broadcast commentary generator
+# Import broadcast commentary generator (LLM version)
 try:
-    from plugins import ftb_broadcast_commentary
+    from plugins import ftb_broadcast_commentary_llm
 except ImportError:
-    _dbg("[FTB] Warning: Could not import ftb_broadcast_commentary")
-    ftb_broadcast_commentary = None
+    _dbg("[FTB] Warning: Could not import ftb_broadcast_commentary_llm")
+    ftb_broadcast_commentary_llm = None
 
 # Import customtkinter for UI widgets (optional for headless mode)
 try:
@@ -5856,7 +5856,7 @@ class SimState:
         # Ensure parent directory exists
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, indent=2, default=str)
     
     @staticmethod
     def load_from_json(path: str) -> 'SimState':
@@ -9567,7 +9567,9 @@ class FTBSimulation:
 
             player_grid = None
             for i, (team, driver, _) in enumerate(qualifying_scores):
-                if team.name == player_team_name:
+                # team may be a Team object (immediate path) or a string (serialized/delayed path)
+                t_name = getattr(team, 'name', team) if not isinstance(team, str) else team
+                if t_name == player_team_name:
                     player_grid = i + 1
                     break
 
@@ -10370,17 +10372,23 @@ class FTBSimulation:
         finally:
             state._live_pbp_mode = False
             state._live_pbp_interval = None
+            # Serialize qualifying_scores to plain data so it's JSON-safe
+            # (raw tuples contain Team/Driver objects which are not serializable)
+            _qs_serialized = [
+                (getattr(t, 'name', str(t)), getattr(d, 'name', str(d)), round(float(s), 4))
+                for t, d, s in qualifying_scores
+            ]
             state._last_race_result = race_result
             state._last_race_context = {
                 'league_id': league.league_id,
                 'track_id': track.track_id if track else None,
-                'qualifying_scores': qualifying_scores
+                'qualifying_scores': _qs_serialized
             }
             state._last_race_results[league.league_id] = race_result
             state._last_race_contexts[league.league_id] = {
                 'league_id': league.league_id,
                 'track_id': track.track_id if track else None,
-                'qualifying_scores': qualifying_scores
+                'qualifying_scores': _qs_serialized
             }
         
         # Archive race result to history database (only for player team participation)
@@ -29934,17 +29942,49 @@ class FTBController:
     # ==================================================================
     
     def _get_broadcast_generator(self, league_tier: int):
-        """Get or create a BroadcastCommentaryGenerator for the current tier."""
-        if not ftb_broadcast_commentary:
+        """Get or create a LLMCommentaryGenerator + NarrativeState + BeatDispatcher for the current tier."""
+        if not ftb_broadcast_commentary_llm:
             return None
         if not hasattr(self, '_broadcast_gen') or self._broadcast_gen_tier != league_tier:
             player_name = self.state.player_team.name if self.state and self.state.player_team else ''
-            self._broadcast_gen = ftb_broadcast_commentary.BroadcastCommentaryGenerator(
+            self._broadcast_gen = ftb_broadcast_commentary_llm.LLMCommentaryGenerator(
                 league_tier=league_tier,
                 player_team_name=player_name
             )
             self._broadcast_gen_tier = league_tier
+            self._broadcast_narrative = ftb_broadcast_commentary_llm.NarrativeState()
+            self._broadcast_dispatcher = ftb_broadcast_commentary_llm.BeatDispatcher()
         return self._broadcast_gen
+
+    def _call_commentary_llm(self, prompt_obj):
+        """Send a CommentaryPrompt to the LLM and return generated text, or None on failure."""
+        call_llm = self.runtime.get('call_llm')
+        if not call_llm:
+            print(f"[FTB PBP] ❌ call_llm not in runtime — cannot generate commentary")
+            return None
+        try:
+            model = self.runtime.get('config', {}).get('models', {}).get('host', 'gpt-4o-mini')
+            response = call_llm(
+                model=model,
+                prompt=prompt_obj.prompt,
+                max_tokens=prompt_obj.max_tokens,
+                temperature=0.85,
+            )
+            text = response.get('text') or response.get('response') or ''
+            text = text.strip().strip('"')
+            # Strip repetitive interjection openers the LLM loves to use
+            import re as _re
+            text = _re.sub(
+                r'^(Whoa|Oh|Wow|Well|And|Ooh|Oof|Hey|Look|Folks),?\s*',
+                '', text, count=1, flags=_re.IGNORECASE
+            ).strip()
+            if not text:
+                print(f"[FTB PBP] ⚠️  LLM returned empty text (model={model})")
+            return text if text else None
+        except Exception as e:
+            print(f"[FTB PBP] ⚠️  LLM call failed: {e}")
+            import traceback; traceback.print_exc()
+            return None
     
     def _enqueue_pbp_segment(self, text: str, voice_key: str = "play_by_play", priority: float = 90.0):
         """
@@ -30020,49 +30060,10 @@ class FTBController:
         except Exception as e:
             _dbg(f"[FTB PBP] ⚠️  Enqueue error: {e}")
     
-    def _enqueue_pbp_commentary_for_race_start(self, rds, player_league, track):
-        """Generate and enqueue 'lights out' + opening commentary."""
-        tier = player_league.tier if player_league else 3
-        gen = self._get_broadcast_generator(tier)
-        
-        track_name = track.name if track and hasattr(track, 'name') else rds.track_id or 'unknown circuit'
-        league_name = player_league.name if player_league else 'the championship'
-        
-        # Pre-race line
-        self._enqueue_pbp_segment(
-            f"Welcome to {track_name} for round {rds.race_number if hasattr(rds, 'race_number') else ''} "
-            f"of {league_name}! {rds.total_laps} laps ahead of us! Let's GO!",
-            voice_key="play_by_play", priority=95.0
-        )
-        
-        # Lights out line
-        if gen:
-            lights = gen.generate_lights_out_commentary()
-            if lights:
-                # generate_lights_out_commentary returns a single CommentaryLine or list
-                lines = lights if isinstance(lights, list) else [lights]
-                for line in lines:
-                    vk = "play_by_play" if getattr(line, 'speaker', 'pbp') == 'pbp' else "color_commentator"
-                    self._enqueue_pbp_segment(line.text, voice_key=vk, priority=94.0)
-        else:
-            self._enqueue_pbp_segment(
-                "It's LIGHTS OUT AND AWAY WE GO!",
-                voice_key="play_by_play", priority=94.0
-            )
-    
-    def _enqueue_pbp_commentary_for_lap(self, rds):
-        """Generate commentary for the current lap's events + periodic updates.
-        
-        AGGRESSIVE QUEUE FLUSH: Before enqueuing new commentary, flush all
-        stale queued broadcast segments so we never talk about lap 1 on lap 4.
-        Only the CURRENT lap's events matter.
-        """
-        if not rds or not rds.race_result:
-            return
-        
-        # ── AGGRESSIVE FLUSH: Kill all stale queued broadcast segments ──
-        # This prevents the "talking about lap 1 on lap 4" problem.
-        # Any broadcast_pbp segment still sitting in 'queued' status is OLD NEWS.
+    def _flush_stale_broadcast_segments(self):
+        """Flush ALL queued broadcast segments from the DB so only fresh PBP is heard.
+        Also drains any pre-rendered broadcast audio items from the audio_queue
+        so stale commentary doesn't play after fresh commentary is enqueued."""
         try:
             db_conn_fn = self.runtime.get('db_connect')
             if db_conn_fn:
@@ -30071,31 +30072,63 @@ class FTBController:
                     "UPDATE segments SET status='done' "
                     "WHERE status='queued' AND source='broadcast'"
                 ).rowcount
+                # Also flush any claimed-but-not-yet-rendered broadcast segments
+                _flushed += _conn.execute(
+                    "UPDATE segments SET status='done' "
+                    "WHERE status='claimed' AND source='broadcast'"
+                ).rowcount
                 _conn.commit()
                 _conn.close()
                 if _flushed:
-                    _dbg(f"[FTB PBP] 🧹 FLUSHED {_flushed} stale broadcast segments — keeping commentary CURRENT!")
-        except Exception as _flush_err:
-            _dbg(f"[FTB PBP] ⚠️  Could not flush stale segments: {_flush_err}")
-        
-        # ── Also drain pre-rendered audio queue to kill stale TTS ──
-        try:
-            _audio_q = self.runtime.get('audio_queue')
-            if _audio_q:
-                _drained = 0
-                while not _audio_q.empty():
-                    try:
-                        _audio_q.get_nowait()
-                        _drained += 1
-                    except Exception:
-                        break
-                if _drained:
-                    _dbg(f"[FTB PBP] 🧹 Drained {_drained} stale pre-rendered audio items")
+                    print(f"[FTB PBP] 🧹 Flushed {_flushed} stale broadcast segments from DB")
         except Exception:
             pass
+
+    def _enqueue_pbp_commentary_for_race_start(self, rds, player_league, track):
+        """Generate and enqueue 'lights out' + opening commentary.
+        
+        Uses ONLY static text so it completes instantly — the LLM-generated
+        "lights out" call is fired on a background thread and will be discarded
+        if it returns after the race has already advanced past lap 1.
+        """
+        track_name = track.name if track and hasattr(track, 'name') else rds.track_id or 'unknown circuit'
+        league_name = player_league.name if player_league else 'the championship'
+        
+        # Static pre-race + lights-out (instant — no LLM wait)
+        self._enqueue_pbp_segment(
+            f"Welcome to {track_name} for round {rds.race_number if hasattr(rds, 'race_number') else ''} "
+            f"of {league_name}! {rds.total_laps} laps ahead of us! "
+            f"It's LIGHTS OUT AND AWAY WE GO!",
+            voice_key="play_by_play", priority=95.0
+        )
+    
+    def _enqueue_pbp_commentary_for_lap(self, rds):
+        """Generate LLM commentary for the current lap using beat architecture.
+        
+        Pipeline: raw events → classify → score → select beats → LLM prompt → enqueue speech.
+        Uses NarrativeState for cross-lap memory.
+        
+        The event classification / scoring / beat selection runs synchronously
+        (instant) to keep narrative state consistent.  The slow LLM call runs
+        on a background thread so it does NOT block the lap-advance command
+        loop – this prevents commentary from falling behind the race.
+        
+        KEY: When the LLM returns, we check the CURRENT lap.  If the race has
+        moved on, we discard the stale result and immediately re-prompt using
+        the latest race state — so commentary always describes what the
+        listener is seeing NOW, not 5 laps ago.
+        """
+        if not rds or not rds.race_result:
+            return
+        
+        # ── Skip if a previous LLM call is still in flight ──
+        # But record that we wanted to speak — the background thread will
+        # re-prompt with the latest lap when it finishes.
+        if getattr(self, '_pbp_llm_inflight', False):
+            self._pbp_latest_requested_lap = rds.current_lap
+            return
         
         tier = getattr(rds, 'league_tier', 3)
-        # Try to get tier from state
         if self.state and hasattr(self.state, 'leagues'):
             for lg in self.state.leagues.values():
                 if self.state.player_team in lg.teams:
@@ -30103,111 +30136,179 @@ class FTBController:
                     break
         
         gen = self._get_broadcast_generator(tier)
+        if not gen or not ftb_broadcast_commentary_llm:
+            return
+        
         lap = rds.current_lap
         total = rds.total_laps
         player_team = self.state.player_team.name if self.state and self.state.player_team else ''
+        narrative = getattr(self, '_broadcast_narrative', ftb_broadcast_commentary_llm.NarrativeState())
+        dispatcher = getattr(self, '_broadcast_dispatcher', ftb_broadcast_commentary_llm.BeatDispatcher())
         
-        # Update race context for the generator
-        if gen:
-            gen.race_context.lap_number = lap
-            gen.race_context.total_laps = total
+        # ── Build prompt for this lap (all instant work) ──
+        prompt_obj, voice_key, priority = self._build_lap_prompt(
+            rds, lap, total, player_team, narrative, dispatcher, gen
+        )
         
-        # Collect events this lap
-        lap_events = [e for e in rds.race_result.race_events if e.lap_number == lap]
+        if not prompt_obj:
+            narrative.laps_since_commentary += 1
+            return
         
-        # ── Limit events per lap to avoid queue flooding ──
-        # Keep at most 3 events per lap (prioritize crashes/DNFs over overtakes)
-        if len(lap_events) > 3:
-            critical = [e for e in lap_events if any(k in (getattr(e, 'event_type', '') or '').lower() 
-                        for k in ('crash', 'dnf', 'retire', 'collision', 'accident'))]
-            others = [e for e in lap_events if e not in critical]
-            random.shuffle(others)
-            lap_events = critical[:3] + others[:max(0, 3 - len(critical))]
+        # ── Fire the slow LLM call on a background thread ──
+        self._pbp_llm_inflight = True
+        self._pbp_latest_requested_lap = lap
         
-        for ev in lap_events:
-            et = ev.event_type.lower() if hasattr(ev, 'event_type') else ''
+        def _bg_generate():
+            try:
+                text = self._call_commentary_llm(prompt_obj)
+                
+                # ── Check: has the race moved on while we were waiting? ──
+                current_rds = self.state.race_day_state if self.state else None
+                now_lap = current_rds.current_lap if current_rds else lap
+                
+                if text and now_lap > lap + 1 and now_lap < total:
+                    # Race moved on significantly — discard stale text entirely.
+                    # The next lap tick will see _pbp_llm_inflight=False and
+                    # generate a fresh prompt for the current lap automatically.
+                    print(f"[FTB PBP] ⏩ Discarding stale lap {lap} text (race now on lap {now_lap})")
+                    self._flush_stale_broadcast_segments()
+                elif text:
+                    # Still current enough — flush old segments and enqueue
+                    self._flush_stale_broadcast_segments()
+                    self._enqueue_pbp_segment(text, voice_key=voice_key, priority=priority)
+                    narrative.log_commentary(text)
+                    print(f"[FTB PBP] 🎙️ Lap {lap} commentary (race@{now_lap}): {text[:80]}...")
+                else:
+                    narrative.laps_since_commentary += 1
+            except Exception as exc:
+                print(f"[FTB PBP] ⚠️  Background LLM error: {exc}")
+            finally:
+                self._pbp_llm_inflight = False
+        
+        threading.Thread(target=_bg_generate, daemon=True, name=f"pbp_llm_lap{lap}").start()
+
+    def _build_lap_prompt(self, rds, lap, total, player_team, narrative, dispatcher, gen):
+        """Build the LLM prompt for a given lap. Returns (prompt_obj, voice_key, priority) or (None, None, None).
+        
+        This does ONLY fast/instant work: narrative state update, event
+        classification, scoring, beat selection, prompt construction.
+        """
+        # ── Update narrative state for this lap (instant) ──
+        narrative.update_phase(lap, total)
+        
+        if rds.live_standings:
+            leader_s = rds.live_standings[0]
+            narrative.update_leader(
+                leader_s.get('driver', ''),
+                leader_s.get('team', ''),
+                lap
+            )
+            gaps = [(s.get('driver', ''), s.get('gap', 0.0)) for s in rds.live_standings]
+            narrative.detect_battles(gaps)
+        
+        player_pos = None
+        player_start_pos = getattr(self, '_broadcast_player_start_pos', 0)
+        for s in (rds.live_standings or []):
+            if s.get('team') == player_team:
+                player_pos = s.get('position', 0)
+                break
+        if player_pos and player_start_pos == 0:
+            self._broadcast_player_start_pos = player_pos
+            player_start_pos = player_pos
+        if player_pos:
+            player_had_incident = any(
+                se.is_player_team and se.event_class in ('player_crash', 'player_dnf')
+                for se in narrative.current_lap_events
+            )
+            narrative.update_player_arc(player_pos, player_start_pos, player_had_incident)
+        
+        # ── Classify raw race events (instant) ──
+        raw_lap_events = [e for e in rds.race_result.race_events if e.lap_number == lap]
+        
+        for ev in raw_lap_events:
+            et = (ev.event_type or '').lower() if hasattr(ev, 'event_type') else ''
             desc = ev.description if hasattr(ev, 'description') else str(ev)
             meta = getattr(ev, 'metadata', {}) or {}
-            # RaceEventRecord stores involved_drivers (list) not driver_name/team_name
             drivers = getattr(ev, 'involved_drivers', []) or []
             driver = drivers[0] if drivers else ''
-            # Try to find team + position from live standings
             team = ''
-            driver_pos = 0
+            new_pos = 0
             for s in (rds.live_standings or []):
                 if s.get('driver') == driver:
                     team = s.get('team', '')
-                    driver_pos = s.get('position', 0)
+                    new_pos = s.get('position', 0)
                     break
-            is_player = (team == player_team)
             
-            if gen:
-                lines = []
-                if 'overtake' in et:
-                    pos_change = getattr(ev, 'position_change', {}) or {}
-                    pos = pos_change.get(driver, 0)
-                    passed_driver = meta.get('passed_driver', '')
-                    delta = meta.get('delta', 0.0)
-                    lines = gen.generate_overtake_commentary(
-                        driver, pos, lap, is_player,
-                        passed_driver=passed_driver, delta=delta, team=team
-                    )
-                elif 'crash' in et or 'collision' in et or 'accident' in et:
-                    time_loss = meta.get('time_loss', 0.0)
-                    lines = gen.generate_crash_commentary(
-                        driver, team, lap, is_player,
-                        time_loss=time_loss, position=driver_pos
-                    )
-                elif 'dnf' in et or 'retire' in et:
-                    try:
-                        lines = gen.generate_dnf_commentary(
-                            driver, team, lap, is_player,
-                            position=driver_pos
-                        )
-                    except Exception:
-                        lines = []
-                
-                for line in (lines or []):
-                    vk = "play_by_play" if getattr(line, 'speaker', 'pbp') == 'pbp' else "color_commentator"
-                    self._enqueue_pbp_segment(line.text, voice_key=vk, priority=getattr(line, 'priority', 88.0))
-            else:
-                # Fallback: just narrate the description
-                if desc:
-                    self._enqueue_pbp_segment(desc, voice_key="play_by_play", priority=88.0)
+            raw_dict = {
+                'event_type': et.replace('race_', ''),
+                'driver': driver,
+                'team': team,
+                'drivers': drivers,
+                'new_position': new_pos,
+                'old_position': meta.get('old_position', 99),
+                'positions_gained': meta.get('positions_gained', 0),
+                'description': desc,
+                'lap': lap,
+                'metadata': meta,
+            }
+            scored = ftb_broadcast_commentary_llm.classify_event(raw_dict, player_team, narrative.leader)
+            scored.lap = lap
+            scored.description = desc or f"{driver} {et}"
+            narrative.current_lap_events.append(scored)
+            
+            if scored.event_class in ('player_crash', 'player_dnf', 'crash', 'leader_crash'):
+                narrative.register_incident(scored.driver, lap)
         
-        # Periodic lap update (every 5 laps)
-        if lap % 5 == 0 and gen and rds.live_standings:
-            leader = rds.live_standings[0] if rds.live_standings else {}
-            leader_name = leader.get('driver', 'Unknown')
-            gap = leader.get('gap', 0.0)
-            try:
-                result = gen.generate_lap_update(lap, total, leader_name, gap)
-                # generate_lap_update returns a single CommentaryLine or None
-                if result:
-                    vk = "play_by_play" if getattr(result, 'speaker', 'pbp') == 'pbp' else "color_commentator"
-                    self._enqueue_pbp_segment(result.text, voice_key=vk, priority=86.0)
-            except Exception:
-                self._enqueue_pbp_segment(
-                    f"Lap {lap} of {total}! {leader_name} leads and the battle rages on!",
-                    voice_key="play_by_play", priority=86.0
-                )
+        # Green-flag tracking
+        had_incident_this_lap = any(
+            se.event_class in ('crash', 'player_crash', 'leader_crash')
+            for se in narrative.current_lap_events
+        )
+        if not had_incident_this_lap:
+            narrative.tick_green()
         
-        # Final lap
-        if lap == total and gen and rds.live_standings:
-            leader = rds.live_standings[0] if rds.live_standings else {}
-            leader_name = leader.get('driver', 'Unknown')
-            leader_team = leader.get('team', '')
-            is_player_leading = (leader_team == player_team)
-            try:
-                lines = gen.generate_final_lap_commentary(leader_name, leader_team, is_player_leading)
-                for line in (lines or []):
-                    vk = "play_by_play" if getattr(line, 'speaker', 'pbp') == 'pbp' else "color_commentator"
-                    self._enqueue_pbp_segment(line.text, voice_key=vk, priority=95.0)
-            except Exception:
-                self._enqueue_pbp_segment(
-                    f"And the chequered flag waves! {leader_name} takes the VICTORY!",
-                    voice_key="play_by_play", priority=95.0
-                )
+        # ── Score events (instant) ──
+        season_ctx = gen.season_context
+        for se in narrative.current_lap_events:
+            ftb_broadcast_commentary_llm.apply_weight_modifiers(se, lap, total, narrative, season_ctx)
+        
+        # ── Select beats (instant) ──
+        beats = dispatcher.select_beats(narrative.current_lap_events, lap, total, narrative)
+        
+        if beats:
+            narrative.remember_event(beats[0])
+        
+        # ── Decide WHAT to say (instant) — build the prompt object ──
+        prompt_obj = None
+        voice_key = "play_by_play"
+        priority = 90.0
+        
+        if lap == total:
+            prompt_obj = gen.generate_final_lap_prompt(narrative, player_pos=player_pos)
+            priority = 95.0
+        elif beats:
+            include_color = dispatcher.color_roll(lap, total)
+            prompts = gen.generate_beat_prompt(beats, lap, total, narrative, include_color=include_color)
+            if prompts:
+                prompt_obj = prompts[0]
+                voice_key = "play_by_play" if prompt_obj.speaker == 'pbp' else "color_commentator"
+                priority = float(prompt_obj.priority) + 80.0
+        
+        if not prompt_obj:
+            # Try every lap late-race, every 2 laps otherwise
+            update_interval = 1 if narrative.race_phase in ('late', 'final') else 2
+            should_update = (lap % update_interval == 0) or (narrative.laps_since_commentary >= 1)
+            if should_update:
+                prompt_obj = gen.generate_lap_update_prompt(lap, total, narrative, player_pos=player_pos)
+                priority = 86.0
+        
+        # Clear per-lap event collector
+        narrative.current_lap_events.clear()
+        
+        if not prompt_obj:
+            return None, None, None
+        
+        return prompt_obj, voice_key, priority
 
     def _stream_live_race_event(self) -> bool:
         """
@@ -30533,6 +30634,12 @@ class FTBController:
         self.log("ftb", f"New game created successfully! Team: {self.state.player_team.name if self.state and self.state.player_team else 'None'}")
         _dbg(f"[FTB CONTROLLER] ✓ New game created: state={self.state is not None}, player_team={self.state.player_team.name if self.state and self.state.player_team else 'None'}")
         _dbg(f"[FTB CONTROLLER] ✓ Game tick: {self.state.tick if self.state else 'NO STATE'}")
+
+        # Update web bridge screen to "game" now that a save exists
+        web_bridge = self.runtime.get("web_bridge")
+        if web_bridge and hasattr(web_bridge, "navigate_to"):
+            web_bridge.navigate_to("game")
+            _dbg("[FTB CONTROLLER] ✓ Web bridge screen set to 'game'")
         
         # Initialize state-aware narrator
         if self.event_pool and self.state and self.state.player_team:
@@ -30809,6 +30916,13 @@ class FTBController:
             
             _dbg(f"[FTB CONTROLLER] ✅ Load save completed successfully: {path}")
             self.log("ftb", f"Loaded save: {path}")
+
+            # Update web bridge screen to "game" now that a save is loaded
+            web_bridge = self.runtime.get("web_bridge")
+            if web_bridge and hasattr(web_bridge, "navigate_to"):
+                web_bridge.navigate_to("game")
+                _dbg("[FTB CONTROLLER] ✓ Web bridge screen set to 'game' after load")
+
             _dbg(f"[FTB CONTROLLER] 🎙️ Initializing narrator for state...")
             self._init_narrator_for_state()
             _dbg(f"[FTB CONTROLLER] ✅ load_save method completed")
@@ -31268,10 +31382,7 @@ class FTBController:
                     _dbg(f"[FTB] ✓ start_new_game returned, state exists: {self.state is not None}")
                     if self.state:
                         _dbg(f"[FTB] ✓ State initialized: tick={self.state.tick}, team={self.state.player_team.name if self.state.player_team else 'None'}")
-                        # Immediate autosave so the game survives a page refresh
-                        self.save_game()
-                        _dbg(f"[FTB] ✓ Autosave after new game creation")
-                        # Trigger immediate UI refresh
+                        # start_new_game already performs an initial save, so just refresh the widget
                         self._refresh_widget()
                         _dbg(f"[FTB] ✓ Triggered UI refresh after new game creation")
                     else:
@@ -31304,12 +31415,9 @@ class FTBController:
                         _dbg(f"[FTB CONTROLLER] ✓ Triggered UI refresh after DB load")
                 
                 elif cmd == "ftb_save":
-                    path = msg.get("path")
+                    path = msg.get("path") or None  # treat "" as None
                     _dbg(f"[FTB CONTROLLER] 💾 Save command received, path: {path}")
-                    if path:
-                        self.save_game(path)
-                    else:
-                        _dbg("[FTB CONTROLLER] ❌ No path provided for save command")
+                    self.save_game(path)  # None → autosave path
                 
                 elif cmd == "ftb_tick_step":
                     n = int(msg.get("n", 1))
@@ -31950,12 +32058,12 @@ class FTBController:
                             self._write_race_day_state_to_db(rds)
                             
                             # --- Generate PBP commentary for this lap ---
-                            _dbg(f"[FTB PBP] 🔍 Lap check: prev_lap={prev_lap}, current_lap={rds.current_lap}, has_more={has_more_laps}")
+                            print(f"[FTB PBP] 🔍 Lap check: prev_lap={prev_lap}, current_lap={rds.current_lap}, has_more={has_more_laps}")
                             if rds.current_lap > prev_lap:
                                 try:
                                     self._enqueue_pbp_commentary_for_lap(rds)
                                 except Exception as _e:
-                                    _dbg(f"[FTB RACE DAY] ⚠️  Lap commentary failed: {_e}")
+                                    print(f"[FTB PBP] ⚠️  Lap commentary EXCEPTION: {_e}")
                                     import traceback; traceback.print_exc()
                             
                             if not has_more_laps:
@@ -32764,21 +32872,22 @@ class FTBController:
                     config = msg.get("config")
                     if self.state and self.state.player_team and config:
                         with self.state_lock:
-                            # Map subsystem to project_id (use first available project for that subsystem)
-                            subsystem = config.get('subsystem', 'general')
-                            subsystem_to_project = {
-                                'Aerodynamics': 'rd_aero_efficiency',
-                                'Power Unit': 'rd_power_output',
-                                'Suspension': 'rd_mechanical_grip',
-                                'Reliability': 'rd_reliability',
-                                'Driveability': 'rd_driveability',
-                                'Strategy Tools': 'rd_setup_window'
-                            }
-                            
-                            project_id = subsystem_to_project.get(subsystem)
+                            # Accept direct project_id from msg or config, else map subsystem
+                            project_id = msg.get("project_id") or config.get("project_id")
                             if not project_id:
-                                self.log("ftb", f"ERROR: Unknown subsystem '{subsystem}' - cannot map to project")
-                                project_id = 'rd_driveability'  # Fallback
+                                subsystem = config.get('subsystem', 'general')
+                                subsystem_to_project = {
+                                    'Aerodynamics': 'rd_aero_efficiency',
+                                    'Power Unit': 'rd_power_output',
+                                    'Suspension': 'rd_mechanical_grip',
+                                    'Reliability': 'rd_reliability',
+                                    'Driveability': 'rd_driveability',
+                                    'Strategy Tools': 'rd_setup_window'
+                                }
+                                project_id = subsystem_to_project.get(subsystem)
+                                if not project_id:
+                                    self.log("ftb", f"ERROR: Unknown subsystem '{subsystem}' - cannot map to project")
+                                    project_id = 'rd_driveability'  # Fallback
                             
                             # Get engineer entity IDs from names
                             assigned_engineer_ids = []

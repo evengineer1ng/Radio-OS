@@ -174,15 +174,43 @@ class OpenAIProvider(ModelProvider):
             "Content-Type": "application/json",
         }
 
+        resolved_model = model or "gpt-4"
+
+        # Newer OpenAI models (o-series, gpt-5+) require
+        # 'max_completion_tokens' instead of the legacy 'max_tokens'.
+        _m = resolved_model.lower()
+        use_new_token_param = (
+            _m.startswith("o1")
+            or _m.startswith("o3")
+            or _m.startswith("o4")
+            or _m.startswith("gpt-5")
+        )
+
+        # Some lightweight / reasoning models (e.g. gpt-5-nano/mini, o-series)
+        # reject custom temperature — only the default (1) is accepted.
+        _temp_blocked = (
+            _m.startswith("o1")
+            or _m.startswith("o3")
+            or _m.startswith("o4")
+            or _m.endswith("-nano")
+            or _m.endswith("-mini")
+        )
+
         payload = {
-            "model": model or "gpt-4",
-            "max_tokens": int(num_predict),
-            "temperature": float(temperature),
+            "model": resolved_model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
         }
+
+        if not _temp_blocked:
+            payload["temperature"] = float(temperature)
+
+        if use_new_token_param:
+            payload["max_completion_tokens"] = int(num_predict)
+        else:
+            payload["max_tokens"] = int(num_predict)
 
         if force_json:
             payload["response_format"] = {"type": "json_object"}

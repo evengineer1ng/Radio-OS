@@ -23,7 +23,6 @@ scheduler:
     markets: 4
     reddit: 6
     rss: 1
-    env_example: 3
   reclaim_every_sec: 10
   reaper_every_sec: 3
   claim_timeout_sec: 45
@@ -225,9 +224,6 @@ feeds:
     reaction_frequency: 30
     max_interpretation_length: 500
     interpretation_temperature: 0.7
-  env_example:
-    enabled: true
-    message: Hello from environment example!
   ftb_heritage_templates:
     enabled: false
   ftb_narrative_prompts:
@@ -271,7 +267,6 @@ mix:
     markets: 0.15
     reddit: 0.77
     rss: 0.05
-    env_example: 0.0
 art:
   global_bg:
     type: gradient

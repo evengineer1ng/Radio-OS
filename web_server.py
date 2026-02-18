@@ -698,6 +698,19 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         save_global_config(cfg)
         return {"status": "saved"}
 
+    @app.get("/api/settings/audio_cli")
+    async def get_audio_cli_settings():
+        cfg = get_global_config()
+        return cfg.get("audio_cli", {})
+
+    @app.post("/api/settings/audio_cli")
+    async def save_audio_cli_settings(request: Request):
+        payload = await request.json()
+        cfg = get_global_config()
+        cfg["audio_cli"] = payload
+        save_global_config(cfg)
+        return {"status": "saved"}
+
     @app.get("/api/settings/visual_models")
     async def get_visual_model_settings():
         cfg = get_global_config()
@@ -723,6 +736,255 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
     @app.get("/api/voices")
     async def list_voices():
         return {"voices": discover_voices()}
+
+    # ──── REST: Per-station feed / plugin management ────
+
+    @app.get("/api/stations/{station_id}/feeds")
+    async def get_station_feeds(station_id: str):
+        """Return all feed configs for a station, merged with plugin metadata."""
+        mp = os.path.join(STATIONS_DIR, station_id, "manifest.yaml")
+        if not os.path.exists(mp):
+            return JSONResponse({"error": "Station not found"}, 404)
+        manifest = safe_read_yaml(mp)
+        feeds_cfg = manifest.get("feeds", {}) or {}
+        plugins = discover_plugins()
+        result: Dict[str, Any] = {}
+        # Include all configured feeds
+        for name, cfg in feeds_cfg.items():
+            if not isinstance(cfg, dict):
+                cfg = {}
+            meta = plugins.get(name, {})
+            result[name] = {
+                "enabled": bool(cfg.get("enabled", False)),
+                "config": {k: v for k, v in cfg.items() if k != "enabled"},
+                "plugin_display": meta.get("display", name),
+                "plugin_desc": meta.get("desc", ""),
+                "has_plugin": name in plugins,
+            }
+        # Include available-but-not-configured plugins
+        for name, meta in plugins.items():
+            if name not in result and meta.get("is_feed", True):
+                result[name] = {
+                    "enabled": False,
+                    "config": meta.get("defaults", {}) or {},
+                    "plugin_display": meta.get("display", name),
+                    "plugin_desc": meta.get("desc", ""),
+                    "has_plugin": True,
+                }
+        return {"station_id": station_id, "feeds": result}
+
+    @app.post("/api/stations/{station_id}/feeds/{feed_name}/toggle")
+    async def toggle_station_feed(station_id: str, feed_name: str, request: Request):
+        """Enable or disable a specific feed for a station."""
+        mp = os.path.join(STATIONS_DIR, station_id, "manifest.yaml")
+        if not os.path.exists(mp):
+            return JSONResponse({"error": "Station not found"}, 404)
+        body = await request.json()
+        enabled = bool(body.get("enabled", False))
+        manifest = safe_read_yaml(mp)
+        feeds = manifest.setdefault("feeds", {})
+        if feed_name not in feeds or not isinstance(feeds.get(feed_name), dict):
+            # Initialise from plugin defaults if available
+            plugins = discover_plugins()
+            defaults = (plugins.get(feed_name, {}).get("defaults") or {}).copy()
+            feeds[feed_name] = defaults
+        feeds[feed_name]["enabled"] = enabled
+        safe_write_yaml(mp, manifest)
+        return {"status": "ok", "feed": feed_name, "enabled": enabled}
+
+    @app.put("/api/stations/{station_id}/feeds/{feed_name}/config")
+    async def update_feed_config(station_id: str, feed_name: str, request: Request):
+        """Update configuration keys for a specific feed."""
+        mp = os.path.join(STATIONS_DIR, station_id, "manifest.yaml")
+        if not os.path.exists(mp):
+            return JSONResponse({"error": "Station not found"}, 404)
+        body = await request.json()
+        manifest = safe_read_yaml(mp)
+        feeds = manifest.setdefault("feeds", {})
+        if feed_name not in feeds or not isinstance(feeds.get(feed_name), dict):
+            feeds[feed_name] = {}
+        feeds[feed_name].update(body)
+        safe_write_yaml(mp, manifest)
+        return {"status": "ok", "feed": feed_name, "config": feeds[feed_name]}
+
+    @app.post("/api/stations/{station_id}/feeds/bulk")
+    async def bulk_set_feeds(station_id: str, request: Request):
+        """Enable or disable multiple feeds at once.
+        Body: {"feeds": {"rss": true, "twitter": false, ...}}
+        """
+        mp = os.path.join(STATIONS_DIR, station_id, "manifest.yaml")
+        if not os.path.exists(mp):
+            return JSONResponse({"error": "Station not found"}, 404)
+        body = await request.json()
+        feed_states = body.get("feeds", {})
+        manifest = safe_read_yaml(mp)
+        feeds = manifest.setdefault("feeds", {})
+        plugins = discover_plugins()
+        changed = []
+        for name, enabled in feed_states.items():
+            if name not in feeds or not isinstance(feeds.get(name), dict):
+                defaults = (plugins.get(name, {}).get("defaults") or {}).copy()
+                feeds[name] = defaults
+            feeds[name]["enabled"] = bool(enabled)
+            changed.append(name)
+        safe_write_yaml(mp, manifest)
+        return {"status": "ok", "changed": changed}
+
+    @app.post("/api/stations/{station_id}/plugin/{plugin_name}/command")
+    async def plugin_command(station_id: str, plugin_name: str, request: Request):
+        """Forward a command to a running station's plugin web server.
+        This proxies POST to the plugin's embedded HTTP server so Audio CLI
+        and the web UI can send structured commands to plugins (e.g. FTB
+        game actions like advance_day, sim_race, hire_driver, etc.)."""
+        ms = station_mgr.get(station_id)
+        if not ms or not ms.web_port:
+            return JSONResponse({"error": "Station not running or no web port"}, 503)
+        body = await request.json()
+
+        # Normalize the command body:
+        # Audio CLI sends {"command": "advance_day", ...}
+        # FTB web server expects {"cmd": "ftb_tick_step", ...} on /api/command
+        # Also try dedicated REST endpoints first for known commands.
+        cmd_name = body.get("cmd") or body.get("command", "")
+        normalized = dict(body)
+        if "command" in normalized and "cmd" not in normalized:
+            normalized["cmd"] = normalized.pop("command")
+            cmd_name = normalized["cmd"]
+
+        # Route known commands to their dedicated FTB REST endpoints
+        # so they work the same as clicking buttons in the web UI
+        port = ms.web_port
+        dedicated_routes = {
+            "ftb_tick_step": ("POST", f"http://127.0.0.1:{port}/api/tick",
+                              {"n": normalized.get("n", 1)}),
+            "advance_day": ("POST", f"http://127.0.0.1:{port}/api/tick",
+                            {"n": normalized.get("n", 1)}),
+            "ftb_tick_batch": ("POST", f"http://127.0.0.1:{port}/api/tick",
+                               {"n": normalized.get("n", 7), "batch": True}),
+            "ftb_new_save": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                              {"target": "wizard"}),
+            "new_game": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                         {"target": "wizard"}),
+            "ftb_load_save": ("POST", f"http://127.0.0.1:{port}/api/load_game",
+                               {"path": normalized.get("path", "")}),
+            "load_game": ("POST", f"http://127.0.0.1:{port}/api/load_game",
+                          {"path": normalized.get("path", "")}),
+            "ftb_save": ("POST", f"http://127.0.0.1:{port}/api/save_game",
+                          {"name": normalized.get("name", ""), "path": normalized.get("path", "")}),
+            "save_game": ("POST", f"http://127.0.0.1:{port}/api/save_game",
+                          {"name": normalized.get("name", ""), "path": normalized.get("path", "")}),
+            "ftb_pre_race_response": ("POST", f"http://127.0.0.1:{port}/api/race_day/respond",
+                                      {"watch_live": normalized.get("watch_live", False)}),
+            "watch_live_race": ("POST", f"http://127.0.0.1:{port}/api/race_day/respond",
+                                 {"watch_live": True}),
+            "instant_sim_race": ("POST", f"http://127.0.0.1:{port}/api/race_day/respond",
+                                  {"watch_live": False}),
+            "ftb_start_live_race": ("POST", f"http://127.0.0.1:{port}/api/race_day/start_live",
+                                     {"speed": normalized.get("speed", 10.0)}),
+            "ftb_complete_race_day": ("POST", f"http://127.0.0.1:{port}/api/race_day/complete",
+                                      {}),
+            "complete_race_day": ("POST", f"http://127.0.0.1:{port}/api/race_day/complete",
+                                  {}),
+            "ftb_hire_free_agent": ("POST", f"http://127.0.0.1:{port}/api/staff/hire",
+                                    normalized),
+            "hire_staff": ("POST", f"http://127.0.0.1:{port}/api/staff/hire",
+                           normalized),
+            "ftb_fire_entity": ("POST", f"http://127.0.0.1:{port}/api/staff/fire",
+                                 normalized),
+            "fire_staff": ("POST", f"http://127.0.0.1:{port}/api/staff/fire",
+                           normalized),
+            "ftb_purchase_part": ("POST", f"http://127.0.0.1:{port}/api/parts/buy",
+                                   normalized),
+            "buy_parts": ("POST", f"http://127.0.0.1:{port}/api/parts/buy",
+                          normalized),
+            "accept_sponsor": ("POST", f"http://127.0.0.1:{port}/api/sponsor/accept",
+                                normalized),
+            "decline_sponsor": ("POST", f"http://127.0.0.1:{port}/api/sponsor/decline",
+                                 normalized),
+            "ftb_start_development": ("POST", f"http://127.0.0.1:{port}/api/rd/start",
+                                       normalized),
+            "start_rd_project": ("POST", f"http://127.0.0.1:{port}/api/rd/start",
+                                  normalized),
+            "ftb_upgrade_infrastructure": ("POST", f"http://127.0.0.1:{port}/api/infrastructure/upgrade",
+                                            normalized),
+            # ── Wizard Navigation (dynamic button clicking) ──
+            "navigate_wizard": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                                 {"target": "wizard"}),
+            "wizard_next": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                            {"target": "wizard_next"}),
+            "wizard_prev": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                            {"target": "wizard_prev"}),
+            "wizard_back": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                            {"target": "wizard_prev"}),
+            "navigate_landing": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                                  {"target": "landing"}),
+            "confirm_new_game": ("POST", f"http://127.0.0.1:{port}/api/new_game",
+                                  normalized),
+            # ── Wizard Field Setting ──
+            "set_wizard_field": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                                  {"field": normalized.get("field", ""),
+                                   "value": normalized.get("value", "")}),
+            "set_tier": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                          {"field": "tier", "value": normalized.get("value", normalized.get("tier", ""))}),
+            "set_origin": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                            {"field": "origin", "value": normalized.get("value", normalized.get("origin", ""))}),
+            "set_save_mode": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                               {"field": "save_mode", "value": normalized.get("value", normalized.get("save_mode", ""))}),
+            "set_seed": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                          {"field": "seed", "value": normalized.get("value", normalized.get("seed", ""))}),
+            "set_ownership": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                               {"field": "ownership", "value": normalized.get("value", normalized.get("ownership", ""))}),
+            "set_team_name": ("POST", f"http://127.0.0.1:{port}/api/wizard_field",
+                               {"field": "team_name", "value": normalized.get("value", normalized.get("team_name", ""))}),
+            # ── In-Game Tab Navigation ──
+            "switch_tab": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                           {"target": normalized.get("tab", "")}),
+            "go_to_tab": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                          {"target": normalized.get("tab", "")}),
+            "show_dashboard": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                               {"target": "dashboard"}),
+            "show_team": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                          {"target": "team"}),
+            "show_car": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                         {"target": "car"}),
+            "show_development": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                                 {"target": "development"}),
+            "show_finance": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                             {"target": "finance"}),
+            "show_sponsors": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                              {"target": "sponsors"}),
+            "show_race": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                          {"target": "raceops"}),
+            "show_stats": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                           {"target": "stats"}),
+            "show_calendar": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                              {"target": "calendar"}),
+            "show_career": ("POST", f"http://127.0.0.1:{port}/api/navigate",
+                            {"target": "career"}),
+        }
+
+        route = dedicated_routes.get(cmd_name)
+
+        try:
+            import urllib.request
+            if route:
+                method, target, route_body = route
+                data = json.dumps(route_body).encode("utf-8")
+            else:
+                # Fallback: forward to the generic /api/command endpoint
+                target = f"http://127.0.0.1:{port}/api/command"
+                data = json.dumps(normalized).encode("utf-8")
+
+            req = urllib.request.Request(
+                target, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            return result
+        except Exception as e:
+            return JSONResponse({"error": f"Plugin command failed: {e}"}, 502)
 
     # ──── REST: Station CRUD ────
     @app.get("/api/stations/{station_id}/manifest")

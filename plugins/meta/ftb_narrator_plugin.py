@@ -95,12 +95,12 @@ except ImportError:
     print("[FTB Narrator] Warning: Could not import ftb_segment_prompts")
     ftb_segment_prompts = None
 
-# Import broadcast commentary generator
+# Import broadcast commentary generator (LLM version)
 try:
-    from plugins import ftb_broadcast_commentary
+    from plugins import ftb_broadcast_commentary_llm
 except ImportError:
-    print("[FTB Narrator] Warning: Could not import ftb_broadcast_commentary")
-    ftb_broadcast_commentary = None
+    print("[FTB Narrator] Warning: Could not import ftb_broadcast_commentary_llm")
+    ftb_broadcast_commentary_llm = None
 
 # Import race day module
 try:
@@ -883,7 +883,7 @@ class ContinuousNarrator:
         
         # Broadcast commentary generator
         self.broadcast_generator = None
-        if ftb_broadcast_commentary:
+        if ftb_broadcast_commentary_llm:
             # Will be initialized when we know league tier
             self.broadcast_generator_tier = None
         
@@ -3394,7 +3394,7 @@ Recent event: {ctx['newest_event']}
         Check if live race is streaming and generate broadcast commentary.
         This runs on a separate cadence from regular narrator commentary.
         """
-        if not ftb_race_day or not ftb_broadcast_commentary:
+        if not ftb_race_day or not ftb_broadcast_commentary_llm:
             return
         
         try:
@@ -3447,12 +3447,14 @@ Recent event: {ctx['newest_event']}
             
             # Initialize broadcast generator if needed
             if not self.broadcast_generator or self.broadcast_generator_tier != league_tier:
-                self.broadcast_generator = ftb_broadcast_commentary.BroadcastCommentaryGenerator(
+                self.broadcast_generator = ftb_broadcast_commentary_llm.LLMCommentaryGenerator(
                     league_tier=league_tier,
                     player_team_name=self.player_team
                 )
                 self.broadcast_generator_tier = league_tier
-                self.log("ftb_narrator", f"Initialized broadcast generator for tier {league_tier}")
+                self._broadcast_narrative = ftb_broadcast_commentary_llm.NarrativeState()
+                self._broadcast_dispatcher = ftb_broadcast_commentary_llm.BeatDispatcher()
+                self.log("ftb_narrator", f"Initialized LLM broadcast generator for tier {league_tier}")
             
             # Check for new events to commentate on
             self._generate_broadcast_commentary_for_lap(current_lap, total_laps)
@@ -3479,6 +3481,13 @@ Recent event: {ctx['newest_event']}
             
             self._last_broadcast_lap = current_lap
             
+            gen = self.broadcast_generator
+            narrative = getattr(self, '_broadcast_narrative', ftb_broadcast_commentary_llm.NarrativeState())
+            dispatcher = getattr(self, '_broadcast_dispatcher', ftb_broadcast_commentary_llm.BeatDispatcher())
+            
+            # Update narrative phase
+            narrative.update_phase(current_lap, total_laps)
+            
             # Get race events for this lap from DB
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -3493,110 +3502,146 @@ Recent event: {ctx['newest_event']}
             """, (current_lap, self.game_id))
             
             events = cursor.fetchall()
+            
+            # Also grab leader info for narrative
+            cursor.execute("""
+                SELECT value FROM game_state_kv 
+                WHERE key = 'race_day_standings_p1' AND game_id = ?
+            """, (self.game_id,))
+            leader_row = cursor.fetchone()
             conn.close()
             
-            # Generate commentary for each event
-            commentary_lines = []
+            if leader_row:
+                import json as _json
+                leader_data = _json.loads(leader_row[0])
+                narrative.update_leader(
+                    leader_data.get('driver', ''),
+                    leader_data.get('team', ''),
+                    current_lap
+                )
             
+            # ── Classify raw events into ScoredEvents ──
+            import json as _json
             for event_type, data_json in events:
-                import json
-                data = json.loads(data_json) if data_json else {}
+                data = _json.loads(data_json) if data_json else {}
+                driver = data.get('driver', 'Unknown')
+                team = data.get('team', '')
                 
-                if event_type == 'overtake':
-                    driver = data.get('driver', 'Unknown')
-                    position = data.get('position', 0)
-                    is_player = data.get('team', '') == self.player_team
-                    lines = self.broadcast_generator.generate_overtake_commentary(driver, position, current_lap, is_player)
-                    commentary_lines.extend(lines)
+                raw_dict = {
+                    'event_type': event_type,
+                    'driver': driver,
+                    'team': team,
+                    'drivers': [driver],
+                    'new_position': data.get('position', 99),
+                    'old_position': data.get('old_position', 99),
+                    'positions_gained': data.get('positions_gained', 0),
+                    'description': data.get('description', f"{driver} {event_type}"),
+                    'lap': current_lap,
+                    'metadata': data,
+                }
+                scored = ftb_broadcast_commentary_llm.classify_event(raw_dict, self.player_team, narrative.leader)
+                scored.lap = current_lap
+                narrative.current_lap_events.append(scored)
                 
-                elif event_type == 'crash':
-                    driver = data.get('driver', 'Unknown')
-                    team = data.get('team', 'Unknown')
-                    is_player = team == self.player_team
-                    lines = self.broadcast_generator.generate_crash_commentary(driver, team, current_lap, is_player)
-                    commentary_lines.extend(lines)
-                
-                elif event_type == 'mechanical_dnf':
-                    driver = data.get('driver', 'Unknown')
-                    team = data.get('team', 'Unknown')
-                    is_player = team == self.player_team
-                    lines = self.broadcast_generator.generate_dnf_commentary(driver, team, current_lap, is_player)
-                    commentary_lines.extend(lines)
-                
-                elif event_type == 'fastest_lap':
-                    driver = data.get('driver', 'Unknown')
-                    lap_time = data.get('lap_time', 0.0)
-                    is_player = data.get('team', '') == self.player_team
-                    # Generate fastest lap commentary (simplified)
-                    if is_player:
-                        text = f"And {driver} sets the fastest lap of the race so far! That's {lap_time:.3f} seconds."
-                        commentary_lines.append(ftb_broadcast_commentary.CommentaryLine('pbp', text, 'normal', 90))
+                # Track incidents
+                if scored.event_class in ('player_crash', 'player_dnf', 'crash', 'leader_crash'):
+                    narrative.register_incident(scored.driver, current_lap)
             
-            # Lap 1 special commentary
+            # Green-flag tracking
+            had_incident = any(
+                se.event_class in ('crash', 'player_crash', 'leader_crash')
+                for se in narrative.current_lap_events
+            )
+            if not had_incident:
+                narrative.tick_green()
+            
+            # ── Score events ──
+            season_ctx = gen.season_context
+            for se in narrative.current_lap_events:
+                ftb_broadcast_commentary_llm.apply_weight_modifiers(se, current_lap, total_laps, narrative, season_ctx)
+            
+            # ── Select beats ──
+            beats = dispatcher.select_beats(narrative.current_lap_events, current_lap, total_laps, narrative)
+            if beats:
+                narrative.remember_event(beats[0])
+            
+            # ── Lap 1: lights out via LLM ──
+            spoke_this_lap = False
             if current_lap == 1:
-                lights_out = self.broadcast_generator.generate_lights_out_commentary()
-                commentary_lines = lights_out + commentary_lines
+                prompt_obj = gen.generate_lights_out_prompt(narrative)
+                text = self._call_broadcast_llm(prompt_obj)
+                if text:
+                    self._enqueue_broadcast_audio(text, CommentaryType.BROADCAST_RACE_START, self.pbp_voice_path, 94.0)
+                    narrative.log_commentary(text)
+                    spoke_this_lap = True
             
-            # Final lap commentary
+            # ── Final lap — always commentate ──
             if current_lap == total_laps:
-                # Get leader from standings
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT value FROM game_state_kv 
-                    WHERE key = 'race_day_standings_p1' AND game_id = ?
-                """, (self.game_id,))
-                leader_row = cursor.fetchone()
-                conn.close()
-                
-                if leader_row:
-                    import json
-                    leader_data = json.loads(leader_row[0])
-                    leader = leader_data.get('driver', 'Unknown')
-                    team = leader_data.get('team', '')
-                    is_player_leading = team == self.player_team
-                    
-                    final_lap = self.broadcast_generator.generate_final_lap_commentary(leader, team, is_player_leading)
-                    commentary_lines.extend(final_lap)
+                prompt_obj = gen.generate_final_lap_prompt(narrative)
+                text = self._call_broadcast_llm(prompt_obj)
+                if text:
+                    self._enqueue_broadcast_audio(text, CommentaryType.BROADCAST_RACE_START, self.pbp_voice_path, 95.0)
+                    narrative.log_commentary(text)
+                narrative.current_lap_events.clear()
+                return
             
-            # Periodic lap updates (every 5 laps)
-            elif current_lap % 5 == 0:
-                # Get leader and gap
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT value FROM game_state_kv 
-                    WHERE key = 'race_day_standings_p1' AND game_id = ?
-                """, (self.game_id,))
-                leader_row = cursor.fetchone()
-                conn.close()
-                
-                if leader_row:
-                    import json
-                    leader_data = json.loads(leader_row[0])
-                    leader = leader_data.get('driver', 'Unknown')
-                    gap = leader_data.get('gap', 0.0)
-                    
-                    lap_update = self.broadcast_generator.generate_lap_update(current_lap, total_laps, leader, gap)
-                    commentary_lines.extend(lap_update)
+            # ── Beat commentary — bypass real-time gates, sim controls pacing ──
+            if beats and not spoke_this_lap:
+                include_color = dispatcher.color_roll(current_lap, total_laps)
+                prompts = gen.generate_beat_prompt(beats, current_lap, total_laps, narrative, include_color=include_color)
+                for prompt_obj in prompts:
+                    voice = self.pbp_voice_path if prompt_obj.speaker == 'pbp' else self.color_voice_path
+                    ctype = CommentaryType.BROADCAST_RACE_START if prompt_obj.speaker == 'pbp' else CommentaryType.BROADCAST_OVERTAKE
+                    text = self._call_broadcast_llm(prompt_obj)
+                    if text:
+                        self._enqueue_broadcast_audio(text, ctype, voice, float(prompt_obj.priority))
+                        narrative.log_commentary(text)
+                        spoke_this_lap = True
             
-            # Enqueue commentary lines with appropriate voices
-            for line in commentary_lines:
-                # Determine voice based on speaker
-                if line.speaker == 'pbp':
-                    voice = self.pbp_voice_path
-                    commentary_type = CommentaryType.BROADCAST_RACE_START
-                else:  # color commentator
-                    voice = self.color_voice_path
-                    commentary_type = CommentaryType.BROADCAST_OVERTAKE
-                
-                # Enqueue with broadcast-specific handling
-                self._enqueue_broadcast_audio(line.text, commentary_type, voice, line.priority)
+            # ── Periodic lap update — every 3-5 laps if no beat commentary ──
+            if not spoke_this_lap:
+                update_interval = 3 if narrative.race_phase in ('late', 'final') else 5
+                if current_lap % update_interval == 0 or narrative.laps_since_commentary >= 4:
+                    update_prompt = gen.generate_lap_update_prompt(current_lap, total_laps, narrative)
+                    if update_prompt:
+                        text = self._call_broadcast_llm(update_prompt)
+                        if text:
+                            self._enqueue_broadcast_audio(text, CommentaryType.BROADCAST_RACE_START, self.pbp_voice_path, 86.0)
+                            narrative.log_commentary(text)
+                            spoke_this_lap = True
+            
+            if not spoke_this_lap:
+                narrative.laps_since_commentary += 1
+            
+            # Clear per-lap collector
+            narrative.current_lap_events.clear()
             
         except Exception as e:
             self.log("ftb_narrator", f"Error generating broadcast commentary: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _call_broadcast_llm(self, prompt_obj):
+        """Send a CommentaryPrompt to the LLM and return generated text."""
+        if not self.call_llm:
+            return None
+        try:
+            response = self.call_llm(
+                model=self.model_name,
+                prompt=prompt_obj.prompt,
+                max_tokens=prompt_obj.max_tokens,
+                temperature=0.7,
+            )
+            text = ''
+            if isinstance(response, dict):
+                text = response.get('text') or response.get('response') or ''
+            elif isinstance(response, str):
+                text = response
+            text = text.strip().strip('"')
+            return text if text else None
+        except Exception as e:
+            self.log("ftb_narrator", f"Broadcast LLM call failed: {e}")
+            return None
     
     def _enqueue_broadcast_audio(self, text: str, commentary_type: CommentaryType, voice_path: str, priority: float = 90.0):
         """

@@ -46,6 +46,13 @@ def _ensure_imports():
 class WebBridge:
     """Thread-safe bridge that bookmark.py writes to and the web server reads from."""
 
+    # All valid in-game tab IDs (must match App.svelte tab list)
+    VALID_TABS = {
+        "dashboard", "team", "car", "development", "raceops", "pbp",
+        "finance", "sponsors", "stats", "analytics", "career",
+        "calendar", "ai", "penalties", "history", "data",
+    }
+
     def __init__(self):
         self._lock = threading.Lock()
         self.last_subtitle: str = ""
@@ -54,6 +61,12 @@ class WebBridge:
         self.connected_clients: Set[Any] = set()  # WebSocket refs
         self._broadcast_queue: asyncio.Queue | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # UI screen state for Audio CLI navigation
+        # Possible values: "landing", "wizard", "loading", "game"
+        self.ui_screen: str = "landing"
+        self.wizard_step: int = 1
+        self.wizard_fields: Dict[str, Any] = {}
+        self.active_tab: str = "dashboard"
 
     # Called from bookmark.py _poll_queues thread (tkinter main thread)
     def update_subtitle(self, text: str):
@@ -93,6 +106,56 @@ class WebBridge:
                 "recent_events": list(self.event_log)[-50:],
             }
 
+    def navigate_to(self, screen: str, wizard_step: int = 1):
+        """Change the UI screen and broadcast to all connected clients.
+        Valid screens: 'landing', 'wizard', 'loading', 'game'."""
+        with self._lock:
+            self.ui_screen = screen
+            self.wizard_step = wizard_step
+        self._enqueue_broadcast("navigate", {
+            "screen": screen,
+            "wizard_step": wizard_step,
+        })
+
+    def set_wizard_step(self, step: int):
+        """Update the wizard step and broadcast."""
+        with self._lock:
+            self.wizard_step = step
+        self._enqueue_broadcast("navigate", {
+            "screen": "wizard",
+            "wizard_step": step,
+        })
+
+    def set_wizard_field(self, field: str, value: Any):
+        """Set a wizard field value and broadcast to connected clients."""
+        with self._lock:
+            self.wizard_fields[field] = value
+        self._enqueue_broadcast("wizard_field", {
+            "field": field,
+            "value": value,
+        })
+
+    def get_ui_screen(self) -> Dict[str, Any]:
+        """Return the current UI screen state for Audio CLI introspection."""
+        with self._lock:
+            return {
+                "screen": self.ui_screen,
+                "wizard_step": self.wizard_step,
+                "wizard_fields": dict(self.wizard_fields),
+                "active_tab": self.active_tab,
+            }
+
+    def switch_tab(self, tab_id: str) -> bool:
+        """Switch the active in-game tab and broadcast to all clients.
+        Returns True if the tab was valid, False otherwise."""
+        tab_id = tab_id.strip().lower()
+        if tab_id not in self.VALID_TABS:
+            return False
+        with self._lock:
+            self.active_tab = tab_id
+        self._enqueue_broadcast("switch_tab", {"tab": tab_id})
+        return True
+
     def _enqueue_broadcast(self, event_type: str, data: Any):
         """Push a message to all connected WebSocket clients."""
         if self._broadcast_queue and self._loop:
@@ -122,7 +185,7 @@ def get_bridge() -> WebBridge:
 # State Serializer — extracts JSON-safe game state from FTBController
 # ═══════════════════════════════════════════════════════════════════
 
-def serialize_entity(entity) -> Dict[str, Any]:
+def serialize_entity(entity, state=None) -> Dict[str, Any]:
     """Serialize a Driver/Engineer/Mechanic/Strategist/Principal to dict."""
     if entity is None:
         return None
@@ -149,15 +212,27 @@ def serialize_entity(entity) -> Dict[str, Any]:
             d.update(entity.to_dict())
         except Exception:
             pass
-    # Contract info
-    if hasattr(entity, "contract"):
-        c = entity.contract
-        if c:
-            d["contract"] = {
-                "salary": getattr(c, "salary", 0),
-                "seasons_remaining": getattr(c, "seasons_remaining", 0),
-                "buyout": getattr(c, "buyout_clause", 0),
-            }
+    # Contract info — try entity.contract first, then look up in state.contracts
+    contract = getattr(entity, "contract", None)
+    entity_id = getattr(entity, "entity_id", None)
+    if not contract and state and entity_id is not None:
+        contracts = getattr(state, "contracts", {})
+        contract = contracts.get(entity_id)
+    if contract:
+        # seasons_remaining may be a method or a static value
+        sr = getattr(contract, "seasons_remaining", 0)
+        if callable(sr):
+            try:
+                current_day = getattr(state, "tick", 0) if state else 0
+                sr = round(sr(current_day), 1)
+            except Exception:
+                sr = 0
+        d["contract"] = {
+            "salary": getattr(contract, "base_salary", 0),
+            "seasons_remaining": sr,
+            "buyout": getattr(contract, "buyout_clause_fixed", None) or getattr(contract, "buyout_clause", 0) or 0,
+            "role": getattr(contract, "role", ""),
+        }
     return d
 
 
@@ -214,7 +289,7 @@ def serialize_part(part) -> Dict[str, Any]:
     return d
 
 
-def serialize_team(team) -> Dict[str, Any]:
+def serialize_team(team, state=None) -> Dict[str, Any]:
     """Serialize a Team to dict."""
     if team is None:
         return None
@@ -259,9 +334,9 @@ def serialize_team(team) -> Dict[str, Any]:
         if val is None:
             continue
         if isinstance(val, list):
-            d["roster"][role] = [serialize_entity(e) for e in val if e]
+            d["roster"][role] = [serialize_entity(e, state) for e in val if e]
         else:
-            d["roster"][role] = serialize_entity(val)
+            d["roster"][role] = serialize_entity(val, state)
     # Car
     car = getattr(team, "car", None)
     if car:
@@ -291,22 +366,40 @@ def serialize_team(team) -> Dict[str, Any]:
             d["car"]["parts_inventory"] = [serialize_part(p) for p in inventory if p]
         else:
             d["car"]["parts_inventory"] = []
-    # Infrastructure
+    # Infrastructure (filter out boolean unlock flags — only show numeric facility levels)
     infra = getattr(team, "infrastructure", None)
     if infra:
         if isinstance(infra, dict):
-            d["infrastructure"] = {k: float(v) for k, v in infra.items() if isinstance(v, (int, float))}
+            d["infrastructure"] = {
+                k: float(v) for k, v in infra.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and not k.endswith("_unlocked")
+            }
         elif hasattr(infra, "__dict__"):
-            d["infrastructure"] = {k: float(v) for k, v in vars(infra).items() if isinstance(v, (int, float))}
+            d["infrastructure"] = {
+                k: float(v) for k, v in vars(infra).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and not k.endswith("_unlocked")
+            }
     # R&D projects
     rd = getattr(team, "rd_projects", None) or getattr(team, "active_rd_projects", None) or []
     for proj in rd:
+        dur = getattr(proj, "duration_ticks", 1) or 1
+        prog = getattr(proj, "progress_ticks", 0) or 0
         d["rd_projects"].append({
             "id": getattr(proj, "project_id", ""),
-            "subsystem": getattr(proj, "subsystem", ""),
-            "progress": getattr(proj, "progress", 0),
-            "risk_level": getattr(proj, "risk_level", 0),
-            "budget": getattr(proj, "budget", 0),
+            "name": getattr(proj, "project_name", "") or getattr(proj, "subsystem", "Project"),
+            "description": getattr(proj, "description", ""),
+            "project_type": getattr(proj, "project_type", "car_upgrade"),
+            "subsystem": getattr(proj, "target_stat", "") or getattr(proj, "subsystem", ""),
+            "progress": round(prog / dur, 3) if dur > 0 else 0,
+            "progress_ticks": prog,
+            "duration_ticks": dur,
+            "risk_level": getattr(proj, "risk_level", "medium"),
+            "success_rate": round(getattr(proj, "current_success_rate", 0.7), 2),
+            "budget": getattr(proj, "total_cost", 0) or getattr(proj, "budget", 0),
+            "completed": getattr(proj, "completed", False),
+            "cancelled": getattr(proj, "cancelled", False),
+            "target_stat": getattr(proj, "target_stat", ""),
+            "target_improvement": getattr(proj, "target_improvement", 0),
         })
     return d
 
@@ -342,14 +435,14 @@ def serialize_game_state(controller) -> Dict[str, Any]:
 
     # Player team
     if state.player_team:
-        out["player_team"] = serialize_team(state.player_team)
+        out["player_team"] = serialize_team(state.player_team, state)
     else:
         out["player_team"] = None
 
     # AI teams (summary)
     out["ai_teams"] = []
     for t in (state.ai_teams or []):
-        out["ai_teams"].append(serialize_team(t))
+        out["ai_teams"].append(serialize_team(t, state))
 
     # Leagues
     out["leagues"] = {}
@@ -399,7 +492,7 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     out["free_agents"] = []
     for fa in (state.free_agents or [])[:100]:
         entity = getattr(fa, "entity", fa)
-        d = serialize_entity(entity)
+        d = serialize_entity(entity, state)
         # Use entity_id for stable identification (id(fa) is a Python memory
         # address that can lose precision in JSON / JavaScript).
         d["id"] = getattr(entity, "entity_id", None) or id(fa)
@@ -469,10 +562,20 @@ def serialize_game_state(controller) -> Dict[str, Any]:
             "tick": getattr(p, "tick", 0),
         })
 
-    # Parts marketplace (top 50 by performance)
+    # Parts marketplace – ensure all part types are represented
+    # Group by part_type, take top N per type sorted by performance, then flatten
+    _parts_by_type: Dict[str, list] = defaultdict(list)
+    for pid, part in state.parts_catalog.items():
+        pt = getattr(part, "part_type", "unknown")
+        _parts_by_type[pt].append(part)
     out["parts_marketplace"] = []
-    for pid, part in list(state.parts_catalog.items())[:50]:
-        out["parts_marketplace"].append(serialize_part(part))
+    _per_type_limit = max(8, 60 // max(len(_parts_by_type), 1))
+    for ptype in sorted(_parts_by_type.keys()):
+        bucket = _parts_by_type[ptype]
+        # Sort by performance_score descending so best parts show first
+        bucket.sort(key=lambda p: getattr(p, "performance_score", 0), reverse=True)
+        for part in bucket[:_per_type_limit]:
+            out["parts_marketplace"].append(serialize_part(part))
 
     # Manager career stats
     mcs = getattr(state, "manager_career_stats", None)
@@ -505,6 +608,24 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     # Current meta / economic state
     out["current_meta"] = getattr(state, "current_meta", {})
     out["economic_state"] = getattr(state, "economic_state", {})
+
+    # Contracts summary (for team/finance views)
+    out["contracts"] = {}
+    for eid, contract in (getattr(state, "contracts", {}) or {}).items():
+        sr = getattr(contract, "seasons_remaining", 0)
+        if callable(sr):
+            try:
+                sr = round(sr(state.tick), 1)
+            except Exception:
+                sr = 0
+        out["contracts"][str(eid)] = {
+            "entity_name": getattr(contract, "entity_name", ""),
+            "team_name": getattr(contract, "team_name", ""),
+            "role": getattr(contract, "role", ""),
+            "base_salary": getattr(contract, "base_salary", 0),
+            "seasons_remaining": sr,
+            "buyout": getattr(contract, "buyout_clause_fixed", None) or 0,
+        }
 
     # ─── Calendar Projection ─────────────────────────────────────
     try:
@@ -678,7 +799,11 @@ def _serialize_with_lock(controller) -> Dict[str, Any]:
             # so the frontend keeps its existing state and retries on next poll.
             return {"status": "busy", "tick": getattr(controller.state, "tick", 0) if controller.state else 0}
         try:
-            return serialize_game_state(controller)
+            data = serialize_game_state(controller)
+            # Validate JSON-serializable before returning to FastAPI
+            # (catches stale Team/Driver objects leaking through)
+            json.dumps(data, default=str)
+            return data
         finally:
             controller.state_lock.release()
     except Exception as e:
@@ -770,6 +895,289 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     @app.get("/api/snapshot")
     async def get_snapshot():
         return bridge.get_snapshot()
+
+    # ──── REST: UI Screen State (for Audio CLI introspection) ────
+    @app.get("/api/ui_screen")
+    async def get_ui_screen():
+        """Return the current UI screen (landing, wizard, loading, game)
+        and wizard step if applicable. Used by Audio CLI to know what
+        buttons are available for dynamic clicking."""
+        screen_info = bridge.get_ui_screen()
+        # Also include whether a game exists
+        controller = shared_runtime.get("ftb_controller")
+        has_game = controller is not None and controller.state is not None
+        screen_info["has_game"] = has_game
+        # If game exists, override screen to "game"
+        if has_game and screen_info["screen"] not in ("wizard",):
+            screen_info["screen"] = "game"
+        # Describe available buttons for the current screen
+        screen = screen_info["screen"]
+        if screen == "landing":
+            screen_info["buttons"] = [
+                {"id": "new_game", "label": "🆕 New Game", "action": "navigate_wizard"},
+                {"id": "load_game", "label": "📂 Load Game", "action": "show_load_screen"},
+            ]
+        elif screen == "wizard":
+            step = screen_info["wizard_step"]
+            buttons = []
+            if step > 1:
+                buttons.append({"id": "wizard_back", "label": "← Back", "action": "wizard_prev"})
+            if step < 4:
+                buttons.append({"id": "wizard_next", "label": "Next →", "action": "wizard_next"})
+            else:
+                buttons.append({"id": "wizard_start", "label": "🏁 START NEW GAME", "action": "confirm_new_game"})
+            screen_info["buttons"] = buttons
+            # Describe what the current step configures
+            step_descriptions = {
+                1: "Save Mode & World Seed",
+                2: "Starting Tier",
+                3: "Origin Story & Manager Identity",
+                4: "Team Setup & Confirmation",
+            }
+            screen_info["step_description"] = step_descriptions.get(step, "")
+            screen_info["total_steps"] = 4
+            # Include selectable options for the current step
+            wf = screen_info.get("wizard_fields", {})
+            if step == 1:
+                screen_info["fields"] = [
+                    {"field": "save_mode", "label": "Save Mode", "type": "choice",
+                     "current": wf.get("save_mode", "replayable"),
+                     "options": [
+                         {"value": "replayable", "label": "Replayable",
+                          "desc": "Deterministic seed, same world every time"},
+                         {"value": "permanent", "label": "Permanent",
+                          "desc": "Extra entropy, unique every playthrough"},
+                     ]},
+                    {"field": "seed", "label": "World Seed", "type": "text",
+                     "current": wf.get("seed", "")},
+                ]
+            elif step == 2:
+                screen_info["fields"] = [
+                    {"field": "tier", "label": "Starting Tier", "type": "choice",
+                     "current": wf.get("tier", "grassroots"),
+                     "options": [
+                         {"value": "grassroots", "label": "Grassroots",
+                          "desc": "The very bottom. Tiny budgets, volunteer crews."},
+                         {"value": "formula_v", "label": "Formula V",
+                          "desc": "Regional racing. Proper teams, modest budgets."},
+                         {"value": "formula_x", "label": "Formula X",
+                          "desc": "National level. Professional teams, growing budgets."},
+                         {"value": "formula_y", "label": "Formula Y",
+                          "desc": "International. Large budgets, factory support."},
+                         {"value": "formula_z", "label": "Formula Z",
+                          "desc": "The pinnacle. Massive budgets, global stage."},
+                     ]},
+                ]
+            elif step == 3:
+                screen_info["fields"] = [
+                    {"field": "origin", "label": "Origin Story", "type": "choice",
+                     "current": wf.get("origin", "grassroots_hustler"),
+                     "options": [
+                         {"value": "game_show_winner", "label": "Game Show Winner",
+                          "desc": "Won a reality TV competition. Cash-rich, reputation-poor."},
+                         {"value": "grassroots_hustler", "label": "Grassroots Hustler",
+                          "desc": "Built up from nothing. Street-smart, budget-savvy."},
+                         {"value": "former_driver", "label": "Former Driver",
+                          "desc": "Retired racer. Deep race knowledge, media connections."},
+                         {"value": "corporate_spinout", "label": "Corporate Spinout",
+                          "desc": "Left a big team. Well-funded, corporate contacts."},
+                         {"value": "engineering_savant", "label": "Engineering Savant",
+                          "desc": "Technical genius. R&D bonus, people skills lacking."},
+                     ]},
+                    {"field": "manager_first", "label": "First Name", "type": "text",
+                     "current": wf.get("manager_first", "")},
+                    {"field": "manager_last", "label": "Last Name", "type": "text",
+                     "current": wf.get("manager_last", "")},
+                    {"field": "manager_age", "label": "Age", "type": "number",
+                     "current": wf.get("manager_age", 32), "min": 22, "max": 70},
+                    {"field": "player_identity", "label": "Player Tags", "type": "text",
+                     "current": wf.get("player_identity", "")},
+                ]
+            elif step == 4:
+                screen_info["fields"] = [
+                    {"field": "team_name", "label": "Team Name", "type": "text",
+                     "current": wf.get("team_name", "")},
+                    {"field": "ownership", "label": "Ownership", "type": "choice",
+                     "current": wf.get("ownership", "self_owned"),
+                     "options": [
+                         {"value": "self_owned", "label": "Self-Owned",
+                          "desc": "You own the team"},
+                         {"value": "hired_manager", "label": "Hired Manager",
+                          "desc": "Working for someone else"},
+                     ]},
+                ]
+        elif screen == "game":
+            screen_info["active_tab"] = bridge.active_tab
+            screen_info["tabs"] = [
+                {"id": "dashboard", "label": "🏠 Home"},
+                {"id": "team", "label": "👥 Team"},
+                {"id": "car", "label": "🏎️ Car"},
+                {"id": "development", "label": "🔧 Dev"},
+                {"id": "raceops", "label": "🏁 Race"},
+                {"id": "pbp", "label": "📡 PBP"},
+                {"id": "finance", "label": "💰 Finance"},
+                {"id": "sponsors", "label": "🤝 Sponsors"},
+                {"id": "stats", "label": "📊 Stats"},
+                {"id": "analytics", "label": "📈 Analytics"},
+                {"id": "career", "label": "🏆 Career"},
+                {"id": "calendar", "label": "📅 Calendar"},
+                {"id": "ai", "label": "🤖 AI"},
+                {"id": "penalties", "label": "⚠️ Penalties"},
+                {"id": "history", "label": "📜 History"},
+                {"id": "data", "label": "🗄️ Data"},
+            ]
+            screen_info["buttons"] = [
+                {"id": "tick_1", "label": "⏩ +1 Day", "action": "advance_day"},
+                {"id": "tick_7", "label": "+7 Days", "action": "ftb_tick_batch", "n": 7},
+                {"id": "tick_30", "label": "+30 Days", "action": "ftb_tick_batch", "n": 30},
+                {"id": "save", "label": "💾 Save", "action": "save_game"},
+                {"id": "load", "label": "📂 Load", "action": "show_load_screen"},
+                {"id": "new", "label": "🆕 New Game", "action": "navigate_wizard"},
+            ]
+        elif screen == "loading":
+            screen_info["buttons"] = [
+                {"id": "cancel_loading", "label": "← Cancel", "action": "navigate_landing"},
+            ]
+        return screen_info
+
+    # ──── REST: Navigate UI Screen ────
+    @app.post("/api/navigate")
+    async def navigate_screen(payload: Dict[str, Any]):
+        """Navigate the web UI to a specific screen.
+        Used by Audio CLI to dynamically click buttons instead of
+        hard-coding each game action as its own function.
+
+        Supported targets:
+          - 'wizard': show the setup wizard (step 1)
+          - 'landing': go back to the landing/start menu
+          - 'wizard_next': advance wizard to next step
+          - 'wizard_prev': go back one wizard step
+          - 'load_screen': show the load game screen
+        """
+        target = payload.get("target", "").strip().lower()
+        step = payload.get("step", None)
+
+        if target in ("wizard", "new_game", "navigate_wizard"):
+            bridge.navigate_to("wizard", 1)
+            return {"status": "ok", "screen": "wizard", "wizard_step": 1}
+        elif target in ("landing", "home", "start_menu", "navigate_landing"):
+            bridge.navigate_to("landing")
+            return {"status": "ok", "screen": "landing"}
+        elif target in ("wizard_next", "next"):
+            current_step = bridge.wizard_step
+            new_step = min(current_step + 1, 4)
+            bridge.set_wizard_step(new_step)
+            return {"status": "ok", "screen": "wizard", "wizard_step": new_step}
+        elif target in ("wizard_prev", "back", "wizard_back"):
+            current_step = bridge.wizard_step
+            new_step = max(current_step - 1, 1)
+            bridge.set_wizard_step(new_step)
+            return {"status": "ok", "screen": "wizard", "wizard_step": new_step}
+        elif target in ("load_screen", "load_game", "show_load_screen"):
+            bridge.navigate_to("loading")
+            return {"status": "ok", "screen": "loading"}
+
+        # ── Tab switching (in-game navigation) ──
+        # Accept "tab:<id>" or just the tab name directly
+        tab_target = target.replace("tab:", "").replace("tab_", "")
+        # Also accept friendly names → tab IDs
+        tab_aliases = {
+            "home": "dashboard", "overview": "dashboard",
+            "dev": "development", "r&d": "development", "rd": "development",
+            "race": "raceops", "race_ops": "raceops", "racing": "raceops",
+            "play_by_play": "pbp", "playbyplay": "pbp", "broadcast": "pbp",
+            "money": "finance", "budget": "finance",
+            "sponsor": "sponsors", "sponsorships": "sponsors",
+            "statistics": "stats", "racing_stats": "stats",
+            "manager": "career", "manager_career": "career",
+            "schedule": "calendar", "dates": "calendar",
+            "assistant": "ai", "ai_assistant": "ai", "chat": "ai",
+            "penalty": "penalties", "infractions": "penalties",
+            "logs": "history", "event_log": "history",
+            "explorer": "data", "ftb_data": "data", "database": "data",
+        }
+        resolved_tab = tab_aliases.get(tab_target, tab_target)
+        if bridge.switch_tab(resolved_tab):
+            return {"status": "ok", "screen": "game", "active_tab": resolved_tab}
+
+        return JSONResponse({"error": f"Unknown navigate target: {target}"}, 400)
+
+    # ──── REST: Set Wizard Field ────
+    WIZARD_FIELD_OPTIONS = {
+        "save_mode": ["replayable", "permanent"],
+        "tier": ["grassroots", "formula_v", "formula_x", "formula_y", "formula_z"],
+        "origin": ["game_show_winner", "grassroots_hustler", "former_driver",
+                    "corporate_spinout", "engineering_savant"],
+        "ownership": ["self_owned", "hired_manager"],
+    }
+
+    @app.post("/api/wizard_field")
+    async def set_wizard_field(payload: Dict[str, Any]):
+        """Set a wizard field value (tier, origin, save_mode, ownership, seed, etc.).
+        Used by Audio CLI to select options during the setup wizard.
+
+        Supported fields:
+          - save_mode: 'replayable' or 'permanent'
+          - seed: any integer or string
+          - tier: 'grassroots', 'formula_v', 'formula_x', 'formula_y', 'formula_z'
+          - origin: 'game_show_winner', 'grassroots_hustler', 'former_driver',
+                    'corporate_spinout', 'engineering_savant'
+          - ownership: 'self_owned' or 'hired_manager'
+          - team_name: any string
+          - manager_first: any string
+          - manager_last: any string
+          - manager_age: integer 22-70
+          - player_identity: comma-separated string of tags
+        """
+        field = payload.get("field", "").strip()
+        value = payload.get("value")
+
+        if not field:
+            return JSONResponse({"error": "No field specified"}, 400)
+
+        # Validate constrained fields
+        if field in WIZARD_FIELD_OPTIONS:
+            allowed = WIZARD_FIELD_OPTIONS[field]
+            if value not in allowed:
+                return JSONResponse({
+                    "error": f"Invalid value '{value}' for {field}. "
+                             f"Allowed: {', '.join(allowed)}"
+                }, 400)
+
+        bridge.set_wizard_field(field, value)
+        return {"status": "ok", "field": field, "value": value}
+
+    # ──── REST: Generic input field (audio keyboard backend) ────
+    @app.post("/api/input_field")
+    async def input_field(payload: Dict[str, Any]):
+        """Generic field input endpoint — receives any field name and text value
+        from the audio keyboard (or any other text-entry mechanism).
+
+        Currently routes through the wizard field pipeline, which broadcasts
+        the value to connected WebSocket clients so the Svelte UI updates.
+        Extensible: as new input contexts are added (e.g. in-game rename,
+        search, chat), this endpoint can route to the appropriate handler.
+        """
+        field = payload.get("field", "").strip()
+        value = payload.get("value")
+
+        if not field:
+            return JSONResponse({"error": "No field specified"}, 400)
+        if value is None:
+            return JSONResponse({"error": "No value specified"}, 400)
+
+        # Validate constrained fields (same rules as wizard_field)
+        if field in WIZARD_FIELD_OPTIONS:
+            allowed = WIZARD_FIELD_OPTIONS[field]
+            if value not in allowed:
+                return JSONResponse({
+                    "error": f"Invalid value '{value}' for {field}. "
+                             f"Allowed: {', '.join(allowed)}"
+                }, 400)
+
+        # Route through the bridge — broadcasts via WebSocket to all clients
+        bridge.set_wizard_field(field, value)
+        return {"status": "ok", "field": field, "value": value}
 
     # ──── REST: Send command to FTB ────
     @app.post("/api/command")
@@ -976,6 +1384,92 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q.put({"cmd": "ftb_equip_part", "part_id": payload.get("part_id", "")})
         return {"status": "queued"}
 
+    # ──── REST: R&D / Development Actions ────
+    @app.get("/api/rd_catalog")
+    async def get_rd_catalog():
+        """Return the R&D project catalog so the frontend can display available projects."""
+        try:
+            from plugins.ftb_game import RD_PROJECT_CATALOG
+            catalog = []
+            for project_id, template in RD_PROJECT_CATALOG.items():
+                catalog.append({
+                    "id": project_id,
+                    "name": template.get("name", project_id),
+                    "type": template.get("type", "car_upgrade"),
+                    "cost": template.get("cost", 0),
+                    "duration_ticks": template.get("duration_ticks", 14),
+                    "base_success_rate": round(template.get("base_success_rate", 0.7), 2),
+                    "target_stat": template.get("target_stat", ""),
+                    "target_improvement": template.get("target_improvement", 0),
+                    "generates_part": template.get("generates_part", False),
+                    "part_type": template.get("part_type", ""),
+                    "description": template.get("description", ""),
+                    "risk_level": template.get("risk_level", "medium"),
+                    "min_tier": template.get("min_tier", 1),
+                })
+            return {"catalog": catalog}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    @app.post("/api/rd/start")
+    async def start_rd_project(payload: Dict[str, Any]):
+        """Start a new R&D project."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        project_id = payload.get("project_id", "")
+        if not project_id:
+            return JSONResponse({"error": "project_id is required"}, 400)
+        ftb_cmd_q.put({
+            "cmd": "ftb_start_development",
+            "config": {
+                "subsystem": payload.get("subsystem", ""),
+                "budget": payload.get("budget", 0),
+                "risk_level": payload.get("risk_level", 0.5),
+                "engineers": [],
+                "priority": payload.get("priority", "normal"),
+            },
+            "project_id": project_id,
+        })
+        return {"status": "queued", "project_id": project_id}
+
+    @app.post("/api/rd/cancel")
+    async def cancel_rd_project(payload: Dict[str, Any]):
+        """Cancel an active R&D project."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        project_id = payload.get("project_id", "")
+        if not project_id:
+            return JSONResponse({"error": "project_id is required"}, 400)
+        ftb_cmd_q.put({"cmd": "ftb_cancel_rd_project", "project_id": project_id})
+        return {"status": "queued", "project_id": project_id}
+
+    @app.post("/api/infrastructure/upgrade")
+    async def upgrade_infrastructure(payload: Dict[str, Any]):
+        """Upgrade a facility."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        facility = payload.get("facility", "")
+        amount = payload.get("amount", 10)
+        if not facility:
+            return JSONResponse({"error": "facility is required"}, 400)
+        ftb_cmd_q.put({"cmd": "ftb_upgrade_infrastructure", "facility": facility, "amount": amount})
+        return {"status": "queued", "facility": facility}
+
+    @app.post("/api/infrastructure/sell")
+    async def sell_infrastructure(payload: Dict[str, Any]):
+        """Sell a facility."""
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        facility = payload.get("facility", "")
+        if not facility:
+            return JSONResponse({"error": "facility is required"}, 400)
+        ftb_cmd_q.put({"cmd": "ftb_sell_infrastructure", "facility": facility})
+        return {"status": "queued", "facility": facility}
+
     # ──── REST: Staff / Job Board Actions ────
     @app.post("/api/staff/hire")
     async def hire_free_agent(payload: Dict[str, Any]):
@@ -1002,7 +1496,7 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q.put({"cmd": "ftb_apply_job", "listing_id": payload.get("listing_id", 0)})
         return {"status": "queued"}
 
-    # ──── REST: New Game ────
+    # ──── REST: New Game (creates the save — called from wizard confirmation) ────
     @app.post("/api/new_game")
     async def new_game(payload: Dict[str, Any]):
         ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
@@ -1021,6 +1515,8 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
             "manager_first_name": payload.get("manager_first_name", "Manager"),
             "manager_last_name": payload.get("manager_last_name", "Unknown"),
         })
+        # Update UI screen to loading while game is being created
+        bridge.navigate_to("loading")
         return {"status": "queued"}
 
     # ──── REST: Load Game ────
@@ -1041,9 +1537,25 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
         if not ftb_cmd_q:
             return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
-        path = payload.get("path", "")
+        name = payload.get("name", "").strip()
+        path = payload.get("path", "").strip()
+        if name:
+            # Resolve name → full path in saves/ directory
+            if not name.endswith(".json"):
+                name += ".json"
+            # Sanitize: strip slashes and dangerous chars
+            name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
+            saves_dir = os.path.join(
+                shared_runtime.get("STATION_DIR", "."), "..", "..", "saves"
+            )
+            saves_dir = os.path.normpath(saves_dir)
+            if not os.path.isdir(saves_dir):
+                root = os.environ.get("RADIO_OS_ROOT", "")
+                saves_dir = os.path.join(root, "saves") if root else "saves"
+            os.makedirs(saves_dir, exist_ok=True)
+            path = os.path.join(saves_dir, name)
         ftb_cmd_q.put({"cmd": "ftb_save", "path": path if path else None})
-        return {"status": "queued"}
+        return {"status": "queued", "path": path or "autosave"}
 
     # ──── REST: Delete Save ────
     @app.delete("/api/saves/{filename}")

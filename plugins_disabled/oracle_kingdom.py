@@ -193,6 +193,41 @@ class TimeConfig:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+# ── Time State Model ──────────────────────────────────────────
+#
+# Determined by real-world elapsed time since last player session.
+#
+#   ACTIVE     — Player present.  Full-fidelity tick simulation.
+#   IDLE       — Short absence (minutes → hours).  Reduced fidelity.
+#   DEEP_SLEEP — Long absence (days → months → years).  Epoch compression.
+#
+# The world is autonomous.  The Oracle is not required for the sim
+# to progress.  But full-fidelity tick replay during long absences
+# is prohibited — temporal compression is required.
+
+class TimeState(Enum):
+    ACTIVE     = auto()   # player present — full fidelity
+    IDLE       = auto()   # short absence  — reduced fidelity
+    DEEP_SLEEP = auto()   # long absence   — epoch compression
+
+    @staticmethod
+    def from_elapsed_seconds(elapsed: float) -> "TimeState":
+        """
+        Classify absence duration into a time state.
+
+        Thresholds:
+          0–300s (5 min)         → ACTIVE  (just stepped away)
+          300s–86400s (5m–24h)   → IDLE    (hours absent)
+          >86400s (>1 day)       → DEEP_SLEEP (days/weeks/months)
+        """
+        if elapsed < 300:
+            return TimeState.ACTIVE
+        elif elapsed < 86400:
+            return TimeState.IDLE
+        else:
+            return TimeState.DEEP_SLEEP
+
+
 # ============================================================
 # SECTION 3: ORACLE BUILD (Character Creation)
 # ============================================================
@@ -330,6 +365,402 @@ class OracleBuild:
         ob.dread = d.get("dread", 0.0)
         ob.trajectory = d.get("trajectory", {})
         return ob
+
+
+# ============================================================
+# SECTION 3B: ORACLE LIFECYCLE (Sleep / Wake System)
+# ============================================================
+#
+# The oracle is a PERTURBATION LAYER, not a steering wheel.
+# The world engine runs independently.  Oracles inject decrees
+# during brief wake windows, then sleep.  During dormancy the
+# kingdom drifts on its own — faith erodes, divergence grows,
+# shock susceptibility rises.
+#
+# Design:
+#   SLEEPING → WAKING → ACTIVE → FADING → SLEEPING
+#
+# Wake cadence is trait-influenced:
+#   High severity  → shorter sleep cycles (impatient oracle)
+#   High doubt     → shorter active duration (hesitant oracle)
+#   High charisma  → longer active duration (compelling oracle)
+#   High paranoia  → shorter wake intervals (vigilant oracle)
+#
+# Deep Field gets a simplified boolean (active/sleeping) version
+# for O(1) cost.
+#
+# Performance: O(1) per civ per tick.  No per-tick RNG.
+# Transitions precompute next duration at transition time.
+
+class OracleLifecycleState(Enum):
+    """The four phases of oracle consciousness."""
+    SLEEPING = auto()     # dormant — no decrees, faith erodes
+    WAKING = auto()       # ramping up — intensity 0→1, no decrees yet
+    ACTIVE = auto()       # fully present — decrees enabled
+    FADING = auto()       # winding down — intensity 1→0, decrees stop
+
+
+@dataclass
+class OracleLifecycle:
+    """
+    Per-oracle lifecycle state.
+
+    Attached to each KingdomState (player + tracked).
+    Deterministic: all transitions driven by precomputed timers
+    set at state-transition time using seeded RNG.
+    """
+    state: OracleLifecycleState = OracleLifecycleState.SLEEPING
+    ticks_until_transition: int = 50    # countdown to next state change
+    intensity: float = 0.0              # 0.0–1.0 ramp (WAKING/FADING)
+
+    # ── Cadence parameters (derived from traits at init) ──
+    wake_interval_mean: float = 200.0   # mean sleep duration
+    wake_interval_variance: float = 60.0
+    wake_duration_mean: float = 80.0    # mean active duration
+    wake_duration_variance: float = 20.0
+    ramp_duration: int = 20             # ticks for WAKING/FADING ramp
+
+    # ── Derived from personality ──
+    fatigue_factor: float = 1.0         # multiplier on sleep duration
+
+    # ── History ──
+    last_wake_tick: int = 0
+    last_sleep_tick: int = 0
+    total_active_ticks: int = 0
+    total_sleep_ticks: int = 0
+    wake_count: int = 0                 # number of completed wake cycles
+
+    def to_dict(self) -> dict:
+        return {
+            "state": self.state.name,
+            "ticks_until_transition": self.ticks_until_transition,
+            "intensity": self.intensity,
+            "wake_interval_mean": self.wake_interval_mean,
+            "wake_interval_variance": self.wake_interval_variance,
+            "wake_duration_mean": self.wake_duration_mean,
+            "wake_duration_variance": self.wake_duration_variance,
+            "ramp_duration": self.ramp_duration,
+            "fatigue_factor": self.fatigue_factor,
+            "last_wake_tick": self.last_wake_tick,
+            "last_sleep_tick": self.last_sleep_tick,
+            "total_active_ticks": self.total_active_ticks,
+            "total_sleep_ticks": self.total_sleep_ticks,
+            "wake_count": self.wake_count,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "OracleLifecycle":
+        lc = cls()
+        lc.state = OracleLifecycleState[d.get("state", "SLEEPING")]
+        lc.ticks_until_transition = d.get("ticks_until_transition", 50)
+        lc.intensity = d.get("intensity", 0.0)
+        lc.wake_interval_mean = d.get("wake_interval_mean", 200.0)
+        lc.wake_interval_variance = d.get("wake_interval_variance", 60.0)
+        lc.wake_duration_mean = d.get("wake_duration_mean", 80.0)
+        lc.wake_duration_variance = d.get("wake_duration_variance", 20.0)
+        lc.ramp_duration = d.get("ramp_duration", 20)
+        lc.fatigue_factor = d.get("fatigue_factor", 1.0)
+        lc.last_wake_tick = d.get("last_wake_tick", 0)
+        lc.last_sleep_tick = d.get("last_sleep_tick", 0)
+        lc.total_active_ticks = d.get("total_active_ticks", 0)
+        lc.total_sleep_ticks = d.get("total_sleep_ticks", 0)
+        lc.wake_count = d.get("wake_count", 0)
+        return lc
+
+
+class OracleLifecycleEngine:
+    """
+    Tick driver for oracle sleep/wake cycles.
+
+    Deterministic.  No per-tick RNG calls — all randomness happens
+    at transition time when the next duration is precomputed.
+
+    The engine only modifies the OracleLifecycle state and provides
+    multipliers that callers use to scale decree probability,
+    faith drift, shock susceptibility, etc.
+    """
+
+    # ── Dormancy drift modifiers ──
+    # Applied to the kingdom every tick the oracle is SLEEPING.
+    DORMANCY_FAITH_DECAY: float = 0.035      # public_faith drift per tick
+    DORMANCY_DIVERGENCE_GROWTH: float = 0.02 # interpretation_divergence per tick
+    DORMANCY_SHOCK_SUSCEPTIBILITY: float = 0.08  # added shock prob multiplier
+
+    # ── Active influence scaling ──
+    # Multiplicative modifiers when oracle is ACTIVE (scaled by intensity).
+    ACTIVE_FAITH_BOOST: float = 0.5          # faith drift multiplier
+    ACTIVE_IDEOLOGY_BOOST: float = 0.3       # ideological drift multiplier
+    ACTIVE_SHOCK_DAMPING: float = 0.2        # shock prob reduction
+    ACTIVE_STABILITY_BOOST: float = 0.2      # institutional stabilization
+
+    @classmethod
+    def build_from_oracle(cls, oracle: "OracleBuild", civ_seed: int,
+                          global_seed: int) -> OracleLifecycle:
+        """
+        Initialize lifecycle parameters from oracle personality traits.
+
+        Deterministic: uses (global_seed + civ_seed * 7919) as RNG seed.
+        """
+        rng = SeededRNG(global_seed + civ_seed * 7919)
+        lc = OracleLifecycle()
+
+        # Extract relevant traits (normalised to 0–1 from 5–50 range)
+        severity = (oracle.effective("severity") - 5.0) / 45.0
+        doubt = (oracle.effective("doubt") - 5.0) / 45.0
+        charisma = (oracle.effective("charisma") - 5.0) / 45.0
+        paranoia = (oracle.effective("paranoia") - 5.0) / 45.0
+        conviction = (oracle.effective("conviction") - 5.0) / 45.0
+
+        # ── Sleep interval: base 200, modified by traits ──
+        # High paranoia → more vigilant → shorter sleep
+        # High severity → more interventionist → shorter sleep
+        # High conviction → confident → can sleep longer
+        sleep_mod = 1.0 - paranoia * 0.3 - severity * 0.2 + conviction * 0.15
+        sleep_mod = max(0.4, min(1.6, sleep_mod))
+        lc.wake_interval_mean = 200.0 * sleep_mod
+        lc.wake_interval_variance = 60.0 * sleep_mod
+
+        # ── Active duration: base 80, modified by traits ──
+        # High charisma → sustains attention → longer active
+        # High doubt → self-undermining → shorter active
+        # High severity → intense but tiring → slightly shorter
+        active_mod = 1.0 + charisma * 0.4 - doubt * 0.35 - severity * 0.1
+        active_mod = max(0.3, min(2.0, active_mod))
+        lc.wake_duration_mean = 80.0 * active_mod
+        lc.wake_duration_variance = 20.0 * active_mod
+
+        # ── Ramp duration ──
+        # High charisma → smoother transitions
+        lc.ramp_duration = max(5, int(20 + charisma * 10 - paranoia * 5))
+
+        # ── Fatigue factor ──
+        # Higher = oracle tires faster (sleep lasts longer over time)
+        lc.fatigue_factor = 1.0 + doubt * 0.2 - conviction * 0.1
+        lc.fatigue_factor = max(0.7, min(1.5, lc.fatigue_factor))
+
+        # ── Initial sleep duration (staggered start) ──
+        # Random initial offset so oracles don't wake in sync
+        initial_sleep = int(rng.gauss(lc.wake_interval_mean * 0.5,
+                                       lc.wake_interval_variance))
+        lc.ticks_until_transition = max(10, initial_sleep)
+        lc.state = OracleLifecycleState.SLEEPING
+        lc.intensity = 0.0
+
+        return lc
+
+    @classmethod
+    def tick(cls, lc: OracleLifecycle, rng: SeededRNG,
+             current_tick: int) -> OracleLifecycleState:
+        """
+        Advance the lifecycle by one tick.  O(1).
+
+        Returns the new state.  RNG is only consumed during
+        transitions (to precompute next duration).
+        """
+        lc.ticks_until_transition -= 1
+
+        if lc.state == OracleLifecycleState.SLEEPING:
+            lc.total_sleep_ticks += 1
+            if lc.ticks_until_transition <= 0:
+                # → WAKING
+                lc.state = OracleLifecycleState.WAKING
+                lc.ticks_until_transition = lc.ramp_duration
+                lc.intensity = 0.0
+                lc.last_wake_tick = current_tick
+
+        elif lc.state == OracleLifecycleState.WAKING:
+            # Ramp intensity 0 → 1
+            if lc.ramp_duration > 0:
+                elapsed = lc.ramp_duration - lc.ticks_until_transition
+                lc.intensity = min(1.0, elapsed / max(1, lc.ramp_duration))
+            else:
+                lc.intensity = 1.0
+            if lc.ticks_until_transition <= 0:
+                # → ACTIVE
+                lc.state = OracleLifecycleState.ACTIVE
+                lc.intensity = 1.0
+                # Precompute active duration
+                active_dur = int(rng.gauss(lc.wake_duration_mean,
+                                            lc.wake_duration_variance))
+                lc.ticks_until_transition = max(15, active_dur)
+                lc.wake_count += 1
+
+        elif lc.state == OracleLifecycleState.ACTIVE:
+            lc.total_active_ticks += 1
+            lc.intensity = 1.0
+            if lc.ticks_until_transition <= 0:
+                # → FADING
+                lc.state = OracleLifecycleState.FADING
+                lc.ticks_until_transition = lc.ramp_duration
+                lc.intensity = 1.0
+
+        elif lc.state == OracleLifecycleState.FADING:
+            # Ramp intensity 1 → 0
+            if lc.ramp_duration > 0:
+                elapsed = lc.ramp_duration - lc.ticks_until_transition
+                lc.intensity = max(0.0, 1.0 - elapsed / max(1, lc.ramp_duration))
+            else:
+                lc.intensity = 0.0
+            if lc.ticks_until_transition <= 0:
+                # → SLEEPING
+                lc.state = OracleLifecycleState.SLEEPING
+                lc.intensity = 0.0
+                lc.last_sleep_tick = current_tick
+                # Precompute next sleep duration
+                # Fatigue grows slightly with each cycle
+                fatigue_mult = 1.0 + (lc.wake_count * 0.02) * lc.fatigue_factor
+                sleep_dur = int(rng.gauss(lc.wake_interval_mean * fatigue_mult,
+                                           lc.wake_interval_variance))
+                lc.ticks_until_transition = max(30, sleep_dur)
+
+        return lc.state
+
+    @classmethod
+    def is_decree_allowed(cls, lc: OracleLifecycle) -> bool:
+        """Decrees only during ACTIVE state."""
+        return lc.state == OracleLifecycleState.ACTIVE
+
+    @classmethod
+    def get_influence_modifiers(cls, lc: OracleLifecycle) -> dict:
+        """
+        Return multiplicative modifiers based on lifecycle state.
+
+        Keys:
+          faith_mult:      applied to faith drift calculations
+          ideology_mult:   applied to ideological drift
+          shock_mult:      applied to shock probability
+          stability_mult:  applied to institutional stabilization
+
+        During ACTIVE: boosts proportional to intensity.
+        During SLEEPING: faith decays, shock susceptibility rises.
+        During WAKING/FADING: partial intensity scaling.
+        """
+        if lc.state == OracleLifecycleState.ACTIVE:
+            return {
+                "faith_mult": 1.0 + cls.ACTIVE_FAITH_BOOST * lc.intensity,
+                "ideology_mult": 1.0 + cls.ACTIVE_IDEOLOGY_BOOST * lc.intensity,
+                "shock_mult": max(0.5, 1.0 - cls.ACTIVE_SHOCK_DAMPING * lc.intensity),
+                "stability_mult": 1.0 + cls.ACTIVE_STABILITY_BOOST * lc.intensity,
+                "faith_passive_decay": 0.0,
+                "divergence_passive_growth": 0.0,
+            }
+        elif lc.state == OracleLifecycleState.SLEEPING:
+            return {
+                "faith_mult": 1.0,
+                "ideology_mult": 1.0,
+                "shock_mult": 1.0 + cls.DORMANCY_SHOCK_SUSCEPTIBILITY,
+                "stability_mult": 1.0,
+                "faith_passive_decay": cls.DORMANCY_FAITH_DECAY,
+                "divergence_passive_growth": cls.DORMANCY_DIVERGENCE_GROWTH,
+            }
+        else:
+            # WAKING or FADING — partial intensity
+            return {
+                "faith_mult": 1.0 + cls.ACTIVE_FAITH_BOOST * lc.intensity * 0.5,
+                "ideology_mult": 1.0 + cls.ACTIVE_IDEOLOGY_BOOST * lc.intensity * 0.5,
+                "shock_mult": 1.0 + cls.DORMANCY_SHOCK_SUSCEPTIBILITY * (1.0 - lc.intensity),
+                "stability_mult": 1.0 + cls.ACTIVE_STABILITY_BOOST * lc.intensity * 0.3,
+                "faith_passive_decay": cls.DORMANCY_FAITH_DECAY * (1.0 - lc.intensity),
+                "divergence_passive_growth": cls.DORMANCY_DIVERGENCE_GROWTH * (1.0 - lc.intensity),
+            }
+
+    @classmethod
+    def apply_dormancy_effects(cls, ks: "KingdomState", mods: dict):
+        """
+        Apply passive dormancy effects to a kingdom's belief layer.
+
+        Called every tick.  During ACTIVE this is a no-op (zero decay).
+        During SLEEPING faith erodes and divergence grows.
+        """
+        if mods["faith_passive_decay"] > 0:
+            ks.belief.public_faith = max(5, ks.belief.public_faith - mods["faith_passive_decay"])
+        if mods["divergence_passive_growth"] > 0:
+            ks.belief.interpretation_divergence = min(
+                95, ks.belief.interpretation_divergence + mods["divergence_passive_growth"]
+            )
+
+    @classmethod
+    def force_wake(cls, lc: OracleLifecycle, current_tick: int):
+        """Force transition to WAKING (for player session start)."""
+        if lc.state == OracleLifecycleState.SLEEPING:
+            lc.state = OracleLifecycleState.WAKING
+            lc.ticks_until_transition = lc.ramp_duration
+            lc.intensity = 0.0
+            lc.last_wake_tick = current_tick
+
+    @classmethod
+    def force_fade(cls, lc: OracleLifecycle):
+        """Force transition to FADING (for player session end)."""
+        if lc.state in (OracleLifecycleState.ACTIVE, OracleLifecycleState.WAKING):
+            lc.state = OracleLifecycleState.FADING
+            lc.ticks_until_transition = lc.ramp_duration
+            lc.intensity = 1.0 if lc.state == OracleLifecycleState.ACTIVE else lc.intensity
+
+
+# ── Deep Field Oracle Lifecycle (Simplified) ──────────────────
+
+@dataclass
+class MinorCivOracleState:
+    """
+    Simplified oracle lifecycle for Deep Field civs.
+
+    Boolean active/sleeping — no ramp states, no intensity scaling.
+    Active = short burst (5–20 ticks).
+    Sleeping = long dormancy (100–500 ticks).
+
+    Cheap.  O(1) per tick.  One countdown integer.
+    """
+    oracle_active: bool = False
+    ticks_until_flip: int = 200       # countdown to next active/sleep toggle
+    active_duration_mean: float = 12.0
+    sleep_duration_mean: float = 300.0
+    last_active_tick: int = 0
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MinorCivOracleState":
+        obj = cls()
+        for k, v in d.items():
+            if hasattr(obj, k):
+                setattr(obj, k, v)
+        return obj
+
+    @classmethod
+    def build(cls, civ_seed: int, global_seed: int) -> "MinorCivOracleState":
+        """Create initial state with staggered sleep offset."""
+        rng = SeededRNG(global_seed + civ_seed * 3571)
+        st = cls()
+        # Stagger initial sleep so oracles don't sync
+        st.ticks_until_flip = max(10, int(rng.gauss(st.sleep_duration_mean * 0.5,
+                                                     st.sleep_duration_mean * 0.25)))
+        st.oracle_active = False
+        return st
+
+    @classmethod
+    def tick(cls, st: "MinorCivOracleState", rng: SeededRNG,
+             current_tick: int) -> bool:
+        """
+        Advance by one tick.  Returns True if oracle is active.
+        RNG only consumed on transitions.
+        """
+        st.ticks_until_flip -= 1
+        if st.ticks_until_flip <= 0:
+            if st.oracle_active:
+                # Active → Sleep
+                st.oracle_active = False
+                sleep_dur = int(rng.gauss(st.sleep_duration_mean,
+                                          st.sleep_duration_mean * 0.3))
+                st.ticks_until_flip = max(50, sleep_dur)
+            else:
+                # Sleep → Active
+                st.oracle_active = True
+                st.last_active_tick = current_tick
+                active_dur = int(rng.gauss(st.active_duration_mean,
+                                           st.active_duration_mean * 0.3))
+                st.ticks_until_flip = max(3, active_dur)
+        return st.oracle_active
 
 
 # ============================================================
@@ -2462,70 +2893,70 @@ ERA_DETECTION_RULES: List[Dict[str, Any]] = [
     {
         "era": EraIdentity.GOLDEN_AGE,
         "conditions": {
-            "health_composite_min": 75.0,
-            "cultural_confidence_min": 70.0,
-            "cohesion_min": 65.0,
-            "legitimacy_min": 70.0,
-            "food_stores_min": 50.0,
+            "health_composite_min": 70.0,        # was 75 — still rare
+            "cultural_confidence_min": 60.0,      # was 70
+            "cohesion_min": 55.0,                 # was 65
+            "legitimacy_min": 65.0,               # was 70
+            "food_stores_min": 45.0,              # was 50
         },
     },
     {
         "era": EraIdentity.RENAISSANCE,
         "conditions": {
-            "cultural_confidence_min": 65.0,
-            "literacy_min": 55.0,
-            "cohesion_min": 50.0,
-            "interpretation_divergence_max": 25.0,
+            "cultural_confidence_min": 55.0,      # was 65
+            "literacy_min": 45.0,                 # was 55
+            "cohesion_min": 40.0,                 # was 50
+            "interpretation_divergence_max": 30.0, # was 25
         },
     },
     {
         "era": EraIdentity.FAMINE_ERA,
         "conditions": {
-            "food_stores_max": 20.0,
-            "resource_pressure_min": 50.0,
+            "food_stores_max": 25.0,              # was 20 — easier to enter
+            "resource_pressure_min": 40.0,        # was 50
         },
     },
     {
         "era": EraIdentity.AUTHORITARIAN_CONSOLIDATION,
         "conditions": {
-            "enforcement_capacity_min": 70.0,
-            "law_rigidity_min": 60.0,
-            "fear_level_min": 40.0,
+            "enforcement_capacity_min": 65.0,     # was 70
+            "law_rigidity_min": 55.0,             # was 60
+            "fear_level_min": 35.0,               # was 40
         },
     },
     {
         "era": EraIdentity.IDEOLOGICAL_FRACTURE,
         "conditions": {
-            "interpretation_divergence_min": 35.0,
-            "public_faith_max": 40.0,
+            "interpretation_divergence_min": 30.0, # was 35
+            "public_faith_max": 45.0,             # was 40 — easier to enter
         },
     },
     {
         "era": EraIdentity.OLIGARCHIC_GRIP,
         "conditions": {
-            "max_faction_share_min": 40.0,  # one faction > 40% influence
-            "class_tension_min": 45.0,
+            "max_faction_share_min": 35.0,        # was 40
+            "class_tension_min": 40.0,            # was 45
         },
     },
     {
         "era": EraIdentity.MILITANT_POSTURE,
         "conditions": {
-            "external_threat_min": 55.0,
-            "enforcement_capacity_min": 55.0,
+            "external_threat_min": 45.0,          # was 55
+            "enforcement_capacity_min": 50.0,     # was 55
         },
     },
     {
         "era": EraIdentity.REFORMATION,
         "conditions": {
-            "law_rigidity_max": 30.0,
-            "institutional_strength_min": 45.0,
-            "corruption_max": 30.0,
+            "law_rigidity_max": 35.0,             # was 30 — more room to qualify
+            "institutional_strength_min": 40.0,   # was 45
+            "corruption_max": 35.0,               # was 30
         },
     },
     {
         "era": EraIdentity.DECLINE,
         "conditions": {
-            "health_composite_max": 35.0,
+            "health_composite_max": 40.0,         # was 35 — easier to enter decline
         },
     },
     # STABLE is the fallback — no explicit conditions.
@@ -4646,6 +5077,7 @@ class KingdomState:
 
     # ---- Oracle ----
     oracle: OracleBuild = field(default_factory=OracleBuild)
+    oracle_lifecycle: OracleLifecycle = field(default_factory=OracleLifecycle)
 
     # ---- ensemble cast ----
     characters: Dict[str, Character] = field(default_factory=dict)  # character_id → Character
@@ -4719,6 +5151,14 @@ class KingdomState:
         "cultural_memory_strength": 50.0,
     })
 
+    # ---- Phase 15: Oracle Archetype (synced from court layer) ----
+    # This string is set by the court layer each tick so the kingdom
+    # engine can apply mechanical modifiers without importing court code.
+    # Values: "UNKNOWN", "THE_SILENT", "THE_HAWK", "THE_MERCHANT",
+    #         "THE_REFORMIST", "THE_PIOUS", "THE_POPULIST", "THE_TYRANT",
+    #         "THE_ERRATIC"
+    oracle_archetype: str = "UNKNOWN"
+
     # ---- Phase 7: Terminal Resolution ----
     collapse_duration: int = 0     # ticks of continuous health < threshold
     terminal_resolutions: List[TerminalResolutionRecord] = field(default_factory=list)
@@ -4747,6 +5187,7 @@ class KingdomState:
             "political": self.political.to_dict(),
             "belief": self.belief.to_dict(),
             "oracle": self.oracle.to_dict(),
+            "oracle_lifecycle": self.oracle_lifecycle.to_dict(),
             "characters": {k: v.to_dict() for k, v in self.characters.items()},
             "relationships": self.relationships.to_list(),
             "factions": {k: v.to_dict() for k, v in self.factions.items()},
@@ -4769,6 +5210,7 @@ class KingdomState:
             "collapse_duration": self.collapse_duration,
             "terminal_resolutions": [r.to_dict() for r in self.terminal_resolutions],
             "terminal_grace_until": self.terminal_grace_until,
+            "oracle_archetype": self.oracle_archetype,
             "scar_cooldowns": dict(self.scar_cooldowns),
             "scar_counters": dict(self.scar_counters),
         }
@@ -4785,6 +5227,8 @@ class KingdomState:
         ks.political = PoliticalLayer.from_dict(d.get("political", {}))
         ks.belief = BeliefLayer.from_dict(d.get("belief", {}))
         ks.oracle = OracleBuild.from_dict(d.get("oracle", {}))
+        if "oracle_lifecycle" in d:
+            ks.oracle_lifecycle = OracleLifecycle.from_dict(d["oracle_lifecycle"])
         ks.characters = {
             k: Character.from_dict(v) for k, v in d.get("characters", {}).items()
         }
@@ -4816,6 +5260,7 @@ class KingdomState:
             for r in d.get("terminal_resolutions", [])
         ]
         ks.terminal_grace_until = d.get("terminal_grace_until", 0)
+        ks.oracle_archetype = d.get("oracle_archetype", "UNKNOWN")
         ks.scar_cooldowns = d.get("scar_cooldowns", {})
         saved_counters = d.get("scar_counters", {})
         for k in ks.scar_counters:
@@ -4885,6 +5330,1673 @@ class WorldState:
         ws.last_session_ts = d.get("last_session_ts", 0.0)
         ws.created_ts = d.get("created_ts", 0.0)
         return ws
+
+
+# ============================================================
+# SECTION 11B: THREE-LAYER WORLD ONTOLOGY (Phase 12)
+# ============================================================
+#
+# The world has three resolution layers:
+#
+#   Layer C — The Player Kingdom ("Bitcoin tier")
+#       Full simulation, direct decree interaction, LLM narration.
+#       1 entity.
+#
+#   Layer B — The Tracked Field (Top ~20)
+#       Full KingdomState + OracleBuild + decree logic + events.
+#       Promoted dynamically by importance score.
+#       Demoted when they stagnate or lose relevance.
+#
+#   Layer A — The Deep Field (21–500+)
+#       MinorCiv: 7 numbers, no narrative, no decrees.
+#       Updated cheaply every tick.  Macro-pressure fields only.
+#       Alive enough to make a push into the Top 20.
+#       They're playing a different game.
+#
+# The importance score is dynamic.  A rank-347 civ can surge into
+# narrative relevance if its shock_potential crosses threshold.
+# That's where the drama lives.
+
+
+# ── Macro Shock Types ─────────────────────────────────────────
+
+class MacroShockType(Enum):
+    """Random macro-level shocks that can hit any civ in the Deep Field."""
+    CLIMATE_ANOMALY = auto()          # sudden resource disruption
+    RESOURCE_DISCOVERY = auto()       # gold rush / fertile land found
+    RELIGIOUS_AWAKENING = auto()      # faith contagion event
+    TECHNOLOGICAL_BREAKTHROUGH = auto()  # literacy / infrastructure jump
+    PLAGUE = auto()                   # population + stability crash
+    CIVIL_WAR = auto()                # volatility + instability spike
+    TRADE_BOOM = auto()               # economic output surge
+    MIGRATION_WAVE = auto()           # population shift (+ or -)
+    PROPHETIC_SCHISM = auto()         # belief fracture
+    MILITARY_CONSOLIDATION = auto()   # enforcement surge
+
+
+# Shock profiles: (min_magnitude, max_magnitude, affected_fields, probability_per_tick)
+MACRO_SHOCK_PROFILES: Dict[MacroShockType, dict] = {
+    MacroShockType.CLIMATE_ANOMALY: {
+        "prob": 0.0003, "mag": (5, 25),
+        "effects": {"wealth_index": -0.5, "stability": -0.3, "volatility": 1.0},
+    },
+    MacroShockType.RESOURCE_DISCOVERY: {
+        "prob": 0.0002, "mag": (10, 40),
+        "effects": {"wealth_index": 1.0, "momentum": 0.5, "volatility": 0.3},
+    },
+    MacroShockType.RELIGIOUS_AWAKENING: {
+        "prob": 0.0004, "mag": (5, 20),
+        "effects": {"cultural_alignment": 0.6, "volatility": 0.4, "stability": -0.2},
+    },
+    MacroShockType.TECHNOLOGICAL_BREAKTHROUGH: {
+        "prob": 0.0001, "mag": (8, 30),
+        "effects": {"wealth_index": 0.5, "influence_score": 0.3, "momentum": 0.4},
+    },
+    MacroShockType.PLAGUE: {
+        "prob": 0.0002, "mag": (10, 35),
+        "effects": {"population": -0.8, "stability": -0.5, "wealth_index": -0.3, "volatility": 0.8},
+    },
+    MacroShockType.CIVIL_WAR: {
+        "prob": 0.0002, "mag": (15, 40),
+        "effects": {"stability": -1.0, "volatility": 1.0, "wealth_index": -0.4, "momentum": -0.3},
+    },
+    MacroShockType.TRADE_BOOM: {
+        "prob": 0.0003, "mag": (8, 25),
+        "effects": {"wealth_index": 0.8, "momentum": 0.6, "influence_score": 0.2},
+    },
+    MacroShockType.MIGRATION_WAVE: {
+        "prob": 0.0004, "mag": (5, 20),
+        "effects": {"population": 0.5, "cultural_alignment": -0.3, "volatility": 0.3},
+    },
+    MacroShockType.PROPHETIC_SCHISM: {
+        "prob": 0.0003, "mag": (10, 30),
+        "effects": {"cultural_alignment": -0.7, "stability": -0.4, "volatility": 0.6},
+    },
+    MacroShockType.MILITARY_CONSOLIDATION: {
+        "prob": 0.0002, "mag": (10, 30),
+        "effects": {"stability": 0.3, "influence_score": 0.5, "momentum": 0.3, "wealth_index": -0.2},
+    },
+}
+
+
+@dataclass
+class MacroShockRecord:
+    """Historical record of a shock that hit a minor civ."""
+    shock_type: str
+    tick: int
+    magnitude: float
+    civ_id: str
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MacroShockRecord":
+        return cls(**d)
+
+
+# ── MinorCiv — Deep Field Entity ──────────────────────────────
+
+@dataclass
+class MinorCiv:
+    """
+    A civilization in the Deep Field (Layer A).
+
+    Not a kingdom.  A probability engine.  7 core numbers + 4 hidden
+    macro engines, updated cheaply per tick.  No decrees, no events,
+    no narrative weight.  Just statistical evolution.
+
+    When shock_potential crosses the promotion threshold, this civ
+    graduates to full KingdomState simulation (Layer B).
+
+    When a Layer B civ stagnates below the demotion threshold, it
+    collapses back to MinorCiv with archived story state.
+    """
+    civ_id: str = ""
+    name: str = ""
+    seed: int = 0
+
+    # ── Core state vector (the 7 vital signs) ──
+    population: float = 50.0            # demographic mass (0-100 normalised)
+    wealth_index: float = 50.0          # aggregate economic output
+    stability: float = 50.0             # internal order
+    cultural_alignment: float = 0.0     # ideological vector (-50 to +50)
+                                        # negative = opposes player ideology
+                                        # positive = aligned with player
+    influence_score: float = 10.0       # global soft power (0-100)
+    military_strength: float = 30.0     # hard power projection (0-100)
+    trade_dependency: float = 0.0       # coupling to player economy (0-100)
+
+    # ── 4 Hidden Macro Engines (the juice) ──
+    momentum: float = 0.0              # accumulated growth/decline pressure
+    volatility: float = 5.0            # instability amplitude
+    alignment_drift: float = 0.0       # ideological movement per tick
+    shock_potential: float = 0.0        # accumulated crisis/breakthrough pressure
+                                        # when this crosses threshold → promotion candidate
+
+    # ── Importance ranking ──
+    importance: float = 0.0             # computed score; determines Layer B candidacy
+    rank: int = 999                     # current position in global leaderboard
+
+    # ── Deep Field Era Flag (cheap state label) ──
+    # Mirrors EraIdentity but computed from thresholds, not full sim.
+    # When promoted, this seeds the KingdomState.current_era.
+    era_flag: str = "STABLE"            # see ERA_FLAGS for full list
+    era_flag_since: int = 0             # tick when current era_flag was set
+
+    # ── Era confirmation (multi-tick gates for positive eras) ──
+    # Positive eras require sustained conditions, not a single lucky tick.
+    era_candidate: str = ""             # era being confirmed (empty = none)
+    era_candidate_ticks: int = 0        # ticks the candidate conditions held
+    stability_trend: float = 0.0        # rolling EMA of stability *rate of change*
+    _prev_stability: float = 50.0       # previous tick stability for delta calc
+    wealth_growth_rate: float = 0.0     # rolling EMA of wealth delta
+    momentum_sustained: int = 0         # consecutive ticks with momentum > threshold
+
+    # ── Prestige (soft power from sustained prosperity) ──
+    prestige: float = 0.0               # accumulated from positive era duration + low vol
+                                        # feeds into importance scoring (peaceful climb)
+
+    # ── Oracle lifecycle (simplified for Deep Field) ──
+    oracle_state: MinorCivOracleState = field(default_factory=MinorCivOracleState)
+
+    # ── Lifecycle state ──
+    is_promoted: bool = False           # True if currently running as full KingdomState
+    promoted_at_tick: int = 0           # tick when promoted (0 if never)
+    demoted_at_tick: int = 0            # tick when last demoted (0 if never)
+    archived_state: Optional[dict] = None  # serialised KingdomState from last demotion
+
+    # ── Shock history (last N shocks for narrative) ──
+    recent_shocks: List[MacroShockRecord] = field(default_factory=list)
+
+    # ── Terrain/biome flavour (procedural, immutable) ──
+    biome: str = "temperate"            # affects shock susceptibility
+    geographic_region: int = 0          # 0-7 octant for spatial clustering
+
+    def to_dict(self) -> dict:
+        d = {}
+        for k, v in self.__dict__.items():
+            if k == "archived_state":
+                d[k] = v  # already a dict or None
+            elif k == "recent_shocks":
+                d[k] = [s.to_dict() for s in v]
+            elif k == "oracle_state":
+                d[k] = v.to_dict()
+            else:
+                d[k] = v
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MinorCiv":
+        obj = cls()
+        for k, v in d.items():
+            if k == "recent_shocks":
+                obj.recent_shocks = [MacroShockRecord.from_dict(s) for s in v]
+            elif k == "oracle_state":
+                obj.oracle_state = MinorCivOracleState.from_dict(v)
+            elif hasattr(obj, k):
+                setattr(obj, k, v)
+        return obj
+
+
+# ── Biome Definitions ─────────────────────────────────────────
+
+BIOME_TYPES = [
+    "temperate", "arid", "tropical", "tundra", "mountainous",
+    "coastal", "riverine", "steppe", "volcanic", "island",
+]
+
+# Biome modifiers: affect which shocks are more/less likely
+BIOME_SHOCK_MODS: Dict[str, Dict[MacroShockType, float]] = {
+    "temperate":   {},  # baseline
+    "arid":        {MacroShockType.CLIMATE_ANOMALY: 1.8, MacroShockType.PLAGUE: 0.6, MacroShockType.TRADE_BOOM: 0.7},
+    "tropical":    {MacroShockType.PLAGUE: 1.5, MacroShockType.RESOURCE_DISCOVERY: 1.3},
+    "tundra":      {MacroShockType.CLIMATE_ANOMALY: 1.5, MacroShockType.MIGRATION_WAVE: 1.4, MacroShockType.TRADE_BOOM: 0.5},
+    "mountainous": {MacroShockType.MILITARY_CONSOLIDATION: 1.3, MacroShockType.TRADE_BOOM: 0.6, MacroShockType.RESOURCE_DISCOVERY: 1.4},
+    "coastal":     {MacroShockType.TRADE_BOOM: 1.5, MacroShockType.MIGRATION_WAVE: 1.3},
+    "riverine":    {MacroShockType.TRADE_BOOM: 1.3, MacroShockType.CLIMATE_ANOMALY: 1.2},
+    "steppe":      {MacroShockType.MILITARY_CONSOLIDATION: 1.5, MacroShockType.MIGRATION_WAVE: 1.4, MacroShockType.CIVIL_WAR: 1.3},
+    "volcanic":    {MacroShockType.CLIMATE_ANOMALY: 2.0, MacroShockType.RESOURCE_DISCOVERY: 1.5, MacroShockType.PLAGUE: 0.7},
+    "island":      {MacroShockType.TRADE_BOOM: 1.4, MacroShockType.MILITARY_CONSOLIDATION: 0.5, MacroShockType.MIGRATION_WAVE: 0.6},
+}
+
+
+# ── MacroEngine — Cheap Per-Tick Update for Deep Field ────────
+
+class MacroEngine:
+    """
+    Statistical evolution engine for MinorCiv entities.
+
+    Each tick costs ~10 multiplies per civ.  No allocations, no events,
+    no narrative.  Pure vector math.
+
+    The key insight: these civs don't simulate day-to-day politics.
+    They simulate momentum, demographic waves, ideological drift,
+    resource shocks, and military consolidation.
+
+    They are vectors, not actors.
+
+    But they are alive.
+    """
+
+    # ── Tuning Constants ──
+    MOMENTUM_DECAY: float = 0.99         # faster decay prevents runaway
+    MOMENTUM_NOISE_SCALE: float = 0.12   # random jitter per tick
+    MOMENTUM_CAP: float = 15.0           # absolute cap on momentum
+    VOLATILITY_DECAY: float = 0.993      # stronger calming
+    VOLATILITY_FLOOR: float = 2.0        # never fully stable
+    VOLATILITY_CAP: float = 50.0         # hard ceiling — prevents runaway
+    ALIGNMENT_DRIFT_DECAY: float = 0.99  # drift momentum decays
+    SHOCK_POTENTIAL_DECAY: float = 0.97   # faster bleed-off
+    SHOCK_POTENTIAL_GROWTH: float = 0.005 # much gentler accumulation
+
+    # Wealth/stability feedback
+    WEALTH_MOMENTUM_COUPLING: float = 0.003  # momentum → wealth (gentler)
+    WEALTH_MEAN_REVERSION: float = 0.003     # stronger pull to median
+    STABILITY_VOLATILITY_COUPLING: float = 0.004  # volatility → instability (gentler)
+    STABILITY_RECOVERY_RATE: float = 0.003   # base stability recovery (was 0.005)
+    POPULATION_WEALTH_COUPLING: float = 0.002  # wealth → population growth
+
+    # Influence is derived from wealth + military + stability
+    INFLUENCE_RECOMPUTE_INTERVAL: int = 10  # recalculate every N ticks
+
+    @classmethod
+    def tick_minor_civ(cls, civ: MinorCiv, rng: SeededRNG,
+                       global_trade_index: float = 50.0,
+                       global_ideology_field: float = 0.0,
+                       player_wealth: float = 50.0,
+                       current_tick: int = 0):
+        """
+        Advance one MinorCiv by one tick.  Dirt cheap.
+
+        global_trade_index: aggregate world trade health (affects all civs)
+        global_ideology_field: net ideological pressure from dominant civs
+        player_wealth: player kingdom's wealth (affects trade dependency)
+        current_tick: current simulation tick (for era_flag dating)
+        """
+        # ── 1. Momentum update ──
+        # Momentum = accumulated growth/decline pressure.
+        # Driven by: wealth feedback + random noise + trade environment.
+        resource_factor = (civ.wealth_index - 50.0) * 0.002  # rich get momentum
+        trade_factor = (global_trade_index - 50.0) * 0.001   # rising tide
+        noise = rng.gauss(0, cls.MOMENTUM_NOISE_SCALE)
+        civ.momentum = civ.momentum * cls.MOMENTUM_DECAY + resource_factor + trade_factor + noise
+        civ.momentum = max(-cls.MOMENTUM_CAP, min(cls.MOMENTUM_CAP, civ.momentum))
+
+        # ── 2. Volatility update ──
+        # Volatility = instability amplitude.
+        # High instability + low stability = rising volatility.
+        # Self-damping: the further above baseline, the harder it is to grow.
+        instability_pressure = max(0, (50.0 - civ.stability) * 0.003)
+        # Wealth inequality (deviation from median) adds volatility
+        wealth_deviation = abs(civ.wealth_index - 50.0) * 0.001
+        # Damping factor: stronger decay when volatility is high
+        vol_excess = max(0, civ.volatility - 10.0)
+        extra_damping = vol_excess * 0.002  # self-damping above 10
+        civ.volatility = max(
+            cls.VOLATILITY_FLOOR,
+            min(cls.VOLATILITY_CAP,
+                civ.volatility * cls.VOLATILITY_DECAY
+                + instability_pressure + wealth_deviation - extra_damping
+            )
+        )
+
+        # ── 3. Alignment drift ──
+        # Ideological movement: global field pulls, internal momentum persists.
+        field_pull = (global_ideology_field - civ.cultural_alignment) * 0.002
+        civ.alignment_drift = civ.alignment_drift * cls.ALIGNMENT_DRIFT_DECAY + field_pull
+        civ.cultural_alignment = max(-50, min(50,
+            civ.cultural_alignment + civ.alignment_drift * 0.1
+        ))
+
+        # ── 4. Shock potential ──
+        # The juice.  This is what lets a rank-347 civ break into the Top 20.
+        # Accumulates from volatility × |momentum|.
+        # Diminishing returns via sqrt to prevent runaway.
+        raw_growth = math.sqrt(max(0, civ.volatility * abs(civ.momentum))) * cls.SHOCK_POTENTIAL_GROWTH
+        civ.shock_potential = (
+            civ.shock_potential * cls.SHOCK_POTENTIAL_DECAY + raw_growth
+        )
+        # Soft cap at 100 (tanh-style damping)
+        if civ.shock_potential > 100:
+            civ.shock_potential = 100 + (civ.shock_potential - 100) * 0.5
+
+        # ── 5. Core state evolution ──
+        # Wealth: momentum-driven + non-linear mean reversion
+        # Reversion is WEAKER at extremes → fatter tails
+        dist_from_50 = abs(civ.wealth_index - 50.0)
+        # Dead zone: if far from median (>20), pull weakens by 60%
+        if dist_from_50 > 20:
+            effective_reversion = cls.WEALTH_MEAN_REVERSION * 0.4
+        else:
+            effective_reversion = cls.WEALTH_MEAN_REVERSION
+        wealth_pull = (50.0 - civ.wealth_index) * effective_reversion
+        civ.wealth_index = max(3, min(97,
+            civ.wealth_index + civ.momentum * cls.WEALTH_MOMENTUM_COUPLING + wealth_pull
+        ))
+
+        # ── 5a. Tail events — collapse & hyper-wealth ──
+        # Collapse: poor + unstable → catastrophic wipeout
+        if civ.stability < 15 and civ.volatility > 30 and civ.wealth_index < 35:
+            if rng.random() < 0.008:  # ~0.8% per tick when conditions met
+                collapse_mag = rng.uniform(8, 20)
+                civ.wealth_index = max(3, civ.wealth_index - collapse_mag)
+                civ.stability = max(5, civ.stability - collapse_mag * 0.4)
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + collapse_mag * 0.5)
+                civ.momentum = max(-cls.MOMENTUM_CAP, civ.momentum - collapse_mag * 0.3)
+
+        # Hyper-wealth: strong momentum + already rich → runaway boom
+        if civ.momentum > 8 and civ.wealth_index > 60:
+            if rng.random() < 0.005:  # ~0.5% per tick when conditions met
+                boom_mag = rng.uniform(5, 15)
+                civ.wealth_index = min(97, civ.wealth_index + boom_mag)
+                civ.influence_score = min(100, civ.influence_score + boom_mag * 0.5)
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + boom_mag * 0.3)
+
+        # Population: follows wealth slowly
+        pop_pull = (civ.wealth_index - civ.population) * cls.POPULATION_WEALTH_COUPLING
+        civ.population = max(5, min(95, civ.population + pop_pull))
+
+        # Stability: eroded by volatility, restored by wealth + base recovery
+        stability_pressure = -civ.volatility * cls.STABILITY_VOLATILITY_COUPLING
+        # Recovery scales with how far below 50 stability is
+        stability_gap = max(0, 50.0 - civ.stability)
+        stability_recovery = stability_gap * cls.STABILITY_RECOVERY_RATE
+        # Additional recovery if wealthy
+        if civ.wealth_index > 40:
+            stability_recovery += (civ.wealth_index - 40.0) * 0.001
+        civ.stability = max(5, min(95,
+            civ.stability + stability_pressure + stability_recovery
+        ))
+
+        # Military: slow drift toward stability + wealth
+        mil_target = civ.stability * 0.4 + civ.wealth_index * 0.3 + civ.population * 0.3
+        civ.military_strength = max(5, min(95,
+            civ.military_strength + (mil_target - civ.military_strength) * 0.003
+        ))
+
+        # Trade dependency: proximity to player economy
+        # Higher when player is wealthy and civ has trade capacity
+        trade_affinity = min(civ.wealth_index, player_wealth) * 0.01
+        civ.trade_dependency = max(0, min(100,
+            civ.trade_dependency * 0.998 + trade_affinity * 0.1
+        ))
+
+        # ── 7. Era flag (classification + confirmation) ──
+        old_era = civ.era_flag
+        new_era = cls._classify_era(civ, current_tick)
+        if new_era != old_era:
+            civ.era_flag = new_era
+            civ.era_flag_since = current_tick
+
+        # ── 7a. Era mechanical effects ──
+        cls._apply_era_effects(civ, rng, current_tick)
+
+        # ── 8. Oracle dormancy effects on deep field ──
+        # Sleeping oracle → ungoverned drift: stability erodes, volatility grows.
+        # Awake oracle → modest stabilizing pressure.
+        if not civ.oracle_state.oracle_active:
+            # Dormancy: slow corrosion — the world forgets the oracle
+            civ.stability = max(5, civ.stability - 0.012)
+            civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 0.008)
+            # Ideology wanders further without the oracle's voice
+            civ.alignment_drift += rng.gauss(0, 0.003)
+        else:
+            # Active oracle: mild stabilising touch
+            civ.stability = min(95, civ.stability + 0.008)
+            civ.volatility = max(cls.VOLATILITY_FLOOR, civ.volatility - 0.005)
+
+        # ── 8. Influence (recomputed at intervals, not every tick) ──
+        # Stored on civ.influence_score; caller handles interval gating.
+
+    @classmethod
+    def recompute_influence(cls, civ: MinorCiv):
+        """Recalculate influence score from composite factors."""
+        civ.influence_score = (
+            civ.wealth_index * 0.35
+            + civ.military_strength * 0.25
+            + civ.stability * 0.20
+            + civ.population * 0.15
+            + abs(civ.cultural_alignment) * 0.10  # extremism = visibility
+        )
+        civ.influence_score = max(0, min(100, civ.influence_score))
+
+    @classmethod
+    def propagate_positive_influence(cls, civs: List[MinorCiv]):
+        """
+        Soft influence propagation from positive-era civs to neighbors.
+
+        Good should spread.  Not dominate.  But radiate.
+
+        Civs in GOLDEN_AGE, TRADE_HEGEMONY, or REFORMATION_RISE emit
+        small buffs to other civs in the same geographic_region:
+          - stability drift (+)
+          - ideology alignment drift (toward the beacon)
+          - trade coupling (+)
+
+        Called periodically (every ~10 ticks) to keep cost low.
+        Uses geographic_region (0-7 octant) as proximity model.
+        """
+        RADIATING_ERAS = {"GOLDEN_AGE", "TRADE_HEGEMONY", "REFORMATION_RISE"}
+
+        # Build region → beacon list (only active, positive-era civs)
+        region_beacons: dict = {}  # region_id → list of beacons
+        for civ in civs:
+            if civ.is_promoted:
+                continue
+            if civ.era_flag in RADIATING_ERAS:
+                region_beacons.setdefault(civ.geographic_region, []).append(civ)
+
+        if not region_beacons:
+            return
+
+        # Apply influence to non-beacon civs in same region
+        for civ in civs:
+            if civ.is_promoted:
+                continue
+            if civ.era_flag in RADIATING_ERAS:
+                continue  # beacons don't self-buff
+
+            beacons = region_beacons.get(civ.geographic_region)
+            if not beacons:
+                continue
+
+            # Aggregate radiation from all beacons in region
+            for beacon in beacons:
+                # Strength scales with beacon's prestige (earned, not free)
+                strength = max(0.1, beacon.prestige / 30.0)  # 0.1 to 1.0
+
+                # Stability drift: small positive pressure
+                civ.stability = min(95, civ.stability + 0.003 * strength)
+
+                # Ideology alignment drift: pulled toward the beacon
+                align_diff = beacon.cultural_alignment - civ.cultural_alignment
+                civ.cultural_alignment += align_diff * 0.0005 * strength
+                civ.cultural_alignment = max(-50, min(50, civ.cultural_alignment))
+
+                # Trade coupling: shared prosperity
+                civ.trade_dependency = min(100,
+                    civ.trade_dependency + 0.005 * strength)
+
+                # Momentum: faint tailwind from nearby prosperity
+                civ.momentum = min(cls.MOMENTUM_CAP,
+                    civ.momentum + 0.002 * strength)
+
+    @classmethod
+    def _classify_era(cls, civ: MinorCiv, current_tick: int) -> str:
+        """
+        Era classification with multi-tick confirmation for positive eras.
+
+        Crisis eras trigger instantly (bad things happen fast).
+        Positive eras require sustained conditions (good things take work).
+        Each positive era has a maintenance condition; failing it causes
+        a distinct collapse rather than just returning to STABLE.
+
+        Era taxonomy:
+          Crisis:   CIVIL_CRISIS, FAMINE, DECLINE, MILITANT
+          Neutral:  STABLE, REFORMATION_FALL (schism aftermath)
+          Positive: RENAISSANCE, GOLDEN_AGE, TRADE_HEGEMONY,
+                    ASCENDANT, REFORMATION_RISE
+
+        Priority: crisis > positive (confirmed) > transitional > STABLE
+        """
+        s = civ.stability
+        w = civ.wealth_index
+        v = civ.volatility
+        m = civ.momentum
+        mil = civ.military_strength
+        align = abs(civ.cultural_alignment)
+        td = civ.trade_dependency
+        old_era = civ.era_flag
+
+        # ── Track rolling metrics (cheap O(1) EMA) ──
+        # These accumulate evidence for multi-tick gates.
+        EMA_ALPHA = 0.02  # ~50-tick half-life
+        prev_w = w - civ.wealth_growth_rate / max(0.001, EMA_ALPHA)  # approx
+        civ.wealth_growth_rate = civ.wealth_growth_rate * (1 - EMA_ALPHA) + (m * cls.WEALTH_MOMENTUM_COUPLING) * EMA_ALPHA * 50
+        # stability_trend tracks the *rate of change* of stability, not its level
+        stab_delta = s - civ._prev_stability
+        civ._prev_stability = s
+        civ.stability_trend = civ.stability_trend * (1 - EMA_ALPHA) + stab_delta * EMA_ALPHA
+        if m > 4:
+            civ.momentum_sustained = min(200, civ.momentum_sustained + 1)
+        else:
+            civ.momentum_sustained = max(0, civ.momentum_sustained - 2)
+
+        # ── Confirmation gate helper ──
+        def _confirm(candidate_name: str, ticks_needed: int) -> bool:
+            """Returns True if the candidate era has been confirmed."""
+            if civ.era_candidate == candidate_name:
+                civ.era_candidate_ticks += 1
+                return civ.era_candidate_ticks >= ticks_needed
+            else:
+                civ.era_candidate = candidate_name
+                civ.era_candidate_ticks = 1
+                return False
+
+        # Check if positive shocks happened recently
+        recent_tech = any(
+            sh.shock_type == "TECHNOLOGICAL_BREAKTHROUGH" and current_tick - sh.tick < 200
+            for sh in civ.recent_shocks
+        )
+        recent_trade = any(
+            sh.shock_type == "TRADE_BOOM" and current_tick - sh.tick < 200
+            for sh in civ.recent_shocks
+        )
+        recent_schism = any(
+            sh.shock_type == "PROPHETIC_SCHISM" and current_tick - sh.tick < 150
+            for sh in civ.recent_shocks
+        )
+
+        # ════════════════════════════════════════════════════
+        # CRISIS ERAS — instant triggers (bad things are fast)
+        # ════════════════════════════════════════════════════
+
+        # CIVIL_CRISIS: stability crashed + high volatility
+        if s < 20 and v > 22:
+            civ.era_candidate = ""
+            civ.era_candidate_ticks = 0
+            return "CIVIL_CRISIS"
+
+        # FAMINE: poor + unstable
+        if w < 22 and s < 32:
+            civ.era_candidate = ""
+            civ.era_candidate_ticks = 0
+            return "FAMINE"
+
+        # DECLINE: broad decay — low everything, negative momentum
+        if w < 35 and s < 40 and m < -2:
+            civ.era_candidate = ""
+            civ.era_candidate_ticks = 0
+            return "DECLINE"
+
+        # MILITANT: military dominance under instability
+        if mil > 60 and s < 42 and v > 13:
+            civ.era_candidate = ""
+            civ.era_candidate_ticks = 0
+            return "MILITANT"
+
+        # ════════════════════════════════════════════════════
+        # POSITIVE ERA COLLAPSE — check if current era fails
+        # (before checking new positive eras, so collapse is fast)
+        # ════════════════════════════════════════════════════
+
+        if old_era == "GOLDEN_AGE":
+            # Maintenance: wealth + stability must hold, vol stays manageable
+            # UNIQUE FAILURE: inequality — wealth concentration breeds resentment
+            # The richer you are above median, the more fragile the golden age
+            inequality_pressure = max(0, civ.wealth_index - 55) * 0.3
+            inequality_collapse = inequality_pressure > 8 and v > 15
+            if w < 50 or s < 42 or v > 25 or inequality_collapse:
+                # Golden Age collapses into complacency → sharp stability hit
+                civ.stability = max(5, civ.stability - 3.0)
+                civ.momentum = max(-cls.MOMENTUM_CAP, civ.momentum - 2.0)
+                # Prestige crash: the fall from grace is public
+                civ.prestige = max(0, civ.prestige * 0.3)
+                civ.era_candidate = ""
+                return "DECLINE"  # the fall from grace
+
+        if old_era == "RENAISSANCE":
+            # Maintenance: momentum must stay positive, stability can't crash
+            if m < 0.5 or s < 35:
+                # Complacency: slide back quietly
+                civ.era_candidate = ""
+                return "STABLE"
+
+        if old_era == "TRADE_HEGEMONY":
+            # Maintenance: trade + wealth must hold
+            # Age-based fragility: monopolies eventually attract rivals/disruption
+            heg_age = current_tick - civ.era_flag_since
+            age_fragile = heg_age > 400 and v > 15  # long hegemonies break if volatile
+            age_expired = heg_age > 800  # nothing lasts forever
+            # UNIQUE FAILURE: tension — trade routes collapse during conflict
+            # Recent military shocks or civil wars disrupt trade networks
+            recent_conflict = any(
+                sh.shock_type in ("CIVIL_WAR", "MILITARY_CONSOLIDATION")
+                and current_tick - sh.tick < 150
+                for sh in civ.recent_shocks
+            )
+            tension_collapse = recent_conflict and v > 12
+            if td < 15 or w < 40 or age_fragile or age_expired or tension_collapse:
+                # Trade collapse → recession shock
+                overshoot = max(0, civ.trade_dependency - 30) * 0.15
+                civ.wealth_index = max(3, civ.wealth_index - 5.0 - overshoot)
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 8.0)
+                civ.momentum = max(-cls.MOMENTUM_CAP, civ.momentum - 3.0)
+                # Prestige halved: economic collapse is humiliating
+                civ.prestige = max(0, civ.prestige * 0.5)
+                civ.era_candidate = ""
+                return "DECLINE"
+
+        if old_era == "ASCENDANT":
+            # Maintenance: momentum must be strong AND can't last forever
+            era_age = current_tick - civ.era_flag_since
+            # Natural lifespan: bubble tension grows with age
+            if m < 5 or era_age > 120 or (era_age > 60 and v > 25):
+                # Bubble burst: sharp correction proportional to overshoot
+                overshoot = max(0, civ.wealth_index - 55) * 0.4
+                civ.wealth_index = max(3, civ.wealth_index - overshoot - 5.0)
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 12.0)
+                civ.stability = max(5, civ.stability - 6.0)
+                civ.momentum = max(-cls.MOMENTUM_CAP, civ.momentum - 5.0)
+                civ.momentum_sustained = 0
+                # Prestige evaporates: hubris punished
+                civ.prestige = max(0, civ.prestige * 0.2)
+                civ.era_candidate = ""
+                return "CIVIL_CRISIS" if civ.stability < 20 else "DECLINE"
+
+        if old_era == "REFORMATION_RISE":
+            # Maintenance: stability must keep climbing, no new schisms
+            # UNIQUE FAILURE: prophetic schism — religious fracture kills reform
+            # Also sensitive to RELIGIOUS_AWAKENING (radical movements)
+            recent_religious_disruption = any(
+                sh.shock_type in ("PROPHETIC_SCHISM", "RELIGIOUS_AWAKENING")
+                and current_tick - sh.tick < 100
+                and sh.magnitude > 15
+                for sh in civ.recent_shocks
+            )
+            if civ.stability_trend < -0.01 or recent_schism or recent_religious_disruption:
+                # Reform collapses into fragmentation
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 5.0)
+                # Harder fall if schism (faith-based fracture is deeper)
+                if recent_schism or recent_religious_disruption:
+                    civ.stability = max(5, civ.stability - 2.0)
+                    civ.prestige = max(0, civ.prestige * 0.4)
+                civ.era_candidate = ""
+                return "REFORMATION_FALL"
+
+        # ════════════════════════════════════════════════════
+        # POSITIVE ERAS — multi-tick confirmation required
+        # ════════════════════════════════════════════════════
+
+        # ASCENDANT (hot streak — short-lived, most volatile)
+        # Entry: very strong momentum sustained, already doing well
+        if civ.momentum_sustained >= 50 and m > 7 and w > 50 and s > 35:
+            if _confirm("ASCENDANT", 20):
+                return "ASCENDANT"
+
+        # GOLDEN_AGE (rare pinnacle — longest confirmation)
+        # Entry: sustained wealth + stability + low volatility
+        if w > 60 and s > 48 and v < 20 and m > 0.5:
+            if _confirm("GOLDEN_AGE", 100):
+                return "GOLDEN_AGE"
+
+        # RENAISSANCE (ideas + growth)
+        # Entry: decent stability + positive momentum + recent innovation or cultural identity
+        if s > 38 and m > 2.0 and w > 40 and (recent_tech or recent_trade or align > 12):
+            if _confirm("RENAISSANCE", 50):
+                return "RENAISSANCE"
+
+        # TRADE_HEGEMONY (mercantile power)
+        # Entry: high trade dependency + decent wealth + stability
+        if td > 20 and w > 45 and s > 40 and v < 22:
+            if _confirm("TRADE_HEGEMONY", 60):
+                return "TRADE_HEGEMONY"
+
+        # REFORMATION_RISE (structural renewal — climbing out of crisis)
+        # Entry: stability is *rising* (positive delta trend), civ shows crisis
+        # scars (recent damaging shocks or low-ish stability), and momentum
+        # is at least positive. Wealth can't be too high — if you're already
+        # rich, that's GOLDEN_AGE/TRADE_HEGEMONY territory, not reform.
+        recent_crisis_shock = any(
+            sh.shock_type in ("CIVIL_WAR", "PLAGUE", "PROPHETIC_SCHISM")
+            and current_tick - sh.tick < 300
+            for sh in civ.recent_shocks
+        )
+        crisis_scars = recent_crisis_shock or s < 38
+        if (civ.stability_trend > 0.005 and s > 25 and s < 50
+                and w < 70 and m > 0.3 and crisis_scars and not recent_schism):
+            if _confirm("REFORMATION_RISE", 35):
+                return "REFORMATION_RISE"
+
+        # ════════════════════════════════════════════════════
+        # TRANSITIONAL
+        # ════════════════════════════════════════════════════
+
+        # REFORMATION_FALL (schism aftermath — unstable reform)
+        if recent_schism and s > 25 and s < 45 and v > 15:
+            return "REFORMATION_FALL"
+
+        # If no era candidate matched, reset confirmation
+        if civ.era_candidate and civ.era_candidate not in (
+            "ASCENDANT", "GOLDEN_AGE", "RENAISSANCE", "TRADE_HEGEMONY", "REFORMATION_RISE"
+        ):
+            civ.era_candidate = ""
+            civ.era_candidate_ticks = 0
+
+        return "STABLE"
+
+    @classmethod
+    def _apply_era_effects(cls, civ: MinorCiv, rng: SeededRNG, current_tick: int = 0):
+        """
+        Per-tick mechanical effects of the current era.
+
+        Positive eras grant real buffs but also plant seeds of fragility.
+        Crisis eras have their own penalties (mostly via normal dynamics).
+        Called after _classify_era each tick.
+
+        Key design rule: every buff has a paired risk accumulator.
+        """
+        era = civ.era_flag
+
+        if era == "GOLDEN_AGE":
+            # Prestige: influence grows slowly (soft power projection)
+            civ.influence_score = min(100, civ.influence_score + 0.05)
+            # Trade compounds: wealth growth is smoother
+            civ.wealth_index = min(97, civ.wealth_index + 0.01)
+            # But inequality risk accumulates — volatility slowly grows
+            civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 0.003)
+            # Military stagnates (why fight when rich?)
+            civ.military_strength = max(5, civ.military_strength - 0.005)
+
+        elif era == "RENAISSANCE":
+            # Ideas spread: wealth gets a momentum boost
+            civ.momentum = min(cls.MOMENTUM_CAP, civ.momentum + 0.02)
+            # Volatility dampened (intellectual stability)
+            civ.volatility = max(cls.VOLATILITY_FLOOR, civ.volatility - 0.01)
+            # Culture amplified: alignment drifts more strongly
+            civ.alignment_drift *= 1.002
+            # Influence grows from cultural output
+            civ.influence_score = min(100, civ.influence_score + 0.03)
+
+        elif era == "TRADE_HEGEMONY":
+            # Wealth compounds via trade
+            trade_bonus = civ.trade_dependency * 0.0005
+            civ.wealth_index = min(97, civ.wealth_index + trade_bonus)
+            # Trade dependency deepens (makes collapse worse)
+            civ.trade_dependency = min(100, civ.trade_dependency + 0.03)
+            # Military growth slows (trade > war)
+            civ.military_strength = max(5, civ.military_strength - 0.008)
+            # Migrations attracted: population grows slightly
+            civ.population = min(95, civ.population + 0.005)
+            # Concentration risk: volatility grows slowly with age
+            heg_age = max(1, current_tick - civ.era_flag_since)
+            vol_creep = 0.002 + heg_age * 0.00005  # accelerates over time
+            civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + vol_creep)
+            # Migration + trade → cultural mixing → occasional spike
+            if rng.random() < 0.003:
+                civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 0.5)
+
+        elif era == "ASCENDANT":
+            # Hot streak: everything accelerates but volatility grows FAST
+            civ.influence_score = min(100, civ.influence_score + 0.08)
+            civ.wealth_index = min(97, civ.wealth_index + 0.03)
+            # Oracle is more "present" during ascent — if awake, double effect
+            if civ.oracle_state.oracle_active:
+                civ.stability = min(95, civ.stability + 0.02)
+            # Bubble risk: volatility grows under the surface — accelerating
+            era_age = max(1, current_tick - civ.era_flag_since)
+            vol_accel = 0.02 + era_age * 0.0002  # grows with time
+            civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + vol_accel)
+            # Shock potential rises (the world notices this breakout)
+            civ.shock_potential += 0.15
+            # Momentum does NOT self-reinforce — it has to come from real dynamics
+            # (This prevents infinite hot streaks)
+
+        elif era == "REFORMATION_RISE":
+            # Stability recovering: institutional strengthening
+            civ.stability = min(95, civ.stability + 0.015)
+            civ.volatility = max(cls.VOLATILITY_FLOOR, civ.volatility - 0.008)
+            # Future crisis probability reduced (structural resilience)
+            # Modeled as shock_potential damping
+            civ.shock_potential *= 0.995
+
+        elif era == "REFORMATION_FALL":
+            # Schism aftermath: fragmented reform
+            civ.volatility = min(cls.VOLATILITY_CAP, civ.volatility + 0.01)
+            civ.stability = max(5, civ.stability - 0.005)
+            # Cultural fracture
+            civ.alignment_drift += rng.gauss(0, 0.005)
+
+        # ── Prestige accumulation / decay ──
+        # Prestige grows during sustained positive eras with low volatility
+        # and no recent CIVIL_CRISIS. Decays slowly otherwise.
+        POSITIVE_ERAS = {"GOLDEN_AGE", "RENAISSANCE", "TRADE_HEGEMONY",
+                         "ASCENDANT", "REFORMATION_RISE"}
+        if era in POSITIVE_ERAS:
+            # Base prestige gain scales with era duration
+            era_age = max(1, current_tick - civ.era_flag_since)
+            # Low volatility amplifies prestige gain (peaceful prosperity)
+            vol_factor = max(0.1, 1.0 - civ.volatility / 30.0)
+            # Check for recent crisis (taints prestige)
+            recent_crisis = any(
+                sh.shock_type in ("CIVIL_WAR", "PLAGUE")
+                and current_tick - sh.tick < 200
+                for sh in civ.recent_shocks
+            )
+            if recent_crisis:
+                vol_factor *= 0.3  # tainted prosperity
+            # Prestige gain: slow, steady, rewarding stability
+            gain = 0.03 * vol_factor
+            # GOLDEN_AGE gets the most prestige (that's its identity)
+            if era == "GOLDEN_AGE":
+                gain *= 2.0
+            elif era == "ASCENDANT":
+                gain *= 0.5  # hot streaks are flashy, not prestigious
+            civ.prestige = min(30, civ.prestige + gain)
+        else:
+            # Prestige decays — you have to maintain it
+            civ.prestige = max(0, civ.prestige * 0.998 - 0.002)
+
+    @classmethod
+    def apply_macro_shock(cls, civ: MinorCiv, shock_type: MacroShockType,
+                          magnitude: float, tick: int):
+        """
+        Apply a macro shock to a minor civ.
+
+        This is the mechanism by which a quiet civ suddenly matters.
+        Shocks are the storms that form in the statistical weather.
+        """
+        profile = MACRO_SHOCK_PROFILES[shock_type]
+        effects = profile["effects"]
+
+        for field_name, weight in effects.items():
+            if hasattr(civ, field_name):
+                current = getattr(civ, field_name)
+                delta = magnitude * weight
+                setattr(civ, field_name, current + delta)
+
+        # Shocks always spike volatility
+        civ.volatility += magnitude * 0.3
+        # And spike shock_potential directly
+        civ.shock_potential += magnitude * 0.5
+
+        # Clamp everything
+        civ.wealth_index = max(5, min(95, civ.wealth_index))
+        civ.stability = max(5, min(95, civ.stability))
+        civ.population = max(5, min(95, civ.population))
+        civ.military_strength = max(5, min(95, civ.military_strength))
+        civ.influence_score = max(0, min(100, civ.influence_score))
+        civ.cultural_alignment = max(-50, min(50, civ.cultural_alignment))
+        civ.trade_dependency = max(0, min(100, civ.trade_dependency))
+
+        # Record shock
+        record = MacroShockRecord(
+            shock_type=shock_type.name,
+            tick=tick,
+            magnitude=magnitude,
+            civ_id=civ.civ_id,
+        )
+        civ.recent_shocks.append(record)
+        # Keep only last 10 shocks
+        if len(civ.recent_shocks) > 10:
+            civ.recent_shocks = civ.recent_shocks[-10:]
+
+    @classmethod
+    def roll_macro_shocks(cls, civ: MinorCiv, rng: SeededRNG, tick: int):
+        """
+        Roll for macro shocks this tick.  Low probability, high impact.
+
+        Biome modifiers make certain shocks more/less likely.
+        """
+        biome_mods = BIOME_SHOCK_MODS.get(civ.biome, {})
+        shock_rng = rng.fork(f"shock_{civ.civ_id}")
+
+        for shock_type, profile in MACRO_SHOCK_PROFILES.items():
+            base_prob = profile["prob"]
+            # Biome modifier
+            biome_mult = biome_mods.get(shock_type, 1.0)
+            # High volatility makes shocks more likely
+            vol_mult = 1.0 + max(0, civ.volatility - 10) * 0.01
+            # Low stability makes destructive shocks more likely
+            if shock_type in (MacroShockType.CIVIL_WAR, MacroShockType.PLAGUE,
+                              MacroShockType.PROPHETIC_SCHISM):
+                instability_mult = 1.0 + max(0, 50 - civ.stability) * 0.02
+            else:
+                instability_mult = 1.0
+
+            final_prob = base_prob * biome_mult * vol_mult * instability_mult
+
+            if shock_rng.random() < final_prob:
+                mag_lo, mag_hi = profile["mag"]
+                magnitude = shock_rng.uniform(mag_lo, mag_hi)
+                cls.apply_macro_shock(civ, shock_type, magnitude, tick)
+
+
+# ── ImportanceScorer — Dynamic Ranking ────────────────────────
+
+class ImportanceScorer:
+    """
+    Computes a dynamic "Global Importance Score" for every civ.
+
+    importance =
+        0.28 * economic_power      (wealth_index)
+      + 0.18 * military_strength
+      + 0.18 * trade_dependency    (coupling to player economy)
+      + 0.13 * volatility_score    (narrative potential)
+      + 0.10 * prestige            (sustained prosperity — peaceful climb)
+      + 0.08 * threat_level        (ideological opposition × military)
+      + 0.05 * shock_recency       (recent shocks boost importance)
+
+    Prestige allows Golden Age civilizations to climb the leaderboard
+    without military conquest.  It rewards sustained peace + low
+    volatility during positive eras.
+
+    Importance is DYNAMIC.  A small civ can suddenly matter.
+    That's drama.
+
+    The ranking determines who enters the Top 20 (Layer B)
+    and who falls back to the Deep Field (Layer A).
+    """
+
+    # Weights (must sum to 1.0)
+    W_ECONOMIC: float = 0.28
+    W_MILITARY: float = 0.18
+    W_TRADE_DEP: float = 0.18
+    W_VOLATILITY: float = 0.13
+    W_PRESTIGE: float = 0.10
+    W_THREAT: float = 0.08
+    W_SHOCK_RECENCY: float = 0.05
+
+    @classmethod
+    def score(cls, civ: MinorCiv, player_alignment: float = 0.0,
+              current_tick: int = 0) -> float:
+        """Compute importance score for a single civ."""
+        economic = civ.wealth_index
+        military = civ.military_strength
+        trade_dep = civ.trade_dependency
+
+        # Volatility score: high volatility = narratively interesting
+        # Sigmoid: peaks around volatility=20-30
+        vol_score = min(100, civ.volatility * 3.0)
+
+        # Threat level: ideological opposition × military power
+        alignment_opposition = abs(civ.cultural_alignment - player_alignment)
+        threat = (alignment_opposition / 50.0) * civ.military_strength
+
+        # Shock recency: recent shocks boost importance temporarily
+        shock_bonus = 0.0
+        for shock in civ.recent_shocks:
+            ticks_ago = max(1, current_tick - shock.tick)
+            # Exponential decay: half-life ~100 ticks
+            decay = math.exp(-ticks_ago / 100.0)
+            shock_bonus += shock.magnitude * decay * 0.5
+        shock_bonus = min(100, shock_bonus)
+
+        # Prestige: sustained positive eras → peaceful importance climb
+        # Scaled to 0-100 range (prestige caps at 30, × 3.33 → 100)
+        prestige_score = min(100, civ.prestige * 3.33)
+
+        importance = (
+            cls.W_ECONOMIC * economic
+            + cls.W_MILITARY * military
+            + cls.W_TRADE_DEP * trade_dep
+            + cls.W_VOLATILITY * vol_score
+            + cls.W_PRESTIGE * prestige_score
+            + cls.W_THREAT * threat
+            + cls.W_SHOCK_RECENCY * shock_bonus
+        )
+
+        return max(0, min(100, importance))
+
+    @classmethod
+    def rank_all(cls, civs: List[MinorCiv], player_alignment: float = 0.0,
+                 current_tick: int = 0) -> List[MinorCiv]:
+        """Score and rank all civs.  Returns sorted list (highest first)."""
+        for civ in civs:
+            civ.importance = cls.score(civ, player_alignment, current_tick)
+        civs.sort(key=lambda c: c.importance, reverse=True)
+        for i, civ in enumerate(civs):
+            civ.rank = i + 1
+        return civs
+
+
+# ── CivPromoter — Promotion / Demotion Lifecycle ─────────────
+
+class CivPromoter:
+    """
+    Manages the promotion of Deep Field civs to Tracked Field
+    and demotion of stagnant Tracked civs back to Deep Field.
+
+    Promotion:
+      - MinorCiv importance crosses PROMOTION_THRESHOLD
+      - AND there's a slot in the Top 20 (or it outranks the weakest)
+      - → Instantiate full KingdomState from MinorCiv seed + archived state
+      - → Generate Oracle personality
+      - → Begin full simulation
+
+    Demotion:
+      - Tracked kingdom importance below DEMOTION_THRESHOLD for N ticks
+      - → Archive KingdomState to dict
+      - → Collapse back to MinorCiv
+      - → Can return later with archived history
+
+    Hysteresis: promotion threshold > demotion threshold
+    to prevent oscillation at the boundary.
+    """
+
+    PROMOTION_THRESHOLD: float = 45.0     # importance score to enter Top 20
+    DEMOTION_THRESHOLD: float = 35.0      # importance score to fall out
+    DEMOTION_GRACE_TICKS: int = 3         # must fail this many consecutive lifecycle checks
+    MAX_TRACKED: int = 20                 # maximum Layer B kingdoms
+
+    @classmethod
+    def identify_promotions(cls, minor_civs: List[MinorCiv],
+                            tracked_count: int) -> List[MinorCiv]:
+        """
+        Return minor civs eligible for promotion (or displacement).
+
+        A civ is eligible if:
+        1. importance >= PROMOTION_THRESHOLD
+        2. Not already promoted
+
+        Returns ALL eligible civs sorted by importance (caller handles
+        slot limits and displacement logic).
+        """
+        eligible = []
+        for civ in minor_civs:
+            if civ.is_promoted:
+                continue
+            if civ.importance >= cls.PROMOTION_THRESHOLD:
+                eligible.append(civ)
+
+        # Sort by importance descending
+        eligible.sort(key=lambda c: c.importance, reverse=True)
+        return eligible
+
+    @classmethod
+    def identify_demotions(cls, tracked_kingdoms: List[KingdomState],
+                           minor_civs: List[MinorCiv],
+                           demotion_counters: Dict[str, int]) -> List[str]:
+        """
+        Return kingdom_ids of tracked kingdoms that should be demoted.
+
+        Never demotes the player kingdom.
+        """
+        demotable = []
+        for ks in tracked_kingdoms:
+            if ks.is_player:
+                continue
+            kid = ks.kingdom_id
+
+            # Compute a rough importance for tracked kingdoms
+            # using their actual detailed state
+            importance = cls._tracked_importance(ks)
+
+            if importance < cls.DEMOTION_THRESHOLD:
+                counter = demotion_counters.get(kid, 0) + 1
+                demotion_counters[kid] = counter
+                if counter >= cls.DEMOTION_GRACE_TICKS:
+                    demotable.append(kid)
+            else:
+                # Reset counter if they recover
+                demotion_counters[kid] = 0
+
+        return demotable
+
+    @classmethod
+    def _tracked_importance(cls, ks: KingdomState) -> float:
+        """
+        Importance score for a tracked (full) kingdom.
+
+        Must produce values on the SAME 0-100 scale as ImportanceScorer.score()
+        so displacement comparisons are meaningful.
+        """
+        # Economic: trade_volume + treasury contribution
+        economic = min(100, ks.physical.trade_volume + ks.physical.treasury * 0.005)
+        military = ks.political.enforcement_capacity
+        # Volatility: how narratively interesting is this kingdom?
+        vol_raw = (abs(ks.social.class_tension - 30) + ks.social.fear_level
+                   + abs(ks.belief.interpretation_divergence - 10))
+        vol_score = min(100, vol_raw * 0.8)
+        # Trade dependency placeholder (tracked kingdoms are tightly coupled)
+        trade_dep = min(100, ks.physical.trade_volume * 1.2)
+        # Threat: enforcement × corruption as instability marker
+        threat = min(100, ks.political.enforcement_capacity * ks.political.corruption * 0.02)
+
+        return (
+            ImportanceScorer.W_ECONOMIC * economic
+            + ImportanceScorer.W_MILITARY * military
+            + ImportanceScorer.W_TRADE_DEP * trade_dep
+            + ImportanceScorer.W_VOLATILITY * vol_score
+            + ImportanceScorer.W_THREAT * threat
+            + ImportanceScorer.W_SHOCK_RECENCY * 10  # tracked kingdoms get small recency bonus
+        )
+
+    @classmethod
+    def promote(cls, civ: MinorCiv, master_rng: SeededRNG,
+                current_tick: int) -> KingdomState:
+        """
+        Promote a MinorCiv to a full KingdomState.
+
+        If the civ has archived_state (was previously demoted),
+        restore from archive.  Otherwise, build fresh from seed.
+
+        The Oracle personality is generated from the civ's seed —
+        deterministic and unique to this civ.
+        """
+        if civ.archived_state:
+            # Restore from archive
+            ks = KingdomState.from_dict(civ.archived_state)
+            ks.tick = current_tick
+            civ.archived_state = None
+        else:
+            # Fresh build from seed
+            ks = WorldBuilder.build_kingdom(
+                kingdom_id=civ.civ_id,
+                seed=civ.seed,
+                is_player=False,
+            )
+            ks.name = civ.name
+            ks.tick = current_tick
+
+            # Imprint minor civ state onto the new kingdom
+            # so it enters the simulation matching its macro trajectory
+            ks.physical.food_stores = civ.wealth_index * 1.2
+            ks.physical.trade_volume = civ.trade_dependency * 0.6 + civ.wealth_index * 0.4
+            ks.physical.infrastructure = civ.wealth_index * 0.8 + 10
+            ks.social.cohesion = civ.stability * 0.8 + 10
+            ks.social.class_tension = max(5, 80 - civ.stability)
+            ks.social.fear_level = max(5, civ.volatility * 2)
+            ks.social.hope_level = civ.stability * 0.6 + civ.momentum * 5 + 20
+            ks.political.legitimacy = civ.stability * 0.7 + 15
+            ks.political.enforcement_capacity = civ.military_strength * 0.8 + 10
+            ks.political.corruption = max(5, 60 - civ.stability * 0.5)
+            ks.belief.public_faith = 50 + civ.cultural_alignment * 0.5
+            ks.belief.interpretation_divergence = max(5, civ.volatility * 1.5)
+
+            # Clamp all values
+            for layer in [ks.physical, ks.social, ks.political, ks.belief]:
+                for attr in vars(layer):
+                    val = getattr(layer, attr)
+                    if isinstance(val, (int, float)) and attr not in ("treasury", "trade_balance"):
+                        setattr(layer, attr, max(0, min(100, val)))
+
+            # ── Seed era from MinorCiv era_flag ──
+            # So civs can enter the Top 20 already mid-crisis.
+            _ERA_FLAG_TO_IDENTITY = {
+                "STABLE": EraIdentity.STABLE,
+                "GOLDEN_AGE": EraIdentity.GOLDEN_AGE,
+                "FAMINE": EraIdentity.FAMINE_ERA,
+                "CIVIL_CRISIS": EraIdentity.IDEOLOGICAL_FRACTURE,
+                "DECLINE": EraIdentity.DECLINE,
+                "MILITANT": EraIdentity.MILITANT_POSTURE,
+                "RENAISSANCE": EraIdentity.RENAISSANCE,
+                "REFORMATION_RISE": EraIdentity.REFORMATION,
+                "REFORMATION_FALL": EraIdentity.IDEOLOGICAL_FRACTURE,
+                "TRADE_HEGEMONY": EraIdentity.GOLDEN_AGE,
+                "ASCENDANT": EraIdentity.RENAISSANCE,
+            }
+            mapped_era = _ERA_FLAG_TO_IDENTITY.get(civ.era_flag, EraIdentity.STABLE)
+            if mapped_era != EraIdentity.STABLE:
+                ks.current_era = mapped_era
+                ks.era_history.append(EraRecord(
+                    era=mapped_era.name,
+                    started_tick=current_tick,
+                    health_at_start=ks.health.composite if hasattr(ks.health, "composite") else 50.0,
+                    trigger_conditions={"source": "deep_field_promotion", "era_flag": civ.era_flag},
+                ))
+
+        civ.is_promoted = True
+        civ.promoted_at_tick = current_tick
+        return ks
+
+    @classmethod
+    def demote(cls, ks: KingdomState, civ: MinorCiv, current_tick: int):
+        """
+        Demote a tracked KingdomState back to MinorCiv.
+
+        Archives the full state for potential future restoration.
+        Syncs the MinorCiv vector to match the kingdom's current state.
+        """
+        # Archive full state
+        civ.archived_state = ks.to_dict()
+        civ.demoted_at_tick = current_tick
+        civ.is_promoted = False
+
+        # Sync MinorCiv vector from kingdom state
+        civ.wealth_index = (ks.physical.trade_volume + ks.physical.food_stores * 0.5) * 0.5
+        civ.stability = ks.social.cohesion * 0.5 + (100 - ks.social.class_tension) * 0.3 + ks.political.legitimacy * 0.2
+        civ.population = ks.physical.labor_pool
+        civ.military_strength = ks.political.enforcement_capacity
+        civ.volatility = abs(ks.social.class_tension - 30) * 0.15 + ks.social.fear_level * 0.1
+        civ.cultural_alignment = (ks.belief.public_faith - 50) * 0.5
+        civ.trade_dependency = ks.physical.trade_volume * 0.5
+
+
+# ── GeopoliticalState — Top-Level Three-Layer Container ───────
+
+@dataclass
+class GeopoliticalState:
+    """
+    The complete world state across all three resolution layers.
+
+    This is the master container for the new architecture:
+      - player_kingdom: Layer C (full sim, direct control)
+      - tracked_kingdoms: Layer B (full sim, AI oracle, narrated)
+      - deep_field: Layer A (MinorCiv vectors, cheap updates)
+
+    The importance leaderboard is recomputed every RANK_INTERVAL ticks.
+    Promotion/demotion happens at LIFECYCLE_INTERVAL ticks.
+    """
+    game_id: str = ""
+    master_seed: int = 0
+    time_config: TimeConfig = field(default_factory=TimeConfig)
+    current_tick: int = 0
+
+    # ── Layer C: The Player Kingdom ──
+    player_kingdom: KingdomState = field(default_factory=KingdomState)
+
+    # ── Layer B: Tracked Kingdoms (Top ~20) ──
+    tracked_kingdoms: Dict[str, KingdomState] = field(default_factory=dict)
+
+    # ── Layer A: Deep Field (21–500+) ──
+    deep_field: List[MinorCiv] = field(default_factory=list)
+
+    # ── Global aggregates (computed each tick, affect all civs) ──
+    global_trade_index: float = 50.0     # aggregate trade health
+    global_ideology_field: float = 0.0   # net ideological pressure
+    global_population: float = 0.0       # sum of all populations (for narrative)
+    global_conflict_tension: float = 0.0 # aggregate instability
+
+    # ── Importance leaderboard ──
+    leaderboard: List[str] = field(default_factory=list)  # civ_ids in rank order
+    leaderboard_history: List[Dict[str, int]] = field(default_factory=list)  # snapshots
+
+    # ── Promotion/demotion bookkeeping ──
+    demotion_counters: Dict[str, int] = field(default_factory=dict)
+    promotion_log: List[dict] = field(default_factory=list)
+    demotion_log: List[dict] = field(default_factory=list)
+
+    # ── Tuning ──
+    RANK_INTERVAL: int = 10             # re-rank every N ticks
+    LIFECYCLE_INTERVAL: int = 50        # promote/demote every N ticks
+    INFLUENCE_RECOMPUTE_INTERVAL: int = 10
+
+    def to_dict(self) -> dict:
+        return {
+            "game_id": self.game_id,
+            "master_seed": self.master_seed,
+            "time_config": self.time_config.to_dict(),
+            "current_tick": self.current_tick,
+            "player_kingdom": self.player_kingdom.to_dict(),
+            "tracked_kingdoms": {k: v.to_dict() for k, v in self.tracked_kingdoms.items()},
+            "deep_field": [c.to_dict() for c in self.deep_field],
+            "global_trade_index": self.global_trade_index,
+            "global_ideology_field": self.global_ideology_field,
+            "global_population": self.global_population,
+            "global_conflict_tension": self.global_conflict_tension,
+            "leaderboard": list(self.leaderboard),
+            "demotion_counters": dict(self.demotion_counters),
+            "promotion_log": list(self.promotion_log),
+            "demotion_log": list(self.demotion_log),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GeopoliticalState":
+        gs = cls()
+        gs.game_id = d.get("game_id", "")
+        gs.master_seed = d.get("master_seed", 0)
+        gs.time_config = TimeConfig.from_dict(d.get("time_config", {}))
+        gs.current_tick = d.get("current_tick", 0)
+        gs.player_kingdom = KingdomState.from_dict(d.get("player_kingdom", {}))
+        gs.tracked_kingdoms = {
+            k: KingdomState.from_dict(v)
+            for k, v in d.get("tracked_kingdoms", {}).items()
+        }
+        gs.deep_field = [MinorCiv.from_dict(c) for c in d.get("deep_field", [])]
+        gs.global_trade_index = d.get("global_trade_index", 50.0)
+        gs.global_ideology_field = d.get("global_ideology_field", 0.0)
+        gs.global_population = d.get("global_population", 0.0)
+        gs.global_conflict_tension = d.get("global_conflict_tension", 0.0)
+        gs.leaderboard = d.get("leaderboard", [])
+        gs.demotion_counters = d.get("demotion_counters", {})
+        gs.promotion_log = d.get("promotion_log", [])
+        gs.demotion_log = d.get("demotion_log", [])
+        return gs
+
+
+# ── GeopoliticalEngine — Three-Layer Tick Driver ──────────────
+
+class GeopoliticalEngine:
+    """
+    Master tick driver for the three-layer world.
+
+    Each tick:
+      1. Update global aggregates (trade index, ideology field)
+      2. Tick all Deep Field civs (cheap: ~10 muls each)
+      3. Roll macro shocks for Deep Field
+      4. Tick all Tracked kingdoms (full SimulationEngine.advance_tick)
+      5. Tick player kingdom (full sim + decree opportunity)
+      6. Periodically: recompute importance rankings
+      7. Periodically: promote/demote civs between layers
+
+    Cross-layer coupling:
+      - Deep Field civs affect global_trade_index and global_ideology_field
+      - Tracked kingdoms affect these too (weighted more heavily)
+      - Player kingdom is the anchor — its state influences trade_dependency
+        for all Deep Field civs
+      - Tracked kingdoms' events can spawn ripple effects on nearby Deep Field civs
+    """
+
+    @classmethod
+    def compute_global_aggregates(cls, geo: GeopoliticalState):
+        """Recompute world-level aggregate indices from all civs."""
+        total_trade = 0.0
+        total_ideology = 0.0
+        total_pop = 0.0
+        total_tension = 0.0
+        count = 0
+
+        # Player kingdom (heaviest weight)
+        pk = geo.player_kingdom
+        total_trade += pk.physical.trade_volume * 3.0  # 3× weight
+        total_ideology += (pk.belief.public_faith - 50) * 2.0
+        total_pop += pk.physical.labor_pool
+        total_tension += pk.social.class_tension
+        count += 3  # weighted count
+
+        # Tracked kingdoms (2× weight)
+        for ks in geo.tracked_kingdoms.values():
+            total_trade += ks.physical.trade_volume * 2.0
+            total_ideology += (ks.belief.public_faith - 50) * 1.5
+            total_pop += ks.physical.labor_pool
+            total_tension += ks.social.class_tension
+            count += 2
+
+        # Deep Field civs (1× weight each)
+        for civ in geo.deep_field:
+            if not civ.is_promoted:
+                total_trade += civ.wealth_index * 0.5
+                total_ideology += civ.cultural_alignment * 0.3
+                total_pop += civ.population
+                total_tension += max(0, 50 - civ.stability) * 0.5
+                count += 1
+
+        if count > 0:
+            geo.global_trade_index = max(0, min(100, total_trade / count))
+            geo.global_ideology_field = max(-50, min(50, total_ideology / count))
+            geo.global_population = total_pop
+            geo.global_conflict_tension = max(0, min(100, total_tension / count))
+
+    @classmethod
+    def tick(cls, geo: GeopoliticalState, rng: SeededRNG,
+             decree_callback=None):
+        """
+        Advance the entire three-layer world by one tick.
+
+        decree_callback: optional callable(kingdom) for AI oracle decisions
+                         on tracked kingdoms.  Player decrees are handled
+                         externally (UI input).
+        """
+        tick = geo.current_tick
+        tick_rng = rng.fork(f"geo_tick_{tick}")
+
+        # ── 1. Global aggregates ──
+        cls.compute_global_aggregates(geo)
+
+        player_wealth = geo.player_kingdom.physical.trade_volume
+
+        # ── 2. Deep Field tick (all minor civs) ──
+        for civ in geo.deep_field:
+            if civ.is_promoted:
+                continue  # handled as tracked kingdom
+            civ_rng = tick_rng.fork(f"minor_{civ.civ_id}")
+
+            # Tick simplified oracle lifecycle (boolean active/sleeping)
+            MinorCivOracleState.tick(civ.oracle_state, civ_rng, tick)
+
+            MacroEngine.tick_minor_civ(
+                civ, civ_rng,
+                global_trade_index=geo.global_trade_index,
+                global_ideology_field=geo.global_ideology_field,
+                player_wealth=player_wealth,
+                current_tick=tick,
+            )
+
+            # ── 3. Macro shocks ──
+            # Oracle-active civs get slightly damped shocks;
+            # sleeping civs get increased susceptibility (handled inside roll)
+            MacroEngine.roll_macro_shocks(civ, civ_rng, tick)
+
+        # ── Influence recompute (periodic) ──
+        if tick % MacroEngine.INFLUENCE_RECOMPUTE_INTERVAL == 0:
+            for civ in geo.deep_field:
+                if not civ.is_promoted:
+                    MacroEngine.recompute_influence(civ)
+
+        # ── Positive era influence propagation (periodic) ──
+        # Good radiates — GOLDEN_AGE, TRADE_HEGEMONY, REFORMATION_RISE
+        # emit soft buffs to same-region neighbors.
+        if tick % 10 == 0:
+            MacroEngine.propagate_positive_influence(geo.deep_field)
+
+        # ── 4. Tracked kingdoms tick ──
+        for kid, ks in list(geo.tracked_kingdoms.items()):
+            ks_rng = tick_rng.fork(f"tracked_{kid}")
+            SimulationEngine.advance_tick(ks, ks_rng, geo.time_config)
+
+            # Oracle lifecycle tick
+            OracleLifecycleEngine.tick(ks.oracle_lifecycle, ks_rng, tick)
+
+            # Apply dormancy / active influence modifiers
+            lc_mods = OracleLifecycleEngine.get_influence_modifiers(ks.oracle_lifecycle)
+            OracleLifecycleEngine.apply_dormancy_effects(ks, lc_mods)
+
+            # AI Oracle decree — gated behind ACTIVE state
+            if (decree_callback
+                    and tick % 15 == 0
+                    and OracleLifecycleEngine.is_decree_allowed(ks.oracle_lifecycle)):
+                decree_callback(ks, ks_rng)
+
+        # ── 5. Player kingdom tick ──
+        pk_rng = tick_rng.fork("player")
+        SimulationEngine.advance_tick(
+            geo.player_kingdom, pk_rng, geo.time_config
+        )
+
+        # Player oracle lifecycle tick
+        OracleLifecycleEngine.tick(
+            geo.player_kingdom.oracle_lifecycle, pk_rng, tick
+        )
+
+        # Player dormancy effects (faith erosion while sleeping)
+        pk_mods = OracleLifecycleEngine.get_influence_modifiers(
+            geo.player_kingdom.oracle_lifecycle
+        )
+        OracleLifecycleEngine.apply_dormancy_effects(geo.player_kingdom, pk_mods)
+
+        # ── 6. Importance ranking (periodic) ──
+        if tick % geo.RANK_INTERVAL == 0:
+            player_alignment = (geo.player_kingdom.belief.public_faith - 50) * 0.5
+            # Rank deep field
+            ImportanceScorer.rank_all(
+                geo.deep_field, player_alignment, tick
+            )
+            # Update leaderboard
+            geo.leaderboard = [c.civ_id for c in geo.deep_field[:50]]
+
+        # ── 7. Promotion / Demotion (periodic) ──
+        if tick % geo.LIFECYCLE_INTERVAL == 0:
+            cls._handle_promotions(geo, tick_rng, tick)
+            cls._handle_demotions(geo, tick)
+
+        geo.current_tick = tick + 1
+
+    @classmethod
+    def _handle_promotions(cls, geo: GeopoliticalState,
+                           rng: SeededRNG, tick: int):
+        """
+        Promote eligible Deep Field civs to Tracked.
+
+        If the tracked field is full, a rising Deep Field civ can
+        DISPLACE the weakest tracked kingdom — forcing a demotion
+        to make room.  This creates the churn that keeps the
+        leaderboard alive.
+
+        Displacement requires the Deep Field civ's importance to
+        exceed the weakest tracked kingdom's importance by at least
+        DISPLACEMENT_MARGIN (hysteresis to prevent oscillation).
+        """
+        DISPLACEMENT_MARGIN = 5.0  # must be this much better to displace
+
+        tracked_count = len(geo.tracked_kingdoms)
+        eligible = CivPromoter.identify_promotions(
+            geo.deep_field, tracked_count
+        )
+
+        # If there's room, promote directly
+        for civ in list(eligible):
+            if len(geo.tracked_kingdoms) < CivPromoter.MAX_TRACKED:
+                ks = CivPromoter.promote(civ, rng, tick)
+                geo.tracked_kingdoms[ks.kingdom_id] = ks
+                geo.promotion_log.append({
+                    "civ_id": civ.civ_id,
+                    "tick": tick,
+                    "importance": civ.importance,
+                    "name": civ.name,
+                    "era_flag": civ.era_flag,
+                })
+                _dbg(f"PROMOTED: {civ.name} (rank {civ.rank}, importance {civ.importance:.1f}, era={civ.era_flag})")
+                eligible.remove(civ)
+            else:
+                break
+
+        # If tracked field is full, try displacement
+        if len(geo.tracked_kingdoms) >= CivPromoter.MAX_TRACKED and eligible:
+            # Find weakest non-player tracked kingdom
+            weakest_kid = None
+            weakest_importance = float("inf")
+            for kid, ks in geo.tracked_kingdoms.items():
+                if ks.is_player:
+                    continue
+                imp = CivPromoter._tracked_importance(ks)
+                if imp < weakest_importance:
+                    weakest_importance = imp
+                    weakest_kid = kid
+
+            # Check if any eligible civ can displace the weakest
+            for civ in eligible:
+                if weakest_kid is None:
+                    break
+                if civ.importance > weakest_importance + DISPLACEMENT_MARGIN:
+                    # Demote the weakest tracked kingdom
+                    demoted_ks = geo.tracked_kingdoms.pop(weakest_kid)
+                    for mc in geo.deep_field:
+                        if mc.civ_id == weakest_kid:
+                            CivPromoter.demote(demoted_ks, mc, tick)
+                            geo.demotion_log.append({
+                                "civ_id": weakest_kid,
+                                "tick": tick,
+                                "name": mc.name,
+                                "reason": "displaced",
+                            })
+                            _dbg(f"DISPLACED: {mc.name} (importance {weakest_importance:.1f})")
+                            break
+
+                    # Promote the rising civ
+                    ks = CivPromoter.promote(civ, rng, tick)
+                    geo.tracked_kingdoms[ks.kingdom_id] = ks
+                    geo.promotion_log.append({
+                        "civ_id": civ.civ_id,
+                        "tick": tick,
+                        "importance": civ.importance,
+                        "name": civ.name,
+                        "displaced": weakest_kid,
+                        "era_flag": civ.era_flag,
+                    })
+                    _dbg(f"PROMOTED (displacement): {civ.name} (importance {civ.importance:.1f}, era={civ.era_flag})")
+
+                    # Re-find weakest for next iteration
+                    weakest_kid = None
+                    weakest_importance = float("inf")
+                    for kid, ks2 in geo.tracked_kingdoms.items():
+                        if ks2.is_player:
+                            continue
+                        imp = CivPromoter._tracked_importance(ks2)
+                        if imp < weakest_importance:
+                            weakest_importance = imp
+                            weakest_kid = kid
+
+    @classmethod
+    def _handle_demotions(cls, geo: GeopoliticalState, tick: int):
+        """Demote stagnant Tracked kingdoms back to Deep Field."""
+        tracked_list = list(geo.tracked_kingdoms.values())
+        demotable_ids = CivPromoter.identify_demotions(
+            tracked_list, geo.deep_field, geo.demotion_counters
+        )
+
+        for kid in demotable_ids:
+            if kid not in geo.tracked_kingdoms:
+                continue
+            ks = geo.tracked_kingdoms.pop(kid)
+            # Find the corresponding MinorCiv
+            for civ in geo.deep_field:
+                if civ.civ_id == kid:
+                    CivPromoter.demote(ks, civ, tick)
+                    geo.demotion_log.append({
+                        "civ_id": kid,
+                        "tick": tick,
+                        "name": civ.name,
+                        "reason": "stagnation",
+                    })
+                    _dbg(f"DEMOTED: {civ.name} back to Deep Field")
+                    break
+
+
+# ── Deep Field Builder ────────────────────────────────────────
+
+class DeepFieldBuilder:
+    """
+    Procedural generation of the Deep Field (Layer A).
+
+    Generates N minor civs with deterministic seeds, names, biomes,
+    and initial state vectors.  The player's ideology influences
+    the distribution of cultural alignments (some are natural allies,
+    some are natural rivals).
+    """
+
+    @classmethod
+    def build_deep_field(cls, master_seed: int, count: int = 200,
+                         player_alignment: float = 0.0) -> List[MinorCiv]:
+        """Generate the full Deep Field."""
+        rng = SeededRNG(master_seed)
+        civs = []
+
+        for i in range(count):
+            civ_rng = rng.fork(f"minor_civ_{i}")
+            civ = MinorCiv(
+                civ_id=f"deep_{i:04d}",
+                name=WorldBuilder.generate_kingdom_name(civ_rng.fork("name")),
+                seed=civ_rng.seed,
+                biome=civ_rng.choice(BIOME_TYPES),
+                geographic_region=civ_rng.randint(0, 7),
+            )
+
+            # Initial state: varied but centered
+            civ.population = civ_rng.gauss(50, 15)
+            civ.wealth_index = civ_rng.gauss(45, 18)
+            civ.stability = civ_rng.gauss(50, 12)
+            civ.military_strength = civ_rng.gauss(30, 15)
+            civ.influence_score = civ_rng.gauss(15, 10)
+
+            # Cultural alignment: bell curve around 0 with some outliers
+            # Player-aligned civs are slightly more common (narrative bias)
+            alignment_center = player_alignment * 0.1  # slight pull toward player
+            civ.cultural_alignment = civ_rng.gauss(alignment_center, 20)
+
+            # Trade dependency: mostly low initially
+            civ.trade_dependency = max(0, civ_rng.gauss(10, 12))
+
+            # Initial macro engines
+            civ.momentum = civ_rng.gauss(0, 2)
+            civ.volatility = max(2, civ_rng.gauss(5, 3))
+
+            # Oracle lifecycle (simplified for deep field)
+            civ.oracle_state = MinorCivOracleState.build(civ_rng.seed, master_seed)
+
+            # Clamp
+            civ.population = max(5, min(95, civ.population))
+            civ.wealth_index = max(5, min(95, civ.wealth_index))
+            civ.stability = max(5, min(95, civ.stability))
+            civ.military_strength = max(5, min(95, civ.military_strength))
+            civ.influence_score = max(0, min(100, civ.influence_score))
+            civ.cultural_alignment = max(-50, min(50, civ.cultural_alignment))
+            civ.trade_dependency = max(0, min(100, civ.trade_dependency))
+
+            civs.append(civ)
+
+        return civs
 
 
 # ============================================================
@@ -5120,6 +7232,11 @@ class WorldBuilder:
 
         # ---- Ensemble cast ----
         ks.characters, ks.relationships = cls.build_ensemble_cast(kingdom_id, ks.factions, rng)
+
+        # ---- Oracle lifecycle (sleep/wake system) ----
+        ks.oracle_lifecycle = OracleLifecycleEngine.build_from_oracle(
+            ks.oracle, seed, seed  # civ_seed = global_seed for single-kingdom builds
+        )
 
         return ks
 
@@ -6233,12 +8350,37 @@ class OraclePsychology:
         oracle.hope *= 0.97
 
         # ---- Dread drift ----
-        # High paranoia + threats → dread
+        # Dread is the Oracle's anticipation of catastrophe.
+        # It responds to:
+        #   - External threats amplified by paranoia
+        #   - Internal doubt
+        #   - Silence frequency (court layer feeds this via stress)
+        #   - Authoritarian drift (fear-based governance)
+        #
+        # Dread also DECAYS when the kingdom is healthy and threats
+        # are low — the Oracle can relax.  Previous hard cap at 50
+        # prevented any dynamic range.
         paranoia_factor = oracle.effective("paranoia") / 50.0
         doubt_factor = oracle.effective("doubt") / 50.0
         threat = pol.external_threat / 100.0
-        oracle.dread += (threat * paranoia_factor + doubt_factor * 0.1 - 0.05) * 0.5
-        oracle.dread = max(-5, min(50, oracle.dread))
+        fear_pressure = state.social.fear_level / 100.0
+
+        # Upward pressure: threats, paranoia, doubt, fear governance
+        dread_push = (
+            threat * paranoia_factor * 0.4
+            + doubt_factor * 0.08
+            + fear_pressure * paranoia_factor * 0.15
+        )
+        # Downward pressure: safety, hope, healthy kingdom
+        health_composite = state.health.composite / 100.0
+        dread_pull = (
+            0.05                                    # natural decay
+            + health_composite * 0.04               # healthy = reassuring
+            + max(0, oracle.hope) * 0.01            # hope counteracts dread
+        )
+        oracle.dread += (dread_push - dread_pull) * 0.5
+        oracle.dread *= 0.995  # slow mean-reversion toward 0
+        oracle.dread = max(-10, min(100, oracle.dread))
 
         # ---- Trait drift based on accumulated psychology ----
         outcome_vector: Dict[str, float] = {}
@@ -6371,6 +8513,551 @@ class MythMemory:
                 if value != 0 and later_value != 0 and (value * later_value < 0):
                     return True
         return False
+
+
+# ============================================================
+# SECTION 12B: ARCHETYPE MODIFIER ENGINE
+# ============================================================
+#
+# Phase 15: Archetypes stop being decorative classifiers and become
+# mechanical engines that shape the kingdom every tick.
+#
+# Each archetype defines:
+#   • per-tick drift: slow structural changes to variables
+#   • event probability modifiers: which crises are more/less likely
+#   • decree effectiveness modifiers: which policy axes work better/worse
+#   • scar generation modifiers: which scars form more easily
+#
+# The archetype string is synced from CourtState.oracle_identity.archetype
+# to KingdomState.oracle_archetype each tick by the caller.
+
+class ArchetypeModifierEngine:
+    """
+    Applies per-tick mechanical effects based on the Oracle's archetype.
+
+    POPULIST:  Cohesion buff, institutional decay, class tension reduction,
+               but institutional strength rots — popularity without structure.
+    HAWK:      Enforcement multiplier, fear creep, cohesion decay.
+               Military power at the cost of social fabric.
+    PIOUS:     Faith multiplier, cultural confidence boost,
+               but literacy stagnation and reform resistance.
+    ERRATIC:   High variance — random boosts AND random drains each tick.
+               Boom-bust kingdom.
+    MERCHANT:  Treasury/trade boost, class tension creep.
+               Rich kingdom with growing inequality.
+    REFORMIST: Institutional strength boost, corruption reduction,
+               but short-term legitimacy cost and instability.
+    SILENT:    Sacred silence accumulates, fear of abandonment creeps.
+               Interpretation divergence rises as people fill the void.
+    TYRANT:    Fear ramp, enforcement boost, legitimacy hemorrhage.
+               Raw power without consent.
+    """
+
+    # ── Archetype → per-tick drift table ─────────────────────
+    # Each entry: { variable: delta_per_tick }
+    # Deltas are moderate (0.01–0.06) — they compound over hundreds of ticks.
+    # At 5000 ticks a ±0.03 drift moves a variable ±150 raw points
+    # (clamped to 0–100), meaning the archetype WILL reshape the kingdom
+    # over a long run.
+    DRIFT_TABLE: Dict[str, Dict[str, float]] = {
+        "THE_POPULIST": {
+            "cohesion": +0.015,
+            "hope_level": +0.012,
+            "class_tension": -0.010,
+            "institutional_strength": -0.030,   # THIS is the POPULIST trap
+            "enforcement_capacity": -0.015,
+            "corruption": +0.018,               # populism breeds graft
+            "literacy": -0.008,                 # anti-expert sentiment
+        },
+        "THE_HAWK": {
+            "enforcement_capacity": +0.035,
+            "fear_level": +0.025,
+            "cohesion": -0.020,
+            "hope_level": -0.010,
+            "external_threat": -0.012,  # military deters threats
+            "class_tension": +0.015,
+            "corruption": +0.010,       # military-industrial graft
+        },
+        "THE_PIOUS": {
+            "public_faith": +0.030,
+            "cultural_confidence": +0.015,
+            "literacy": -0.018,         # anti-intellectualism
+            "law_rigidity": +0.020,
+            "interpretation_divergence": -0.010,  # orthodoxy suppresses divergence
+            "corruption": -0.008,       # moral authority reduces graft
+            "class_tension": +0.008,    # religious hierarchy creates tension
+        },
+        "THE_ERRATIC": {
+            # Erratic drifts are applied with random sign flips — see tick()
+        },
+        "THE_MERCHANT": {
+            "trade_volume": +0.030,
+            "infrastructure": +0.015,
+            "class_tension": +0.025,    # inequality is the merchant's curse
+            "corruption": +0.020,
+            "cohesion": -0.015,
+            "public_faith": -0.010,     # materialism erodes faith
+        },
+        "THE_REFORMIST": {
+            "institutional_strength": +0.025,
+            "corruption": -0.020,
+            "law_rigidity": -0.018,
+            "legitimacy": -0.012,       # change is disruptive
+            "cohesion": -0.010,         # reform creates winners and losers
+            "literacy": +0.015,
+            "class_tension": +0.008,    # reform destabilizes power
+        },
+        "THE_SILENT": {
+            "interpretation_divergence": +0.025,
+            "fear_level": +0.010,       # fear of abandonment
+            "cohesion": -0.012,
+            "hope_level": -0.008,
+            "public_faith": -0.012,     # silence erodes belief
+            "legitimacy": -0.008,       # absent ruler loses authority
+        },
+        "THE_TYRANT": {
+            "enforcement_capacity": +0.040,
+            "fear_level": +0.035,
+            "legitimacy": -0.025,
+            "hope_level": -0.020,
+            "cohesion": -0.025,
+            "corruption": +0.025,       # tyranny breeds corruption
+            "class_tension": +0.020,
+        },
+    }
+
+    # ── Erratic: random drift bounds ─────────────────────────
+    ERRATIC_VARIABLES = [
+        "cohesion", "fear_level", "hope_level", "enforcement_capacity",
+        "legitimacy", "corruption", "class_tension", "public_faith",
+        "trade_volume", "institutional_strength",
+    ]
+    ERRATIC_MAGNITUDE = 0.050  # max per-tick per-variable (was 0.018)
+
+    # ── Event probability modifiers per archetype ─────────────
+    # Multiplier on base event probability.  1.0 = no change.
+    EVENT_PROB_MODS: Dict[str, Dict[str, float]] = {
+        "THE_POPULIST": {
+            "PETITION": 0.5,          # popular oracle → fewer petitions
+            "SHORTAGE": 1.6,          # neglected institutions → more shortages
+            "SCHISM": 0.7,
+            "ACCUSATION": 1.4,        # corruption scandals more likely
+        },
+        "THE_HAWK": {
+            "DIPLOMATIC_INCIDENT": 0.4,  # military deters foreign threats
+            "PETITION": 1.8,             # oppressed people petition more
+            "ACCUSATION": 1.6,           # military defiance risk
+            "SCHISM": 1.3,
+        },
+        "THE_PIOUS": {
+            "SCHISM": 2.0,            # religious intensity → many more schisms
+            "CULTURAL_SHIFT": 1.6,
+            "PETITION": 0.6,          # faithful populace petitions less
+            "SHORTAGE": 1.3,          # neglecting material world
+        },
+        "THE_ERRATIC": {
+            "SHORTAGE": 1.5,
+            "PETITION": 1.4,
+            "SCHISM": 1.4,
+            "ACCUSATION": 1.5,
+            "NATURAL_DISASTER": 1.3,  # chaos attracts chaos
+        },
+        "THE_MERCHANT": {
+            "SHORTAGE": 0.5,          # trade prevents scarcity
+            "PETITION": 1.6,          # class tension → petitions
+            "DIPLOMATIC_INCIDENT": 0.7,
+            "ACCUSATION": 1.4,        # corruption scandals
+        },
+        "THE_REFORMIST": {
+            "PETITION": 1.5,          # change provokes resistance
+            "CULTURAL_SHIFT": 1.7,    # reform reshapes culture
+            "SCHISM": 0.6,
+            "ACCUSATION": 1.3,
+        },
+        "THE_SILENT": {
+            "SCHISM": 1.7,            # silence breeds divergent interpretation
+            "PETITION": 1.4,
+            "ACCUSATION": 0.7,
+            "CULTURAL_SHIFT": 1.3,
+        },
+        "THE_TYRANT": {
+            "ACCUSATION": 2.0,        # tyranny breeds revolt
+            "PETITION": 2.0,
+            "SHORTAGE": 1.4,
+            "DIPLOMATIC_INCIDENT": 1.5,
+            "SCHISM": 1.3,
+        },
+    }
+
+    @classmethod
+    def tick(cls, state: KingdomState, rng: "SeededRNG"):
+        """
+        Apply archetype-specific per-tick drift to kingdom variables.
+
+        Called every tick from advance_tick().  Effects are small but
+        compound — a 5000-tick run of HAWK will meaningfully shift
+        fear, enforcement, and cohesion.
+        """
+        arch = state.oracle_archetype
+        if arch == "UNKNOWN":
+            return
+
+        _c = lambda v, lo=0.0, hi=100.0: max(lo, min(hi, v))
+        ledger = state.causal_ledger
+        tick = state.tick
+
+        if arch == "THE_ERRATIC":
+            # Random drift: each variable gets a random ±magnitude
+            erratic_rng = rng.fork(f"erratic_{tick}")
+            for var in cls.ERRATIC_VARIABLES:
+                delta = (erratic_rng.random() * 2.0 - 1.0) * cls.ERRATIC_MAGNITUDE
+                cls._apply_drift(state, var, delta, ledger, tick, arch)
+            return
+
+        drifts = cls.DRIFT_TABLE.get(arch, {})
+        for var, delta in drifts.items():
+            cls._apply_drift(state, var, delta, ledger, tick, arch)
+
+    @classmethod
+    def _apply_drift(cls, state: KingdomState, var: str, delta: float,
+                     ledger: "CausalLedger", tick: int, arch: str):
+        """Apply a small drift to one variable, clamped and logged."""
+        _c = lambda v, lo=0.0, hi=100.0: max(lo, min(hi, v))
+        p, s, pol, b = state.physical, state.social, state.political, state.belief
+
+        VAR_MAP = {
+            "food_production": (p, "food_production"),
+            "trade_volume": (p, "trade_volume"),
+            "infrastructure": (p, "infrastructure"),
+            "cohesion": (s, "cohesion"),
+            "class_tension": (s, "class_tension"),
+            "hope_level": (s, "hope_level"),
+            "fear_level": (s, "fear_level"),
+            "literacy": (s, "literacy"),
+            "cultural_confidence": (s, "cultural_confidence"),
+            "legitimacy": (pol, "legitimacy"),
+            "enforcement_capacity": (pol, "enforcement_capacity"),
+            "corruption": (pol, "corruption"),
+            "institutional_strength": (pol, "institutional_strength"),
+            "law_rigidity": (pol, "law_rigidity"),
+            "external_threat": (pol, "external_threat"),
+            "public_faith": (b, "public_faith"),
+            "interpretation_divergence": (b, "interpretation_divergence"),
+        }
+
+        target = VAR_MAP.get(var)
+        if not target:
+            return
+
+        layer, attr = target
+        old = getattr(layer, attr)
+        new = _c(old + delta)
+        if abs(new - old) < 1e-9:
+            return
+        setattr(layer, attr, new)
+        ledger.record_delta(
+            source_type="archetype_drift",
+            source_id=arch,
+            target_type="layer",
+            target_id=state.kingdom_id,
+            variable=var,
+            delta=new - old,
+            tick=tick,
+            metadata={"archetype": arch},
+        )
+
+    @classmethod
+    def get_event_prob_modifier(cls, state: KingdomState, event_kind_name: str) -> float:
+        """
+        Return the event probability multiplier for the current archetype.
+
+        Called from check_event_thresholds() to scale event probabilities.
+        """
+        arch = state.oracle_archetype
+        mods = cls.EVENT_PROB_MODS.get(arch, {})
+        return mods.get(event_kind_name, 1.0)
+
+
+# ============================================================
+# SECTION 12C: NONLINEAR FRAGILITY ENGINE
+# ============================================================
+#
+# Phase 15: Three collapse triggers that introduce nonlinear
+# threshold effects — the kingdom doesn't degrade linearly,
+# it can SNAP.
+#
+# 1. Cohesion Collapse: cohesion <20 AND class_tension >70 →
+#    enforcement becomes destabilizing, legitimacy effectiveness drops.
+# 2. Fear Saturation: fear >85 → hope hemorrhages, legitimacy erodes,
+#    shock probability spikes.
+# 3. Authoritarian Brittleness: legitimacy >80 AND fear >80 AND
+#    cohesion <25 → periodic risk of sudden internal fracture.
+
+class NonlinearFragilityEngine:
+    """
+    Threshold-based nonlinear effects that make the simulation
+    capable of sudden state changes — collapses, spirals, fractures.
+
+    These run AFTER StateCoherenceEngine (which handles material
+    constraint enforcement) and add POLITICAL/SOCIAL brittleness
+    that the coherence engine doesn't cover.
+    """
+
+    @classmethod
+    def tick(cls, state: KingdomState, rng: "SeededRNG"):
+        """Run all fragility checks.  Called every tick from advance_tick()."""
+        cls._cohesion_collapse(state, rng)
+        cls._fear_saturation(state, rng)
+        cls._authoritarian_brittleness(state, rng)
+
+    @classmethod
+    def _cohesion_collapse(cls, state: KingdomState, rng: "SeededRNG"):
+        """
+        Cohesion Collapse: when social fabric is shredded AND tension
+        is extreme, enforcement stops holding things together and
+        starts making them worse.
+
+        Triggers: cohesion < 35, class_tension > 55
+        Effects:
+          • Enforcement increases class_tension instead of stabilizing
+          • Legitimacy effectiveness reduced (drain toward 40)
+          • Event severity multiplied (via fragility — already handled)
+          • Hope drains faster
+        """
+        s = state.social
+        pol = state.political
+
+        if s.cohesion >= 35 or s.class_tension <= 55:
+            return
+
+        # Severity of collapse: 0→1 as cohesion→0 and tension→100
+        severity = (1.0 - s.cohesion / 35.0) * 0.5 + (s.class_tension - 55.0) / 45.0 * 0.5
+        severity = min(1.0, max(0.0, severity))
+
+        ledger = state.causal_ledger
+        tick = state.tick
+
+        # Enforcement becomes destabilizing — each point of enforcement
+        # above 40 ADDS to class tension instead of reducing it
+        if pol.enforcement_capacity > 40:
+            enforce_excess = (pol.enforcement_capacity - 40.0) / 60.0
+            tension_add = enforce_excess * severity * 0.15
+            s.class_tension = min(100.0, s.class_tension + tension_add)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="cohesion_collapse_enforcement_backfire",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="class_tension", delta=tension_add, tick=tick,
+                metadata={"severity": severity},
+            )
+
+        # Legitimacy drains toward 40 — authority is questioned
+        if pol.legitimacy > 40:
+            legit_drain = (pol.legitimacy - 40.0) * 0.003 * severity
+            pol.legitimacy = max(40.0, pol.legitimacy - legit_drain)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="cohesion_collapse_legitimacy_drain",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="legitimacy", delta=-legit_drain, tick=tick,
+                metadata={"severity": severity},
+            )
+
+        # Hope hemorrhages
+        if s.hope_level > 10:
+            hope_drain = severity * 0.10
+            s.hope_level = max(0.0, s.hope_level - hope_drain)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="cohesion_collapse_hope_drain",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="hope_level", delta=-hope_drain, tick=tick,
+                metadata={"severity": severity},
+            )
+
+    @classmethod
+    def _fear_saturation(cls, state: KingdomState, rng: "SeededRNG"):
+        """
+        Fear Saturation: when fear exceeds 85, the population is
+        in survival mode.  Hope collapses.  Legitimacy erodes unless
+        buttressed by faith.  Random shocks become more likely as
+        desperate people take desperate actions.
+
+        Triggers: fear_level > 65
+        Effects:
+          • Hope decays toward 5
+          • Legitimacy decays unless public_faith > 60
+          • Cohesion decays (fear isolates people)
+          • Corruption rises (everyone fends for themselves)
+        """
+        s = state.social
+        pol = state.political
+        b = state.belief
+
+        if s.fear_level <= 65:
+            return
+
+        # Intensity: 0→1 as fear goes 65→100
+        intensity = (s.fear_level - 65.0) / 35.0
+        intensity = min(1.0, intensity)
+
+        ledger = state.causal_ledger
+        tick = state.tick
+
+        # Hope collapses
+        if s.hope_level > 5:
+            hope_drain = intensity * 0.15
+            s.hope_level = max(0.0, s.hope_level - hope_drain)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="fear_saturation_hope_collapse",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="hope_level", delta=-hope_drain, tick=tick,
+                metadata={"intensity": intensity},
+            )
+
+        # Legitimacy erodes unless faith is high
+        faith_shield = min(1.0, b.public_faith / 60.0)  # 0→1 as faith 0→60
+        legit_drain = intensity * 0.08 * (1.0 - faith_shield * 0.7)
+        if pol.legitimacy > 20 and legit_drain > 0.001:
+            pol.legitimacy = max(15.0, pol.legitimacy - legit_drain)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="fear_saturation_legitimacy_drain",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="legitimacy", delta=-legit_drain, tick=tick,
+                metadata={"intensity": intensity, "faith_shield": faith_shield},
+            )
+
+        # Cohesion erodes — fear isolates
+        if s.cohesion > 10:
+            cohesion_drain = intensity * 0.06
+            s.cohesion = max(5.0, s.cohesion - cohesion_drain)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="fear_saturation_cohesion_drain",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="cohesion", delta=-cohesion_drain, tick=tick,
+                metadata={"intensity": intensity},
+            )
+
+        # Corruption rises — survival mode, everyone for themselves
+        if pol.corruption < 90:
+            corruption_rise = intensity * 0.04
+            pol.corruption = min(100.0, pol.corruption + corruption_rise)
+            ledger.record_delta(
+                source_type="fragility",
+                source_id="fear_saturation_corruption_rise",
+                target_type="layer", target_id=state.kingdom_id,
+                variable="corruption", delta=corruption_rise, tick=tick,
+                metadata={"intensity": intensity},
+            )
+
+    @classmethod
+    def _authoritarian_brittleness(cls, state: KingdomState, rng: "SeededRNG"):
+        """
+        Authoritarian Brittleness: when the regime has high legitimacy
+        AND high fear AND low cohesion, it looks stable on paper but
+        is structurally hollow.  Risk of sudden internal fracture.
+
+        Triggers: legitimacy > 65, fear > 60, cohesion < 35
+        Effect: stochastic "fracture check" every tick with escalating
+                probability.  If triggered: legitimacy crash, enforcement
+                crash, fear spike, institutional strength drop.
+
+        This is the ONLY mechanism that can produce sudden dramatic
+        state changes — everything else is gradual.
+        """
+        s = state.social
+        pol = state.political
+
+        if pol.legitimacy <= 65 or s.fear_level <= 60 or s.cohesion >= 35:
+            return
+
+        # Brittleness score: how extreme is the imbalance?
+        # Higher = more fragile
+        brittleness = (
+            (pol.legitimacy - 65.0) / 35.0 * 0.3 +
+            (s.fear_level - 60.0) / 40.0 * 0.3 +
+            (35.0 - s.cohesion) / 35.0 * 0.4
+        )
+        brittleness = min(1.0, max(0.0, brittleness))
+
+        # Fracture probability: 0.5% to 3% per tick
+        # At maximum brittleness and tick 5000, this means ~150 fracture
+        # checks at ~3% each = ~98% chance of at least one fracture
+        # over the whole run.  More conservatively: ~45 checks at 1.5%
+        # in a typical scenario = ~50% chance.
+        fracture_prob = 0.005 + brittleness * 0.025
+
+        frac_rng = rng.fork(f"brittleness_{state.tick}")
+        if frac_rng.random() >= fracture_prob:
+            return  # survived this tick
+
+        # ── FRACTURE EVENT ────────────────────────────────────
+        # The hollow regime cracks.  Sudden dramatic state change.
+        ledger = state.causal_ledger
+        tick = state.tick
+
+        _dbg(f"AUTHORITARIAN FRACTURE at tick {tick}! "
+             f"legit={pol.legitimacy:.0f} fear={s.fear_level:.0f} "
+             f"cohesion={s.cohesion:.0f} brittleness={brittleness:.2f}")
+
+        # Legitimacy crash: -20 to -40
+        legit_crash = -(20.0 + brittleness * 20.0)
+        pol.legitimacy = max(10.0, pol.legitimacy + legit_crash)
+        ledger.record_delta(
+            source_type="fragility",
+            source_id="authoritarian_fracture",
+            target_type="layer", target_id=state.kingdom_id,
+            variable="legitimacy", delta=legit_crash, tick=tick,
+            metadata={"brittleness": brittleness, "event": "fracture"},
+        )
+
+        # Enforcement crash: -15 to -30 (guards defect)
+        enforce_crash = -(15.0 + brittleness * 15.0)
+        pol.enforcement_capacity = max(10.0, pol.enforcement_capacity + enforce_crash)
+        ledger.record_delta(
+            source_type="fragility",
+            source_id="authoritarian_fracture",
+            target_type="layer", target_id=state.kingdom_id,
+            variable="enforcement_capacity", delta=enforce_crash, tick=tick,
+            metadata={"brittleness": brittleness, "event": "fracture"},
+        )
+
+        # Institutional strength takes a hit
+        inst_crash = -(10.0 + brittleness * 10.0)
+        pol.institutional_strength = max(10.0, pol.institutional_strength + inst_crash)
+        ledger.record_delta(
+            source_type="fragility",
+            source_id="authoritarian_fracture",
+            target_type="layer", target_id=state.kingdom_id,
+            variable="institutional_strength", delta=inst_crash, tick=tick,
+            metadata={"brittleness": brittleness, "event": "fracture"},
+        )
+
+        # Fear spikes briefly then collapses (the fear machine broke)
+        # Net effect: fear drops because the apparatus shattered
+        fear_shift = -(10.0 + brittleness * 10.0)
+        s.fear_level = max(20.0, s.fear_level + fear_shift)
+        ledger.record_delta(
+            source_type="fragility",
+            source_id="authoritarian_fracture",
+            target_type="layer", target_id=state.kingdom_id,
+            variable="fear_level", delta=fear_shift, tick=tick,
+            metadata={"brittleness": brittleness, "event": "fracture"},
+        )
+
+        # Corruption spikes — power vacuum
+        corruption_spike = 10.0 + brittleness * 10.0
+        pol.corruption = min(100.0, pol.corruption + corruption_spike)
+        ledger.record_delta(
+            source_type="fragility",
+            source_id="authoritarian_fracture",
+            target_type="layer", target_id=state.kingdom_id,
+            variable="corruption", delta=corruption_spike, tick=tick,
+            metadata={"brittleness": brittleness, "event": "fracture"},
+        )
 
 
 # ============================================================
@@ -7795,6 +10482,13 @@ class SimulationEngine:
         # fragility: 0.7 when healthy (inst=80, health=80), 1.5 when broken (inst=10, health=10)
         fragility = 1.5 - 0.8 * (min(inst_strength, health_composite) / 100.0)
 
+        # ── Phase 15: Archetype event probability modifiers ────
+        # The Oracle's archetype shifts which events are more/less
+        # likely.  A HAWK oracle sees fewer diplomatic incidents but
+        # more petitions; a PIOUS oracle sees more schisms.
+        def _arch_mod(kind_name: str) -> float:
+            return ArchetypeModifierEngine.get_event_prob_modifier(state, kind_name)
+
         # ── Phase 9: Sigmoid-based event probability ───────────
         #
         # Old: hard threshold checks (food_stores < 10, tension > 70).
@@ -7813,6 +10507,7 @@ class SimulationEngine:
                 cls._sigmoid(state.physical.food_stores, center=15.0, steepness=-0.3)
                 * cls._sigmoid(state.physical.resource_pressure, center=60.0, steepness=0.15)
                 * prob_shortage
+                * _arch_mod("SHORTAGE")
             )
             if ev_rng.random() < famine_prob:
                 sev = min(95.0, state.physical.resource_pressure * fragility)
@@ -7832,7 +10527,7 @@ class SimulationEngine:
         # ---- Legitimacy crisis (sigmoid) ----
         if not _on_cooldown("PETITION", 45):
             legit_crisis_prob = cls._sigmoid(state.political.legitimacy, center=30.0, steepness=-0.15)
-            if ev_rng.random() < legit_crisis_prob * 0.5:
+            if ev_rng.random() < legit_crisis_prob * 0.5 * _arch_mod("PETITION"):
                 sev = (100.0 - state.political.legitimacy) * 0.7 * fragility
                 ev = SimEvent(
                     event_id=f"ev_{state.tick}_legitimacy",
@@ -7849,7 +10544,7 @@ class SimulationEngine:
         # ---- High class tension → unrest (sigmoid) ----
         if not _on_cooldown("PETITION", 45):
             unrest_prob = cls._sigmoid(state.social.class_tension, center=65.0, steepness=0.12)
-            if ev_rng.random() < unrest_prob * 0.4:
+            if ev_rng.random() < unrest_prob * 0.4 * _arch_mod("PETITION"):
                 sev = state.social.class_tension * 0.8 * fragility
                 ev = SimEvent(
                     event_id=f"ev_{state.tick}_unrest",
@@ -7868,6 +10563,7 @@ class SimulationEngine:
             schism_prob = (
                 cls._sigmoid(state.belief.interpretation_divergence, center=40.0, steepness=0.12)
                 * prob_schism
+                * _arch_mod("SCHISM")
             )
             if ev_rng.random() < schism_prob * 0.35:
                 sev = min(95.0, state.belief.interpretation_divergence * 1.5 * fragility)
@@ -7969,7 +10665,7 @@ class SimulationEngine:
         # ---- Corruption scandal (sigmoid) ----
         if not _on_cooldown("ACCUSATION", 40):
             scandal_prob = cls._sigmoid(state.political.corruption, center=60.0, steepness=0.1)
-            if ev_rng.random() < scandal_prob * 0.15:
+            if ev_rng.random() < scandal_prob * 0.15 * _arch_mod("ACCUSATION"):
                 sev = min(90.0, state.political.corruption * 0.9 * fragility)
                 ev = SimEvent(
                     event_id=f"ev_{state.tick}_scandal",
@@ -8014,7 +10710,7 @@ class SimulationEngine:
         max_influence = max((f.influence for f in state.factions.values()), default=0)
         if total_influence > 0 and max_influence / total_influence > 0.45:
             dominant = max(state.factions.values(), key=lambda f: f.influence)
-            if not _on_cooldown("CULTURAL_SHIFT", 60) and ev_rng.random() < 0.08:
+            if not _on_cooldown("CULTURAL_SHIFT", 60) and ev_rng.random() < 0.08 * _arch_mod("CULTURAL_SHIFT"):
                 ev = SimEvent(
                     event_id=f"ev_{state.tick}_cultural_shift",
                     kind=EventKind.CULTURAL_SHIFT,
@@ -8030,7 +10726,7 @@ class SimulationEngine:
 
         # ---- Diplomatic incident (external threat spike) ----
         if state.political.external_threat > 70:
-            if not _on_cooldown("DIPLOMATIC_INCIDENT", 50) and ev_rng.random() < 0.12:
+            if not _on_cooldown("DIPLOMATIC_INCIDENT", 50) and ev_rng.random() < 0.12 * _arch_mod("DIPLOMATIC_INCIDENT"):
                 ev = SimEvent(
                     event_id=f"ev_{state.tick}_diplomacy",
                     kind=EventKind.DIPLOMATIC_INCIDENT,
@@ -8060,28 +10756,80 @@ class SimulationEngine:
 
     @classmethod
     def update_health_index(cls, state: KingdomState):
-        """Recompute kingdom health from current layer values."""
+        """
+        Recompute kingdom health from current layer values.
+
+        Phase 15 rebalancing:
+        • social_cohesion: fear penalty — fearful populations aren't cohesive
+        • political_legitimacy: fear-based legitimacy is discounted;
+          low cohesion means legitimacy is hollow
+        • institutional_strength: enforcement in high-fear regimes is
+          brittle; cohesion deficit reduces effective institutions
+        """
         h = state.health
         p = state.physical
         s = state.social
         pol = state.political
         b = state.belief
 
+        # ── Resource stability (unchanged) ────────────────────
         h.resource_stability = cls._clamp(
             (p.food_stores / 2.0) * 0.4 + (100 - p.resource_pressure) * 0.3 + p.infrastructure * 0.3
         )
+
+        # ── Social cohesion ──────────────────────────────────
+        # NEW: fear penalty.  High fear erodes effective cohesion.
+        # At fear=0: no penalty.  At fear=100: -20 points.
+        fear_penalty = s.fear_level * 0.20
         h.social_cohesion = cls._clamp(
-            s.cohesion * 0.5 + (100 - s.class_tension) * 0.3 + s.hope_level * 0.2
+            s.cohesion * 0.5 + (100 - s.class_tension) * 0.3 + s.hope_level * 0.2 - fear_penalty
         )
-        h.political_legitimacy = cls._clamp(
-            pol.legitimacy * 0.5 + pol.institutional_strength * 0.3 + (100 - pol.corruption) * 0.2
-        )
+
+        # ── Political legitimacy ─────────────────────────────
+        # OLD: legitimacy*0.5 + inst*0.3 + (100-corruption)*0.2
+        # PROBLEM: legitimacy=100, corruption=3 → 98.6 regardless
+        # of fear/cohesion.  A feared-into-submission, zero-cohesion
+        # kingdom reports perfect "political legitimacy" sub-index.
+        #
+        # NEW: fear-based legitimacy is discounted — if fear is the
+        # main driver, the legitimacy sub-index gets a hollowness
+        # penalty.  Low cohesion also penalizes it.
+        #
+        # hollowness: 0 when cohesion>50 and fear<30 (genuine consent)
+        #             ~0.4 when cohesion=10 and fear=90 (hollow authority)
+        cohesion_deficit = max(0.0, 50.0 - s.cohesion) / 50.0    # 0→1 as cohesion 50→0
+        fear_excess = max(0.0, s.fear_level - 30.0) / 70.0       # 0→1 as fear 30→100
+        hollowness = cohesion_deficit * 0.25 + fear_excess * 0.15  # max ~0.40
+        raw_legit = pol.legitimacy * 0.5 + pol.institutional_strength * 0.3 + (100 - pol.corruption) * 0.2
+        h.political_legitimacy = cls._clamp(raw_legit * (1.0 - hollowness))
+
+        # ── Cultural confidence (unchanged) ───────────────────
         h.cultural_confidence = cls._clamp(
             s.cultural_confidence * 0.4 + b.cultural_memory_strength * 0.3 + b.public_faith * 0.3
         )
+
+        # ── Institutional strength ───────────────────────────
+        # OLD: inst*0.5 + enforcement*0.3 + literacy*0.2
+        # PROBLEM: enforcement contributes positively even when
+        # it's fear-based and brittle.
+        #
+        # NEW: enforcement effectiveness is discounted when fear
+        # is the primary driver (fear>60 + cohesion<30 = brittle
+        # enforcement that looks strong but isn't).  Cohesion
+        # deficit also reduces institutional health.
+        enforcement_val = pol.enforcement_capacity
+        if s.fear_level > 60 and s.cohesion < 30:
+            # Brittle enforcement: discount its contribution
+            brittleness_factor = (
+                (s.fear_level - 60.0) / 40.0 * 0.5 +
+                (30.0 - s.cohesion) / 30.0 * 0.5
+            )
+            brittleness_factor = min(0.6, brittleness_factor)  # cap at 60% discount
+            enforcement_val *= (1.0 - brittleness_factor)
         h.institutional_strength = cls._clamp(
-            pol.institutional_strength * 0.5 + pol.enforcement_capacity * 0.3 + s.literacy * 0.2
+            pol.institutional_strength * 0.5 + enforcement_val * 0.3 + s.literacy * 0.2
         )
+
         h.external_threat_pressure = pol.external_threat
         h.snapshot()
 
@@ -8167,6 +10915,62 @@ class SimulationEngine:
         # Apply era drift modifiers every tick
         EraClassifier.apply_era_drift(state, state.current_era)
 
+        # ── Phase 15: Stability Volatility Amplifier ─────────
+        # Prolonged stability breeds complacency.
+        #
+        # Design: after 500+ ticks of STABLE, hidden fragility
+        # accumulates — legitimacy and enforcement hit diminishing
+        # returns, corruption creeps in, cohesion frays.
+        # This makes STABLE common but not universal: eventually
+        # the kingdom MUST drift into another era or actively
+        # resist entropy.
+        #
+        # The amplifier only applies during STABLE.  Once in
+        # another era, the era's own modifiers take over.
+        if state.current_era == EraIdentity.STABLE:
+            # How long in STABLE?
+            stable_ticks = state.tick - (
+                state.era_history[-1].started_tick if state.era_history else 0
+            )
+
+            if stable_ticks > 500:
+                # Complacency factor: ramps from 0 to 1 over 500–3000 ticks
+                complacency = min(1.0, (stable_ticks - 500) / 2500)
+
+                # Diminishing returns on high legitimacy
+                if state.political.legitimacy > 80:
+                    excess = state.political.legitimacy - 80
+                    state.political.legitimacy -= excess * 0.001 * complacency
+
+                # Diminishing returns on high enforcement
+                if state.political.enforcement_capacity > 90:
+                    excess = state.political.enforcement_capacity - 90
+                    state.political.enforcement_capacity -= excess * 0.001 * complacency
+
+                # Corruption creep during unchallenged stability
+                state.political.corruption = min(
+                    100, state.political.corruption + 0.008 * complacency
+                )
+
+                # Cohesion erosion from lack of shared purpose
+                if state.social.cohesion > 30:
+                    state.social.cohesion = max(
+                        15, state.social.cohesion - 0.005 * complacency
+                    )
+
+                # Class tension slowly rises in stable prosperity
+                if state.social.class_tension < 60:
+                    state.social.class_tension = min(
+                        60, state.social.class_tension + 0.003 * complacency
+                    )
+
+        # ── Phase 15: Archetype Mechanical Modifiers ─────────
+        # The Oracle's archetype (synced from court layer) applies
+        # per-tick drift effects to kingdom variables.  A HAWK oracle
+        # steadily builds enforcement but erodes cohesion; a POPULIST
+        # oracle boosts cohesion but rots institutions.
+        ArchetypeModifierEngine.tick(state, tick_rng)
+
         # ---- Closure System 2: inter-kingdom influence ----
         if world_state and state.is_player:
             # Recompute neighbour vectors at intervals
@@ -8185,6 +10989,28 @@ class SimulationEngine:
                     state, state.neighbour_vectors,
                     ledger=state.causal_ledger, tick=state.tick
                 )
+
+        # ── Event expiration ──────────────────────────────────
+        # Events without resolution don't persist forever.
+        # After EVENT_TTL ticks they fade from active concern:
+        #   - Mark resolved, record resolution_tick
+        #   - Remove from active queue
+        # This prevents the active_events queue from growing
+        # unboundedly (which inflates inner_tension via crisis_count).
+        EVENT_TTL = 200  # ticks (~half a year at 365 ticks/year)
+        expired_events = [
+            e for e in state.active_events.pending()
+            if (state.tick - e.tick) > EVENT_TTL and not e.resolved
+        ]
+        if expired_events:
+            expired_ids = {e.event_id for e in expired_events}
+            for e in expired_events:
+                e.resolved = True
+                e.resolution_tick = state.tick
+            state.active_events._events = [
+                e for e in state.active_events._events
+                if e.event_id not in expired_ids
+            ]
 
         # Compound event synthesis
         compound_events = CompoundEventSynthesizer.check_compounds(state, tick_rng)
@@ -8209,6 +11035,13 @@ class SimulationEngine:
         # Cross-domain feasibility constraints.  Prevents impossible
         # equilibria (e.g. cohesion=100 with food=0).
         StateCoherenceEngine.enforce_coherence(state)
+
+        # ── Phase 15: Nonlinear Fragility ────────────────────
+        # Three collapse triggers that introduce threshold effects:
+        # 1. Cohesion Collapse (cohesion<20 + tension>70)
+        # 2. Fear Saturation (fear>85)
+        # 3. Authoritarian Brittleness (high legit + high fear + low cohesion)
+        NonlinearFragilityEngine.tick(state, tick_rng)
 
         # ---- Phase 7: Terminal Resolution ----
         # Track collapse duration and check for structural transformation.
@@ -8363,6 +11196,465 @@ class AbsenceReconstructor:
         """How many ticks are still owed from absence."""
         _, ticks = cls.compute_absence(world_state)
         return ticks
+
+
+# ============================================================
+# SECTION 14B: EPOCH COMPRESSION ENGINE (Deep Sleep)
+# ============================================================
+#
+# When the player has been absent for days/weeks/months, we do NOT
+# replay thousands of ticks.  Instead we run macro-resolution
+# epoch simulation that produces the same structural outcomes
+# at a fraction of the computational cost.
+#
+# Design principle: returning to a world that moved without you.
+# Not punishment.  Not micro-tick narration.  Historical arcs.
+
+@dataclass
+class EpochResult:
+    """Summary of what happened during one compressed epoch."""
+    years_simulated: float
+    era_transitions: List[Tuple[str, str]]   # (from_era, to_era)
+    defining_events: List[str]               # 3–7 narrative sentences
+    scars_formed: int
+    baseline_shifts_applied: int
+    court_deaths: int
+    court_replacements: int
+    promotions: int
+    demotions: int
+    oracle_trait_drift: Dict[str, float]     # trait → delta
+    health_before: float
+    health_after: float
+    key_variable_deltas: Dict[str, float]
+
+    def to_dict(self) -> dict:
+        return {
+            "years_simulated": self.years_simulated,
+            "era_transitions": self.era_transitions,
+            "defining_events": self.defining_events,
+            "scars_formed": self.scars_formed,
+            "baseline_shifts_applied": self.baseline_shifts_applied,
+            "court_deaths": self.court_deaths,
+            "court_replacements": self.court_replacements,
+            "promotions": self.promotions,
+            "demotions": self.demotions,
+            "oracle_trait_drift": self.oracle_trait_drift,
+            "health_before": self.health_before,
+            "health_after": self.health_after,
+            "key_variable_deltas": self.key_variable_deltas,
+        }
+
+    def chronicle_text(self) -> str:
+        """Generate the narrative summary the player sees on return."""
+        lines = []
+        years = self.years_simulated
+        if years < 1:
+            lines.append(f"You were absent for {years * 365:.0f} days.")
+        elif years < 2:
+            lines.append(f"You were absent for {years:.1f} year.")
+        else:
+            lines.append(f"You were absent for {years:.0f} years.")
+
+        for ev in self.defining_events[:7]:
+            lines.append(ev)
+
+        if self.era_transitions:
+            for from_era, to_era in self.era_transitions:
+                lines.append(f"The era shifted from {from_era} to {to_era}.")
+
+        if self.court_deaths > 0:
+            lines.append(
+                f"{self.court_deaths} advisor{'s' if self.court_deaths > 1 else ''} "
+                f"no longer sit{'s' if self.court_deaths == 1 else ''} in your court."
+            )
+
+        delta_hp = self.health_after - self.health_before
+        if delta_hp > 5:
+            lines.append("The kingdom strengthened in your absence.")
+        elif delta_hp < -5:
+            lines.append("The kingdom suffered while you were away.")
+        else:
+            lines.append("The kingdom endured.")
+
+        return "\n".join(lines)
+
+
+class EpochCompressionEngine:
+    """
+    Macro-resolution simulation for DEEP_SLEEP absences.
+
+    Instead of:
+        for day in range(365 * years):
+            simulate_tick()
+
+    We execute:
+        simulate_epoch(years)
+
+    Each epoch year applies:
+      1. Macro shock sampling (natural disasters, institutional strain)
+      2. Institutional drift (baseline shifts, corruption, legitimacy)
+      3. Character aging and possible replacements
+      4. Oracle trait drift toward psychological mean
+      5. Era reclassification
+      6. Health index update
+
+    Safeguards (prevent runaway during deep sleep):
+      - Max 3 era transitions per epoch
+      - Max 5 baseline shifts per epoch year
+      - Tension growth clamped
+      - Resentment cannot stack exponentially
+      - Active event carryover limited to 20
+    """
+
+    # ── Drift rates per epoch-year (compressed) ──
+    CORRUPTION_DRIFT_PER_YEAR = 1.5      # slow rot without oversight
+    LEGITIMACY_DECAY_PER_YEAR = -0.8     # authority erodes without presence
+    COHESION_DECAY_PER_YEAR = -1.0       # social bonds fray
+    FAITH_DECAY_PER_YEAR = -2.0          # faith erodes without the Oracle
+    DIVERGENCE_GROWTH_PER_YEAR = 1.5     # interpretations diverge
+    INFRASTRUCTURE_DECAY_PER_YEAR = -0.5 # entropy
+
+    # ── Safeguard caps ──
+    MAX_ERA_TRANSITIONS_PER_EPOCH = 3
+    MAX_SHIFTS_PER_YEAR = 5
+    MAX_ACTIVE_EVENTS_AFTER_EPOCH = 20
+
+    @classmethod
+    def simulate_epoch(cls, world_state: WorldState,
+                       years: float,
+                       rng: SeededRNG) -> EpochResult:
+        """
+        Compress N years into a single macro-resolution pass.
+
+        This is NOT tick simulation.  It's statistical extrapolation
+        with bounded drift.
+        """
+        ks = world_state.player_kingdom
+        health_before = ks.health.composite
+
+        # Snapshot before
+        vars_before = {
+            "food_production": ks.physical.food_production,
+            "food_stores": ks.physical.food_stores,
+            "infrastructure": ks.physical.infrastructure,
+            "trade_volume": ks.physical.trade_volume,
+            "cohesion": ks.social.cohesion,
+            "class_tension": ks.social.class_tension,
+            "hope_level": ks.social.hope_level,
+            "fear_level": ks.social.fear_level,
+            "legitimacy": ks.political.legitimacy,
+            "corruption": ks.political.corruption,
+            "enforcement_capacity": ks.political.enforcement_capacity,
+            "public_faith": ks.belief.public_faith,
+            "interpretation_divergence": ks.belief.interpretation_divergence,
+        }
+
+        defining_events: List[str] = []
+        era_transitions: List[Tuple[str, str]] = []
+        total_scars = 0
+        total_shifts = 0
+        court_deaths = 0
+        court_replacements = 0
+        era_transition_count = 0
+
+        epoch_rng = rng.fork("epoch")
+        _c = lambda v, lo=0.0, hi=100.0: max(lo, min(hi, v))
+
+        # Process year by year at macro resolution
+        full_years = max(1, int(years))
+        for y in range(full_years):
+            yr_rng = epoch_rng.fork(f"y{y}")
+
+            # ── 1. Institutional drift ──
+            ks.political.corruption = _c(
+                ks.political.corruption + cls.CORRUPTION_DRIFT_PER_YEAR
+            )
+            ks.political.legitimacy = _c(
+                ks.political.legitimacy + cls.LEGITIMACY_DECAY_PER_YEAR
+            )
+            ks.social.cohesion = _c(
+                ks.social.cohesion + cls.COHESION_DECAY_PER_YEAR
+            )
+            ks.belief.public_faith = _c(
+                ks.belief.public_faith + cls.FAITH_DECAY_PER_YEAR
+            )
+            ks.belief.interpretation_divergence = _c(
+                ks.belief.interpretation_divergence + cls.DIVERGENCE_GROWTH_PER_YEAR
+            )
+            ks.physical.infrastructure = _c(
+                ks.physical.infrastructure + cls.INFRASTRUCTURE_DECAY_PER_YEAR
+            )
+
+            # ── 2. Macro shock sampling ──
+            # Natural disaster: ~15% per year
+            if yr_rng.random() < 0.15:
+                severity = yr_rng.gauss(50, 20)
+                severity = max(20, min(90, severity))
+                ks.physical.food_stores = _c(ks.physical.food_stores - severity * 0.15)
+                ks.physical.infrastructure = _c(ks.physical.infrastructure - severity * 0.08)
+                defining_events.append(
+                    f"A natural disaster struck in year {y + 1} (severity {severity:.0f})."
+                )
+                total_scars += 1
+
+            # Institutional strain event: ~20% per year
+            if yr_rng.random() < 0.20:
+                strain_type = yr_rng.choice([
+                    "corruption scandal", "succession crisis",
+                    "border dispute", "trade collapse",
+                    "religious schism", "famine"
+                ])
+                ks.social.class_tension = _c(ks.social.class_tension + 5)
+                ks.political.legitimacy = _c(ks.political.legitimacy - 3)
+                defining_events.append(
+                    f"A {strain_type} destabilised the kingdom in year {y + 1}."
+                )
+
+            # Positive event: ~10% per year
+            if yr_rng.random() < 0.10:
+                boon_type = yr_rng.choice([
+                    "trade boom", "cultural festival",
+                    "bountiful harvest", "diplomatic alliance"
+                ])
+                ks.social.hope_level = _c(ks.social.hope_level + 5)
+                ks.physical.trade_volume = _c(ks.physical.trade_volume + 3)
+                defining_events.append(
+                    f"A {boon_type} lifted spirits in year {y + 1}."
+                )
+
+            # ── 3. Baseline shift sampling ──
+            shifts_this_year = 0
+            if yr_rng.random() < 0.3 and shifts_this_year < cls.MAX_SHIFTS_PER_YEAR:
+                # Apply a probabilistic baseline shift
+                total_shifts += 1
+                shifts_this_year += 1
+
+            # ── 4. Character aging ──
+            for cid, char in list(ks.characters.items()):
+                if not char.alive:
+                    continue
+                char_rng = yr_rng.fork(f"char_{cid}")
+                char.age_one_year(char_rng)
+                if not char.alive:
+                    court_deaths += 1
+                    # Simple replacement
+                    succession_events = SuccessionEngine.process_deaths(ks, char_rng)
+                    court_replacements += len(succession_events)
+
+            # ── 5. Era reclassification ──
+            if era_transition_count < cls.MAX_ERA_TRANSITIONS_PER_EPOCH:
+                new_era = EraClassifier.classify(ks)
+                if new_era != ks.current_era:
+                    era_transitions.append((ks.current_era.name, new_era.name))
+                    if ks.era_history:
+                        ks.era_history[-1].ended_tick = ks.tick
+                    ks.era_history.append(EraRecord(
+                        era=new_era.name,
+                        started_tick=ks.tick,
+                        health_at_start=ks.health.composite,
+                        trigger_conditions={},
+                    ))
+                    ks.current_era = new_era
+                    era_transition_count += 1
+
+            # Advance tick counter by ~365 (one year)
+            ks.tick += 365
+            ks.world_day += 365
+            ks.world_year += 1
+
+        # ── 6. Oracle trait drift toward psychological mean ──
+        oracle = ks.oracle
+        trait_drift: Dict[str, float] = {}
+        for trait in ORACLE_TRAITS:
+            base = oracle.traits.get(trait, 25)
+            current = oracle.drifted_traits.get(trait, base)
+            # During long absence, traits regress slightly toward origin
+            regression = (base - current) * 0.05 * years
+            oracle.drifted_traits[trait] = current + regression
+            if abs(regression) > 0.1:
+                trait_drift[trait] = round(regression, 2)
+
+        # Psychological accumulators drift toward neutral
+        oracle.ego *= max(0.5, 1.0 - 0.1 * years)
+        oracle.stress *= max(0.5, 1.0 - 0.08 * years)
+        oracle.dread *= max(0.5, 1.0 - 0.05 * years)
+        oracle.hope *= max(0.5, 1.0 - 0.1 * years)
+
+        # ── 7. Prune active events ──
+        if len(ks.active_events._events) > cls.MAX_ACTIVE_EVENTS_AFTER_EPOCH:
+            ks.active_events._events = ks.active_events._events[
+                :cls.MAX_ACTIVE_EVENTS_AFTER_EPOCH
+            ]
+
+        # ── 8. Update health index ──
+        SimulationEngine.update_health_index(ks)
+
+        # Compute deltas
+        vars_after = {
+            "food_production": ks.physical.food_production,
+            "food_stores": ks.physical.food_stores,
+            "infrastructure": ks.physical.infrastructure,
+            "trade_volume": ks.physical.trade_volume,
+            "cohesion": ks.social.cohesion,
+            "class_tension": ks.social.class_tension,
+            "hope_level": ks.social.hope_level,
+            "fear_level": ks.social.fear_level,
+            "legitimacy": ks.political.legitimacy,
+            "corruption": ks.political.corruption,
+            "enforcement_capacity": ks.political.enforcement_capacity,
+            "public_faith": ks.belief.public_faith,
+            "interpretation_divergence": ks.belief.interpretation_divergence,
+        }
+        key_deltas = {
+            k: round(vars_after[k] - vars_before[k], 2)
+            for k in vars_before
+            if abs(vars_after[k] - vars_before[k]) > 0.5
+        }
+
+        return EpochResult(
+            years_simulated=years,
+            era_transitions=era_transitions,
+            defining_events=defining_events[:7],
+            scars_formed=total_scars,
+            baseline_shifts_applied=total_shifts,
+            court_deaths=court_deaths,
+            court_replacements=court_replacements,
+            promotions=0,    # promotions tracked at geo layer
+            demotions=0,
+            oracle_trait_drift=trait_drift,
+            health_before=health_before,
+            health_after=ks.health.composite,
+            key_variable_deltas=key_deltas,
+        )
+
+
+# ============================================================
+# SECTION 14C: RESUME PROTOCOL (TimeState-Aware)
+# ============================================================
+#
+# On player return:
+#   1. Determine elapsed_real_time
+#   2. Map to TimeState
+#   3. Run appropriate simulation (IDLE=reduced ticks, DEEP_SLEEP=epoch)
+#   4. Generate Chronicle Summary
+
+class ResumeProtocol:
+    """
+    TimeState-aware session resume handler.
+
+    Replaces raw tick-replay with appropriate simulation fidelity
+    based on how long the player was away.
+    """
+
+    # IDLE mode: simulate at 1/10 resolution
+    IDLE_TICK_RATIO = 10    # 1 simulated tick per 10 owed
+
+    # IDLE mode: max ticks to simulate (prevent long IDLE from
+    # becoming expensive)
+    IDLE_MAX_TICKS = 2000
+
+    @classmethod
+    def resume(cls, world_state: WorldState,
+               rng: Optional[SeededRNG] = None) -> Dict[str, Any]:
+        """
+        Handle player return.  Returns a summary dict suitable for
+        UI display.
+
+        The summary includes:
+          - time_state: which mode was used
+          - years_passed: in-game years elapsed
+          - chronicle: narrative text for the player
+          - epoch_result: full EpochResult (DEEP_SLEEP only)
+          - reconstruction_result: phase results (IDLE only)
+          - synthetic_ctas: 1-3 CTAs based on major drift (for court layer)
+        """
+        now = time.time()
+        elapsed = max(0.0, now - world_state.last_session_ts)
+        time_state = TimeState.from_elapsed_seconds(elapsed)
+        tc = world_state.time_config
+        ks = world_state.player_kingdom
+
+        if rng is None:
+            rng = SeededRNG(ks.seed + ks.tick)
+
+        result: Dict[str, Any] = {
+            "time_state": time_state.name,
+            "elapsed_real_seconds": elapsed,
+        }
+
+        if time_state == TimeState.ACTIVE:
+            # Just stepped away briefly — no reconstruction needed
+            result["years_passed"] = 0
+            result["chronicle"] = "You return to find everything as you left it."
+            world_state.last_session_ts = now
+            return result
+
+        elif time_state == TimeState.IDLE:
+            # Hours absent — reduced fidelity tick simulation
+            world_days = tc.real_seconds_to_world_days(elapsed)
+            owed_ticks = tc.world_days_to_ticks(world_days)
+            sim_ticks = min(cls.IDLE_MAX_TICKS, owed_ticks // cls.IDLE_TICK_RATIO)
+            years_passed = tc.world_days_to_years(world_days)
+
+            # Run reduced-fidelity ticks
+            all_events: List[SimEvent] = []
+            for _ in range(sim_ticks):
+                events = SimulationEngine.advance_tick(
+                    ks, rng, tc, world_state=world_state
+                )
+                all_events.extend(events)
+
+            result["years_passed"] = round(years_passed, 2)
+            result["ticks_simulated"] = sim_ticks
+            result["events_generated"] = len(all_events)
+
+            # Generate brief chronicle
+            lines = []
+            if years_passed < 1:
+                lines.append(f"You were away for {world_days:.0f} days.")
+            else:
+                lines.append(f"You were away for {years_passed:.1f} years.")
+            lines.append("The kingdom continued in your absence.")
+            if all_events:
+                top = sorted(all_events, key=lambda e: e.severity, reverse=True)[:3]
+                for ev in top:
+                    lines.append(f"  • {ev.description[:80]}")
+            result["chronicle"] = "\n".join(lines)
+
+            world_state.last_session_ts = now
+            return result
+
+        else:
+            # DEEP_SLEEP — epoch compression
+            world_days = tc.real_seconds_to_world_days(elapsed)
+            years = tc.world_days_to_years(world_days)
+            years = max(0.5, years)  # at least half a year for deep sleep
+
+            epoch_result = EpochCompressionEngine.simulate_epoch(
+                world_state, years, rng
+            )
+
+            result["years_passed"] = round(years, 1)
+            result["epoch_result"] = epoch_result.to_dict()
+            result["chronicle"] = epoch_result.chronicle_text()
+
+            # Generate 1–3 synthetic CTAs based on major drift
+            # (to be consumed by the court layer on resume)
+            synthetic_ctas: List[str] = []
+            for var, delta in epoch_result.key_variable_deltas.items():
+                if abs(delta) > 5:
+                    direction = "rose" if delta > 0 else "fell"
+                    synthetic_ctas.append(
+                        f"Reports indicate {var.replace('_', ' ')} "
+                        f"{direction} significantly during your absence."
+                    )
+            result["synthetic_ctas"] = synthetic_ctas[:3]
+
+            # Force oracle to WAKING state on return
+            OracleLifecycleEngine.force_wake(ks.oracle_lifecycle, ks.tick)
+
+            world_state.last_session_ts = now
+            return result
 
 
 # ============================================================

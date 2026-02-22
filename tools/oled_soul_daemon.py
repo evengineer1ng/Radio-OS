@@ -963,7 +963,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--driver", default="ssd1306", help="luma.oled driver name")
     p.add_argument("--spi-port", type=int, default=0, help="SPI bus index")
     p.add_argument("--spi-device", type=int, default=0, help="SPI device index")
-    p.add_argument("--spi-speed-hz", type=_positive_int, default=12000000, help="SPI bus speed")
+    p.add_argument("--spi-speed-hz", type=_positive_int, default=8000000, help="SPI bus speed")
     p.add_argument("--dc-pin", type=int, default=24, help="GPIO DC pin")
     p.add_argument("--rst-pin", type=int, default=25, help="GPIO RST pin")
     p.add_argument("--rotate", type=int, default=0, help="Rotation degrees (0/90/180/270)")

@@ -305,6 +305,8 @@ class StationManager:
             # Always use the fixed base port — only one station runs at a time
             web_port = self.FTB_BASE_PORT
             env["FTB_WEB_PORT"] = str(web_port)
+            # Oracle Kingdom uses a separate port so both servers can coexist
+            env["OK_WEB_PORT"] = str(web_port + 1)
 
             # Log output
             log_path = os.path.join(station_path, "runtime.log")
@@ -2242,7 +2244,7 @@ function connectAudio(stationId){
   audioWs=new WebSocket(proto+'//'+location.host+'/ws/audio/'+stationId);
   audioWs.binaryType='arraybuffer';
   audioWs.onopen=()=>{document.getElementById('audioBar').classList.add('active');document.getElementById('nowPlaying').textContent='🎙️ '+stationId;setInterval(()=>{if(audioWs.readyState===1)audioWs.send('ping');},15000);};
-  audioWs.onmessage=(evt)=>{if(typeof evt.data==='string')return;try{const buf=evt.data;const view=new DataView(buf);const ml=view.getUint32(0,false);const mb=new Uint8Array(buf,4,ml);const meta=JSON.parse(new TextDecoder().decode(mb));const wav=buf.slice(4+ml);if(meta.voice&&meta.text)document.getElementById('subtitle').textContent=meta.voice.toUpperCase()+': '+meta.text;audioQueue.push(wav);if(!audioPlaying)playNext();}catch(e){console.error('[Audio] parse error:',e);}};
+  audioWs.onmessage=(evt)=>{if(typeof evt.data==='string')return;try{const buf=evt.data;const view=new DataView(buf);const ml=view.getUint32(0,false);const mb=new Uint8Array(buf,4,ml);const meta=JSON.parse(new TextDecoder().decode(mb));const wav=buf.slice(4+ml);if(meta.voice&&meta.text)document.getElementById('subtitle').textContent=(meta.speaker||meta.voice.toUpperCase())+': '+meta.text;audioQueue.push(wav);if(!audioPlaying)playNext();}catch(e){console.error('[Audio] parse error:',e);}};
   audioWs.onclose=()=>{document.getElementById('audioBar').classList.remove('active');};
 }
 function playNext(){
@@ -2570,9 +2572,11 @@ function detectPluginUIs(webPort) {
       if (m) {
         const port = m[1];
         let label = 'Plugin Web UI';
+        let path = '/';
         if (lt.includes('ftb') || lt.includes('from the backmarker')) label = 'FTB Game UI';
+        if (lt.includes('oracle kingdom')) { label = 'Oracle Kingdom'; path = '/ok/play'; }
         if (lt.includes('http remote')) label = 'FTB Remote Control';
-        links.push({ label, port });
+        links.push({ label, port, path });
       }
     }
   }
@@ -2585,7 +2589,7 @@ function detectPluginUIs(webPort) {
     document.getElementById('pluginLinks').innerHTML = unique.map(l => {
       // Open directly on the station's dedicated game port (separate tab)
       // Use same hostname the user is browsing from (works over LAN / Tailscale)
-      const url = location.protocol + '//' + location.hostname + ':' + l.port + '/';
+      const url = location.protocol + '//' + location.hostname + ':' + l.port + l.path;
       return '<a class="plugin-link" href="' + url + '" target="_blank">' +
         l.label + ' (port ' + l.port + ')</a>';
     }).join('');

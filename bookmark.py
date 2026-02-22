@@ -947,6 +947,9 @@ def load_meta_plugins(plugin_dir: str) -> None:
             
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
+            # Register module in sys.modules BEFORE exec so @dataclass
+            # and other decorators can resolve the module namespace.
+            sys.modules[name] = mod
             spec.loader.exec_module(mod)
             
             # Look for MetaPlugin class in module
@@ -1015,7 +1018,7 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None, runtime_stu
             "db_enqueue_segment": db_enqueue_segment,  # ✅ for PBP broadcast commentary
         }
 
-    for path in glob.glob(os.path.join(plugin_dir, "*.py")):
+    for path in sorted(glob.glob(os.path.join(plugin_dir, "*.py"))):
         name = os.path.splitext(os.path.basename(path))[0]
 
         try:
@@ -1050,6 +1053,9 @@ def load_feed_plugins(cfg_override: Optional[Dict[str, Any]] = None, runtime_stu
                     print(f"Widget registration failed {name}: {e}")
 
         except Exception as e:
+            # Remove broken partial module so later lazy-imports don't
+            # get a half-initialised object from sys.modules.
+            sys.modules.pop(name, None)
             print(f"Plugin load failed {name}: {e}")
 
     return plugins
@@ -2296,7 +2302,7 @@ AUDIO_LEVEL = 0.0
 _AUDIO_SMOOTH = 0.85   # 0.7 = snappy, 0.9 = smooth
 
 
-def speak(text: str, voice_key: str = None):
+def speak(text: str, voice_key: str = None, speaker_label: str = ""):
 
     global AUDIO_LEVEL
 
@@ -2312,6 +2318,9 @@ def speak(text: str, voice_key: str = None):
     # Default to lead character if no voice specified
     if not voice_key:
         voice_key = resolve_lead_voice(mem=STATION_MEMORY)
+
+    # Display name for subtitles: prefer explicit speaker label
+    display_name = speaker_label if speaker_label else voice_key.upper()
 
     text = normalize_text(clean(text))
     if not text:
@@ -2483,6 +2492,7 @@ def speak(text: str, voice_key: str = None):
             with open(meta_path, "w") as mf:
                 json.dump({
                     "voice": voice_key,
+                    "speaker": display_name,
                     "text": " ".join(words) if words else text,
                     "duration": len(data) / float(sr) if sr else 0,
                     "sr": sr,
@@ -2503,7 +2513,7 @@ def speak(text: str, voice_key: str = None):
                         if SHOW_INTERRUPT.is_set():
                             break
                         progress.append(w)
-                        subtitle_q.put(f"{voice_key.upper()}: " + " ".join(progress))
+                        subtitle_q.put(f"{display_name}: " + " ".join(progress))
                         time.sleep(per_word)
                 else:
                     time.sleep(duration)
@@ -2571,7 +2581,7 @@ def speak(text: str, voice_key: str = None):
 
                         progress.append(words.pop(0))
 
-                        display = f"{voice_key.upper()}: " + " ".join(progress)
+                        display = f"{display_name}: " + " ".join(progress)
 
                         subtitle_q.put(display)
 
@@ -2636,25 +2646,35 @@ def normalize_audio_config_paths():
     CFG["audio"] = audio_cfg
 
 def play_audio_bundle(bundle):
-    """Play TTS voice audio from bundle (existing behavior)"""
+    """Play TTS voice audio from bundle.
+
+    Each entry is (voice, text) or (voice, text, speaker_label).
+    Consecutive entries with the same voice+speaker are merged.
+    """
     merged = []
     cur_voice = None
+    cur_speaker = ""
     cur_text = []
 
-    for voice, text in bundle:
-        if voice == cur_voice:
+    for item in bundle:
+        voice = item[0]
+        text = item[1]
+        speaker = item[2] if len(item) > 2 else ""
+
+        if voice == cur_voice and speaker == cur_speaker:
             cur_text.append(text)
         else:
             if cur_text:
-                merged.append((cur_voice, " ".join(cur_text)))
+                merged.append((cur_voice, " ".join(cur_text), cur_speaker))
             cur_voice = voice
+            cur_speaker = speaker
             cur_text = [text]
 
     if cur_text:
-        merged.append((cur_voice, " ".join(cur_text)))
+        merged.append((cur_voice, " ".join(cur_text), cur_speaker))
 
-    for voice_key, text in merged:
-        speak(text, voice_key)
+    for voice_key, text, speaker_label in merged:
+        speak(text, voice_key, speaker_label=speaker_label)
 
 
 def play_file_audio(audio_item: AudioItem) -> None:
@@ -5543,6 +5563,11 @@ def db_enqueue_segment(conn: sqlite3.Connection, seg: Dict[str, Any]) -> bool:
     source = seg.get("source", "feed")
     event_type = seg.get("event_type", "item")
 
+    # Persist script atoms (multi-voice dialogue) in host_hint when present
+    host_hint = seg.get("host_hint", "")
+    if seg.get("script") and isinstance(seg["script"], list):
+        host_hint = json.dumps({"_script": seg["script"]}, ensure_ascii=False)
+
     cur = conn.execute("""
     INSERT OR IGNORE INTO segments (
         id, created_ts, priority, status,
@@ -5564,7 +5589,7 @@ def db_enqueue_segment(conn: sqlite3.Connection, seg: Dict[str, Any]) -> bool:
         seg.get("angle",""),
         seg.get("why",""),
         json.dumps(seg.get("key_points", []), ensure_ascii=False),
-        seg.get("host_hint",""),
+        host_hint,
         seg.get("lead_voice", ""),
         json.dumps(seg.get("_sfx_files", []), ensure_ascii=False),
     ))
@@ -5673,7 +5698,19 @@ def db_pop_next_segment(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
     except Exception:
         sfx_files = []
 
-    return {
+    # Restore script atoms from host_hint if present
+    host_hint_raw = picked_row[12] or ""
+    script_atoms = None
+    try:
+        if host_hint_raw.startswith('{"_script"'):
+            hint_data = json.loads(host_hint_raw)
+            if isinstance(hint_data, dict) and "_script" in hint_data:
+                script_atoms = hint_data["_script"]
+                host_hint_raw = ""  # consumed — don't pass encoded JSON as host_hint
+    except Exception:
+        pass
+
+    seg_out = {
         "id": picked_row[0],
         "created_ts": picked_row[1],
         "priority": float(picked_row[2] or 50.0),
@@ -5686,10 +5723,13 @@ def db_pop_next_segment(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         "angle": picked_row[9],
         "why": picked_row[10],
         "key_points": key_points,
-        "host_hint": picked_row[12],
+        "host_hint": host_hint_raw,
         "lead_voice": picked_row[13],
         "_sfx_files": sfx_files,
     }
+    if script_atoms:
+        seg_out["script"] = script_atoms
+    return seg_out
 
 
 def db_mark_done(conn: sqlite3.Connection, seg_id: str) -> None:
@@ -6926,6 +6966,10 @@ def producer_loop(stop_event: threading.Event, mem: Dict[str, Any]) -> None:
                     "energy": item.get("energy", ""),
                     "lead_voice": item.get("lead_voice", "")
                 }
+
+                # Propagate script atoms for multi-voice dialogue segments
+                if item.get("script") and isinstance(item["script"], list):
+                    seg_obj["script"] = item["script"]
                 
                 if db_enqueue_segment(conn, seg_obj):
                     db_mark_seen(conn, [str(pid)])
@@ -6983,10 +7027,11 @@ def render_segment_audio(seg: Dict[str, Any], mem: Dict[str, Any]) -> List[Tuple
         for atom in seg["script"]:
              if not isinstance(atom, dict): continue
              if atom.get("type") == "speech":
-                 v = atom.get("voice_id") or atom.get("speaker") or "host"
+                 v = atom.get("voice_id") or "host"
                  t = atom.get("text", "")
+                 speaker = atom.get("speaker") or ""
                  if t:
-                     bundle.append((v, t))
+                     bundle.append((v, t, speaker))
         
         if bundle:
              return bundle
@@ -9273,7 +9318,20 @@ def main():
         if isinstance(response, str):
             return {"response": response, "text": response}
         return response
-    
+
+    # ── Forward station-specific objects from shared_runtime ──
+    # Plugins (e.g. oracle_kingdom) add controllers to shared_runtime
+    # during register_widgets().  The meta plugin needs access to these
+    # through runtime_context, so copy any known keys over.
+    _forward_keys = ("ok_controller",)
+    _forwarded = {
+        k: shared_runtime[k]
+        for k in _forward_keys
+        if k in shared_runtime
+    }
+    if _forwarded:
+        log("init", f"Forwarding to runtime_context: {list(_forwarded.keys())}")
+
     runtime_context = {
         "event_q": event_q,
         "ui_q": ui_q,
@@ -9299,6 +9357,8 @@ def main():
         "db_enqueue_segment": db_enqueue_segment,
         "db_connect": db_connect,
         "STATION_DIR": STATION_DIR,
+        # Station-specific objects forwarded from shared_runtime
+        **_forwarded,
     }
     
     global ACTIVE_META_PLUGIN
@@ -9431,6 +9491,10 @@ def main():
                 {"widget_key": (widget_key or "").strip().lower(), "data": data}
             )),
 
+            # Station-specific objects — accessible to specialized feeds
+            # (e.g. oracle_court_feed needs the controller and meta plugin)
+            "ok_controller": shared_runtime.get("ok_controller"),
+            "ACTIVE_META_PLUGIN": ACTIVE_META_PLUGIN,
         }
 
         try:

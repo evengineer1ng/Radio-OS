@@ -82,6 +82,25 @@ else:
     filedialog = None  # type: ignore
 
 BASE = os.path.dirname(__file__)
+
+# ── OLED soul-display event helper (non-fatal if daemon not running) ─────────
+def _oled(event_type: str, **extra):
+    """Send a fire-and-forget UDP event to the OLED daemon.
+
+    Silently no-ops if the daemon is not running or the tools module
+    is unavailable — OLED is enhancement-only, never blocking.
+    """
+    try:
+        import sys as _sys
+        _tools = os.path.join(BASE, "tools")
+        if _tools not in _sys.path:
+            _sys.path.insert(0, _tools)
+        from oled_event_client import send_oled_event  # type: ignore
+        payload = {"type": event_type}
+        payload.update(extra)
+        send_oled_event(payload)
+    except Exception:
+        pass
 STATIONS_DIR = os.path.join(BASE, "stations")
 RUNTIME_PATH = os.path.join(BASE, "bookmark.py")
 PLUGINS_DIR = os.path.join(BASE, "plugins")
@@ -554,6 +573,7 @@ class StationProcess:
             print(f"DEBUG ERROR: Failed to spawn subprocess: {e}")
             raise
         self.station = station
+        _oled("enter_station", station_id=station.station_id)
         
         # Start a thread to capture and log output
         if self.proc and lf:
@@ -612,6 +632,7 @@ class StationProcess:
                 self.proc.terminate()
             except Exception:
                 pass
+        _oled("exit_station")
         
         # Wait for log thread to finish
         if hasattr(self, '_log_thread') and self._log_thread and self._log_thread.is_alive():
@@ -665,6 +686,7 @@ class RadioShell:
 
         self.show_home(instant=True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        _oled("boot")
 
     def _refresh_ui_colors(self):
         """Refresh all UI elements with current theme colors."""
@@ -1592,6 +1614,7 @@ class RadioShell:
     def launch_station(self, station: StationInfo):
         print(f"DEBUG: launch_station called for {station.station_id}")
         print(f"DEBUG: Station path: {station.path}")
+        _oled("loading_start", station_id=station.station_id)
         self.proc.launch(station)
         name = (station.manifest.get("station", {}) or {}).get("name", station.station_id)
         self.now_playing.config(text=f"Now Playing — {name}")
@@ -2484,20 +2507,6 @@ class RadioShell:
         tk.Entry(phrase_frame, textvariable=exit_var, bg=UI["card"], fg=UI["text"],
                  insertbackground=UI["text"], font=FONT_BODY, width=30).pack(anchor="w", pady=(2, 4))
 
-        # ── Silence Timeout ──
-        silence_frame = tk.LabelFrame(wrap, text="⏱  Silence Timeout", fg=UI["text"],
-                                       bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
-        silence_frame.pack(fill="x", pady=8)
-
-        tk.Label(silence_frame,
-                 text="Re-narrate UI state after this many seconds of silence:",
-                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
-        silence_var = tk.StringVar(value=str(acli_cfg.get("silence_timeout_sec", 77)))
-        tk.Entry(silence_frame, textvariable=silence_var, bg=UI["card"], fg=UI["text"],
-                 insertbackground=UI["text"], width=10).pack(anchor="w", pady=(2, 4))
-        tk.Label(silence_frame, text="(Default: 77 seconds)",
-                 fg=UI["muted"], bg=UI["panel"], font=FONT_SMALL).pack(anchor="w")
-
         # ── STT Engine Preference ──
         stt_frame = tk.LabelFrame(wrap, text="🗣  Speech-to-Text Engine", fg=UI["text"],
                                    bg=UI["panel"], font=FONT_BODY, padx=12, pady=8)
@@ -2600,7 +2609,6 @@ class RadioShell:
                 "web_url": url_var.get().strip() or "http://127.0.0.1:7800",
                 "wake_phrase": wake_var.get().strip() or "hey radio",
                 "exit_phrase": exit_var.get().strip() or "thanks radio",
-                "silence_timeout_sec": int(silence_var.get() or 77),
                 "stt_engine": stt_var.get(),
             }
             # LLM override — only save if not "default" or if model/endpoint specified
@@ -2635,7 +2643,6 @@ class RadioShell:
                 url_var.set("http://127.0.0.1:7800")
                 wake_var.set("hey radio")
                 exit_var.set("thanks radio")
-                silence_var.set("77")
                 stt_var.set("auto")
                 acli_provider_var.set("default")
                 acli_model_var.set("")
@@ -3217,6 +3224,7 @@ class RadioShell:
         self.status_lines.config(state="disabled")
 
     def _on_close(self):
+        _oled("shutdown")
         try:
             self.proc.stop()
         except Exception:

@@ -26,19 +26,54 @@ export async function fetchState(): Promise<any> {
   }
 }
 
+export async function fetchFullState(): Promise<any> {
+  try {
+    const res = await fetch(`${BASE}/api/full_state`)
+    let data: any
+    try {
+      data = await res.json()
+    } catch {
+      // Non-JSON response (e.g. HTML error page)
+      return { status: 'no_controller' }
+    }
+    if (!res.ok && !data.status) {
+      return { status: 'no_controller' }
+    }
+    return data
+  } catch {
+    // Backward-compatible fallback if /api/full_state is unavailable
+    return fetchState()
+  }
+}
+
+function isRunningPayload(data: any): boolean {
+  return Boolean(
+    data &&
+    data.status === 'running' &&
+    (data.player_team || data.team_state)
+  )
+}
+
+/**
+ * Global refresh path for web UI.
+ * Pulls the unified full state payload and updates the shared store only when
+ * a real running state is returned.
+ */
+export async function globalRefresh(): Promise<any> {
+  const data = await fetchFullState()
+  if (isRunningPayload(data)) {
+    gameState.set(data)
+  }
+  return data
+}
+
 /**
  * Fetch state and update the gameState store ONLY if the response contains
  * real game data.  Skips "busy" (lock contended) and error responses so that
  * the UI never gets wiped with a stub object.
  */
 export async function safeRefreshState(): Promise<void> {
-  const data = await fetchState()
-  // Only push to the store when we got a full game-state payload.
-  // "busy", "no_game", "no_controller" are lightweight stubs that must NOT
-  // overwrite the rich state the UI is currently showing.
-  if (data && data.status === 'running' && data.player_team) {
-    gameState.set(data)
-  }
+  await globalRefresh()
 }
 
 export async function fetchSubtitle(): Promise<string> {
@@ -163,6 +198,25 @@ export async function declineSponsor(offerIndex: number): Promise<any> {
   return res.json()
 }
 
+// ─── Promotion ───
+export async function applyPromotion(opportunityId: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/promotion/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ opportunity_id: opportunityId }),
+  })
+  return res.json()
+}
+
+export async function declinePromotion(opportunityId: string): Promise<any> {
+  const res = await fetch(`${BASE}/api/promotion/decline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ opportunity_id: opportunityId }),
+  })
+  return res.json()
+}
+
 // ─── Parts ───
 export async function buyPart(partId: string, cost: number): Promise<any> {
   const res = await fetch(`${BASE}/api/parts/buy`, {
@@ -170,7 +224,11 @@ export async function buyPart(partId: string, cost: number): Promise<any> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ part_id: partId, cost }),
   })
-  return res.json()
+  const data = await res.json()
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error || `Buy failed (${res.status})`)
+  }
+  return data
 }
 
 export async function sellPart(partId: string): Promise<any> {
@@ -215,6 +273,41 @@ export async function applyForJob(listingId: number): Promise<any> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ listing_id: listingId }),
+  })
+  return res.json()
+}
+
+export async function submitStaffContractOffer(payload: {
+  entity_id: number
+  seasons_duration: number
+  salary_annual: number
+  signing_bonus_annual: number
+  negotiation_round?: number
+  role?: string
+  performance_clauses?: Record<string, any>
+  exit_clauses?: Record<string, any>
+}): Promise<any> {
+  const res = await fetch(`${BASE}/api/staff/contract/offer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return res.json()
+}
+
+export async function finalizeStaffContract(payload: {
+  entity_id: number
+  seasons_duration: number
+  salary_annual: number
+  signing_bonus_annual: number
+  role?: string
+  performance_clauses?: Record<string, any>
+  exit_clauses?: Record<string, any>
+}): Promise<any> {
+  const res = await fetch(`${BASE}/api/staff/contract/finalize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   })
   return res.json()
 }

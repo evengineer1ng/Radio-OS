@@ -1,6 +1,6 @@
 <script lang="ts">
   import { gameState } from '../lib/stores'
-  import { sendCommand } from '../lib/api'
+  import { formatEventSummary } from '../lib/eventFormat'
 
   $: pbp = $gameState?.play_by_play || {}
   $: liveEvents = pbp.live_events || []
@@ -75,7 +75,7 @@
       {#each liveEvents as evt}
         <div class="event-row">
           <span class="event-type badge badge-{evt.type || 'info'}">{evt.type || 'event'}</span>
-          <span>{evt.text || JSON.stringify(evt)}</span>
+          <span>{formatEventSummary(evt)}</span>
         </div>
       {/each}
       {#if liveEvents.length === 0}

@@ -64,6 +64,64 @@
     if (typeof gap === 'string') return gap
     return `+${Number(gap).toFixed(3)}s`
   }
+
+  function cleanLabel(value: any): string {
+    const text = String(value ?? '').trim()
+    if (!text || text === '—' || text === '-') return ''
+    return text
+  }
+
+  function toPosInt(value: any): number | null {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return Math.trunc(n)
+  }
+
+  function normalizeRows(source: any): Array<{ position: number; driver: string; team: string; isPlayer: boolean }> {
+    if (!Array.isArray(source)) return []
+    return source
+      .map((row: any, index: number) => {
+        const arr = Array.isArray(row) ? row : null
+        const driver = cleanLabel(row?.driver ?? row?.name ?? arr?.[0])
+        const team = cleanLabel(row?.team ?? arr?.[1])
+        const position = toPosInt(row?.position) ?? (index + 1)
+        const isPlayer = Boolean(row?.is_player ?? row?.isPlayer)
+        return { position, driver, team, isPlayer }
+      })
+      .filter((row) => row.driver)
+      .sort((a, b) => a.position - b.position)
+  }
+
+  function getWinnerSummary(result: any, liveStandings: any[]): { driver: string; team: string } {
+    const directDriver = cleanLabel(result?.winner_driver)
+    if (directDriver) {
+      return {
+        driver: directDriver,
+        team: cleanLabel(result?.winner_team),
+      }
+    }
+
+    const finalRows = normalizeRows(result?.final_standings)
+    const rows = finalRows.length ? finalRows : normalizeRows(liveStandings)
+    if (!rows.length) return { driver: '', team: '' }
+    return { driver: rows[0].driver, team: rows[0].team }
+  }
+
+  function getPlayerFinish(result: any, liveStandings: any[]): number | null {
+    const directFinish = toPosInt(result?.player_finish)
+    if (directFinish) return directFinish
+
+    const finalRows = normalizeRows(result?.final_standings)
+    const rows = finalRows.length ? finalRows : normalizeRows(liveStandings)
+    const playerRow = rows.find((row) => row.isPlayer)
+    return playerRow ? playerRow.position : null
+  }
+
+  $: winnerSummary = getWinnerSummary(raceResult, standings)
+  $: winnerLabel = winnerSummary.team
+    ? `${winnerSummary.driver} (${winnerSummary.team})`
+    : (winnerSummary.driver || '—')
+  $: playerFinish = getPlayerFinish(raceResult, standings)
 </script>
 
 <div class="raceops-view scroll-y">
@@ -178,14 +236,12 @@
   {#if phase === 'race_complete'}
     <div class="card">
       <div class="section-title">🏆 Race Results</div>
-      {#if raceResult}
-        <div class="result-highlight">
-          <div class="winner">🥇 {raceResult.winner_driver} ({raceResult.winner_team})</div>
-          {#if raceResult.player_finish}
-            <div class="player-finish">Your finish: P{raceResult.player_finish}</div>
-          {/if}
-        </div>
-      {/if}
+      <div class="result-highlight">
+        <div class="winner">🥇 {winnerLabel}</div>
+        {#if playerFinish}
+          <div class="player-finish">Your finish: P{playerFinish}</div>
+        {/if}
+      </div>
       {#if standings.length}
         <table class="data-table">
           <thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Gap</th></tr></thead>

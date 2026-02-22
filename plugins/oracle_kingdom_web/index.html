@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oracle Kingdom</title>
+<link rel="stylesheet" href="/ok/static/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ═══════════════════════════════════════════════════
+       TITLE SCREEN
+       ═══════════════════════════════════════════════════ -->
+  <div id="screen-title" class="screen active">
+    <div class="title-card">
+      <div class="title-icon">👁</div>
+      <h1>Oracle Kingdom</h1>
+      <p class="subtitle">You are the Oracle. Your words shape a world you cannot fully see.</p>
+      <div class="title-buttons">
+        <button onclick="showScreen('screen-new-game')" class="btn btn-primary">New Kingdom</button>
+        <button onclick="openLoadScreen()" class="btn btn-secondary">Load Kingdom</button>
+      </div>
+      <p class="version">Radio OS · Web Edition</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════
+       LOAD GAME SCREEN
+       ═══════════════════════════════════════════════════ -->
+  <div id="screen-load" class="screen">
+    <div class="creation-panel load-panel">
+      <h2>Load Kingdom</h2>
+      <p class="creation-hint">Select a save file. Time has passed since you were last here — the kingdom did not wait.</p>
+
+      <div id="save-list" class="save-list">
+        <p class="muted">Loading save files…</p>
+      </div>
+
+      <div class="creation-actions">
+        <button onclick="showScreen('screen-title')" class="btn btn-ghost">← Back</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════
+       CHARACTER CREATION
+       ═══════════════════════════════════════════════════ -->
+  <div id="screen-new-game" class="screen">
+    <div class="creation-panel">
+      <h2>Shape Your Oracle</h2>
+      <p class="creation-hint">Allocate 250 points across ten traits. Each shapes how the world hears you.</p>
+      <div id="trait-sliders"></div>
+      <div class="creation-pool">
+        Points remaining: <span id="points-remaining">250</span>
+      </div>
+      <div class="creation-presets">
+        <span class="label">Presets:</span>
+        <button onclick="applyPreset('balanced')" class="btn btn-sm">Balanced</button>
+        <button onclick="applyPreset('tyrant')" class="btn btn-sm">Tyrant</button>
+        <button onclick="applyPreset('mystic')" class="btn btn-sm">Mystic</button>
+        <button onclick="applyPreset('diplomat')" class="btn btn-sm">Diplomat</button>
+        <button onclick="applyPreset('random')" class="btn btn-sm">Random</button>
+      </div>
+      <div class="creation-time">
+        <label>Time Scale:</label>
+        <select id="time-preset">
+          <option value="week_per_year">1 real week = 1 game year (default)</option>
+          <option value="day_per_day">1 real day = 1 game day (slow)</option>
+          <option value="month_per_year">1 real month = 1 game year</option>
+          <option value="year_per_year">1 real year = 1 game year (patient)</option>
+        </select>
+      </div>
+      <div class="creation-actions">
+        <button onclick="showScreen('screen-title')" class="btn btn-ghost">← Back</button>
+        <button onclick="createGame()" class="btn btn-primary" id="btn-create">Begin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════
+       MAIN GAME SCREEN
+       ═══════════════════════════════════════════════════ -->
+  <div id="screen-game" class="screen">
+
+    <!-- Top bar -->
+    <header class="game-header">
+      <div class="header-left">
+        <span class="kingdom-name" id="hdr-kingdom-name">—</span>
+        <span class="era-badge" id="hdr-era">—</span>
+      </div>
+      <div class="header-center">
+        <span id="hdr-year">Year 1</span>
+        <span class="sep">·</span>
+        <span id="hdr-tick">Tick 0</span>
+        <span class="sep">·</span>
+        <span id="hdr-health" class="health-badge">♥ 50</span>
+      </div>
+      <div class="header-right">
+        <button onclick="toggleAudio()" class="btn btn-sm" id="btn-audio" title="Toggle voice narration">🔇</button>
+        <button onclick="togglePause()" class="btn btn-sm" id="btn-pause">▶ Resume</button>
+        <button onclick="manualTick()" class="btn btn-sm">⏭ Tick</button>
+        <button onclick="openSaveDialog()" class="btn btn-sm" title="Save game">💾 Save</button>
+        <button onclick="showScreen('screen-title')" class="btn btn-sm btn-ghost">✕</button>
+      </div>
+    </header>
+
+    <!-- Subtitle / voice bar -->
+    <div class="subtitle-bar" id="subtitle-bar">
+      <span class="subtitle-indicator" id="audio-indicator">○</span>
+      <span class="subtitle-text" id="subtitle-text"></span>
+    </div>
+
+    <!-- Main content area -->
+    <div class="game-body">
+
+      <!-- LEFT COLUMN: Location / Court Map -->
+      <aside class="panel panel-locations">
+        <h3>Palace</h3>
+        <div id="location-list" class="location-grid"></div>
+        <div class="current-location" id="current-location-info">
+          <h4 id="loc-name">Throne Room</h4>
+          <p id="loc-desc" class="muted">Formal silence. All factions attend.</p>
+        </div>
+      </aside>
+
+      <!-- CENTER: Oracle Actions + Narrative -->
+      <main class="panel panel-center">
+
+        <!-- Decrees -->
+        <section id="decree-section" class="decree-area">
+          <div class="decree-header">
+            <h3>The Court Awaits</h3>
+            <button onclick="generateDecrees()" class="btn btn-sm btn-accent">Generate Options</button>
+          </div>
+          <div id="decree-options" class="decree-options">
+            <p class="muted">No decree options generated yet. Click "Generate Options" or wait.</p>
+          </div>
+        </section>
+
+        <!-- Inner Monologue -->
+        <section class="inner-section">
+          <h3>Inner Monologue</h3>
+          <div id="inner-thoughts" class="thought-stream">
+            <p class="muted">Silence within...</p>
+          </div>
+        </section>
+
+        <!-- Narration Feed (LLM-generated atmosphere + dialogue) -->
+        <section class="narration-section">
+          <h3>📜 Narration</h3>
+          <div id="narration-feed" class="narration-feed">
+            <p class="muted">The Oracle stirs...</p>
+          </div>
+        </section>
+
+        <!-- Event Feed -->
+        <section class="event-section">
+          <h3>Events</h3>
+          <div id="event-feed" class="event-feed">
+            <p class="muted">The kingdom stirs...</p>
+          </div>
+        </section>
+      </main>
+
+      <!-- RIGHT COLUMN: State Dashboard -->
+      <aside class="panel panel-state">
+        <!-- Presence Requests (CTAs) -->
+        <section class="cta-section">
+          <h3>Requests <span id="cta-count" class="badge">0</span></h3>
+          <div id="cta-list" class="cta-list"></div>
+        </section>
+
+        <!-- Kingdom Layers -->
+        <section class="layers-section">
+          <h3>Kingdom</h3>
+          <div id="layer-bars" class="layer-bars"></div>
+        </section>
+
+        <!-- Court Agents -->
+        <section class="agents-section">
+          <h3>Court</h3>
+          <div id="agent-list" class="agent-list"></div>
+        </section>
+
+        <!-- Oracle Psychology -->
+        <section class="psych-section">
+          <h3>Oracle Mind</h3>
+          <div id="oracle-psych" class="psych-bars"></div>
+        </section>
+
+        <!-- Oracle Identity -->
+        <section class="identity-section">
+          <div class="identity-label" id="oracle-archetype">Unknown</div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SAVE DIALOG MODAL
+     ═══════════════════════════════════════════════════ -->
+<div id="modal-save" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h3>💾 Save Kingdom</h3>
+    <p class="muted">Give this save a name, or leave blank to overwrite the autosave.</p>
+    <input type="text" id="save-name-input" class="save-name-input"
+           placeholder="e.g. Year 12, The Great Silence"
+           maxlength="60"
+           onkeydown="if(event.key==='Enter') confirmSave()">
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-save')" class="btn btn-ghost">Cancel</button>
+      <button onclick="confirmSave()" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     RECONSTRUCTION OVERLAY
+     ═══════════════════════════════════════════════════ -->
+<div id="modal-reconstruction" class="modal-overlay" style="display:none">
+  <div class="modal-card reconstruction-card">
+    <div class="recon-icon">⏳</div>
+    <h3>The Kingdom Moved Without You</h3>
+    <p id="recon-subtitle" class="muted">Reconstructing the passage of time…</p>
+    <div class="recon-progress-track">
+      <div id="recon-progress-fill" class="recon-progress-fill" style="width:0%"></div>
+    </div>
+    <p id="recon-phase" class="recon-phase-label">Initializing…</p>
+    <div id="recon-event-log" class="recon-event-log"></div>
+    <div class="modal-actions">
+      <button onclick="reconstructAll()" class="btn btn-primary" id="btn-recon-all">Fast-Forward All</button>
+      <button onclick="reconstructNext()" class="btn btn-secondary" id="btn-recon-next">Next Phase</button>
+    </div>
+  </div>
+</div>
+
+<script src="/ok/static/app.js"></script>
+</body>
+</html>

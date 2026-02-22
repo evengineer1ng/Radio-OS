@@ -18,6 +18,7 @@
   let limit = 50
   
   $: dbPath = $gameState.state_db_path || ''
+  $: dbReady = Boolean((dbPath || '').trim())
   $: playerTeamName = $gameState.player_team?.name || ''
   
   // Auto-set team filter to player team
@@ -26,17 +27,13 @@
   }
   
   async function loadData() {
-    if (!dbPath) {
-      error = 'No database path available'
-      return
-    }
-    
     loading = true
     error = ''
     data = []
     
     try {
-      const payload: any = { db_path: dbPath, limit }
+      const payload: any = { limit }
+      if (dbReady) payload.db_path = dbPath
       
       // Add filters based on category
       if (teamFilter && (currentCategory === 'seasons' || currentCategory === 'races' || currentCategory === 'finances' || currentCategory === 'outcomes')) {
@@ -169,6 +166,10 @@
   {#if currentCategory !== 'tables'}
     <div class="card filters-card">
       <div class="filters-row">
+        <div class="db-status" class:waiting={!dbReady}>
+          🗄️ DB: {dbReady ? 'Connected' : 'Waiting for state DB path'}
+        </div>
+
         {#if currentCategory === 'seasons' || currentCategory === 'races' || currentCategory === 'finances' || currentCategory === 'outcomes'}
           <label>
             <span>Team:</span>
@@ -205,7 +206,7 @@
           <input type="number" bind:value={limit} min="10" max="1000" step="10" />
         </label>
         
-        <button class="btn-primary" on:click={loadData} disabled={loading || !dbPath}>
+        <button class="btn-primary" on:click={loadData} disabled={loading}>
           {loading ? 'Loading...' : 'Query'}
         </button>
         <button class="btn-secondary" on:click={clearFilters}>
@@ -220,7 +221,10 @@
     </div>
   {:else}
     <div class="card filters-card">
-      <button class="btn-primary" on:click={loadData} disabled={loading || !dbPath}>
+      <div class="db-status" class:waiting={!dbReady}>
+        🗄️ DB: {dbReady ? 'Connected' : 'Waiting for state DB path'}
+      </div>
+      <button class="btn-primary" on:click={loadData} disabled={loading}>
         {loading ? 'Loading...' : 'Load Table Counts'}
       </button>
     </div>
@@ -353,6 +357,20 @@
     gap: 12px;
     align-items: flex-end;
     flex-wrap: wrap;
+  }
+  
+  .db-status {
+    font-size: 12px;
+    color: var(--c-success);
+    font-weight: 600;
+    padding: 6px 10px;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    background: var(--c-bg-secondary);
+  }
+  
+  .db-status.waiting {
+    color: var(--c-warning);
   }
   
   .filters-row label {

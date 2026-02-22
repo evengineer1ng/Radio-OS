@@ -58,8 +58,12 @@ class PiperProvider(VoiceProvider):
         if not self.piper_bin or not os.path.exists(self.piper_bin):
             raise RuntimeError(f"Piper binary not found: {self.piper_bin}")
 
-        # Get voice model path
-        voice_path = voice_map.get(voice_key) or voice_map.get("host")
+        # Get voice model path (prefix fallback for indexed voices like murmur_0)
+        voice_path = voice_map.get(voice_key)
+        if not voice_path and "_" in voice_key:
+            voice_path = voice_map.get(voice_key.rsplit("_", 1)[0])
+        if not voice_path:
+            voice_path = voice_map.get("host")
         if not voice_path or not os.path.exists(voice_path):
             raise RuntimeError(f"Voice model not found for key={voice_key}: {voice_path}")
 
@@ -113,8 +117,12 @@ class ElevenLabsProvider(VoiceProvider):
         """
         import soundfile as sf
 
-        # Get voice ID from mapping
-        voice_id = voice_map.get(voice_key) or voice_map.get("host")
+        # Get voice ID from mapping (prefix fallback for indexed voices)
+        voice_id = voice_map.get(voice_key)
+        if not voice_id and "_" in voice_key:
+            voice_id = voice_map.get(voice_key.rsplit("_", 1)[0])
+        if not voice_id:
+            voice_id = voice_map.get("host")
         if not voice_id:
             raise ValueError(f"Voice ID not found for key={voice_key}")
 
@@ -176,8 +184,12 @@ class GoogleCloudTTSProvider(VoiceProvider):
         from pydub import AudioSegment
         import io
 
-        # Get voice name
-        voice_name = voice_map.get(voice_key) or voice_map.get("host")
+        # Get voice name (prefix fallback for indexed voices)
+        voice_name = voice_map.get(voice_key)
+        if not voice_name and "_" in voice_key:
+            voice_name = voice_map.get(voice_key.rsplit("_", 1)[0])
+        if not voice_name:
+            voice_name = voice_map.get("host")
         if not voice_name:
             voice_name = "en-US-Neural2-C"  # Default US female voice
 
@@ -252,9 +264,22 @@ class KokoroProvider(VoiceProvider):
         """
         Use Kokoro to generate audio from text.
         voice_map should contain voice_key -> kokoro voice name (e.g. "af_sarah")
+
+        Voice resolution order:
+          1. Exact match:   voice_map[voice_key]
+          2. Prefix match:  voice_map["murmur"] for voice_key="murmur_2"
+          3. Host fallback:  voice_map["host"]
+          4. Hard default:   "af_sarah"
         """
         # Get kokoro voice name from mapping
-        kokoro_voice = voice_map.get(voice_key) or voice_map.get("host")
+        kokoro_voice = voice_map.get(voice_key)
+        if not kokoro_voice:
+            # Try prefix match (e.g. "murmur_2" → "murmur", "court_agents" → "court")
+            prefix = voice_key.rsplit("_", 1)[0] if "_" in voice_key else ""
+            if prefix:
+                kokoro_voice = voice_map.get(prefix)
+        if not kokoro_voice:
+            kokoro_voice = voice_map.get("host")
         if not kokoro_voice:
             # Default to a good English female voice if none specified
             kokoro_voice = "af_sarah"
@@ -306,7 +331,11 @@ class AzureSpeechProvider(VoiceProvider):
         """
         import soundfile as sf
 
-        voice_name = voice_map.get(voice_key) or voice_map.get("host")
+        voice_name = voice_map.get(voice_key)
+        if not voice_name and "_" in voice_key:
+            voice_name = voice_map.get(voice_key.rsplit("_", 1)[0])
+        if not voice_name:
+            voice_name = voice_map.get("host")
         if not voice_name:
             voice_name = "en-US-AriaNeural"
 

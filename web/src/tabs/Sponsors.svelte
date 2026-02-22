@@ -4,9 +4,15 @@
   import { acceptSponsor, declineSponsor, safeRefreshState } from '../lib/api'
 
   $: team = $gameState.player_team
+  $: standingMetrics = team?.standing_metrics || {}
   $: teamName = team?.name || ''
   $: sponsors = ($gameState.sponsorships || {})[teamName] || []
   $: pendingOffers = ($gameState.pending_sponsor_offers || {})[teamName] || []
+  $: reputation = Number(standingMetrics?.reputation ?? 50)
+  $: avgConfidence = sponsors.length
+    ? sponsors.reduce((sum: number, sp: any) => sum + Number(sp.confidence ?? 100), 0) / sponsors.length
+    : 0
+  $: atRiskSponsors = sponsors.filter((sp: any) => Number(sp.confidence ?? 100) < 40).length
 
   let working = false
   async function handleAccept(index: number) {
@@ -34,6 +40,21 @@
 </script>
 
 <div class="sponsors-view">
+  <div class="card summary-card">
+    <div class="summary-item">
+      <span class="summary-label">Team Reputation</span>
+      <span class="summary-value">{Math.round(reputation)}%</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">Sponsor Health</span>
+      <span class="summary-value" class:warn={avgConfidence < 50}>{sponsors.length ? `${Math.round(avgConfidence)}%` : 'No sponsors'}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">At Risk</span>
+      <span class="summary-value" class:warn={atRiskSponsors > 0}>{atRiskSponsors}</span>
+    </div>
+  </div>
+
   <div class="card">
     <div class="section-title">🏢 Current Sponsors ({sponsors.length})</div>
     <div class="sponsor-list">
@@ -79,6 +100,35 @@
 
 <style>
   .sponsors-view { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+  .summary-card {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .summary-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    background: var(--c-bg-tertiary);
+  }
+  .summary-label {
+    font-size: 11px;
+    color: var(--c-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .summary-value {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--c-accent);
+    font-family: var(--font-mono);
+  }
+  .summary-value.warn {
+    color: var(--c-danger);
+  }
   .sponsor-list { display: flex; flex-direction: column; gap: 6px; }
   .sponsor-card {
     padding: 10px; background: var(--c-bg-tertiary); border-radius: var(--radius);
@@ -94,4 +144,9 @@
   .sp-confidence { color: var(--c-accent); font-size: 11px; }
   .sp-confidence.low { color: var(--c-danger); }
   .empty-state { text-align: center; color: var(--c-text-muted); padding: 20px; font-size: 13px; }
+  @media (max-width: 640px) {
+    .summary-card {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>

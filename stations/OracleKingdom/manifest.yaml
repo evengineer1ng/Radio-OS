@@ -1,0 +1,221 @@
+station:
+  id: OracleKingdom
+  name: Oracle Kingdom
+  host: Oracle King
+  category: Speak your prophecy
+  logo: /Users/even/Documents/Radio-OS-1.03/logos/oraclekingdom.jpg
+meta_plugin: ok_narrator_plugin
+llm:
+  provider: openai
+  endpoint: http://127.0.0.1:11434/api/generate
+models:
+  producer: gpt-4o
+  host: gpt-4o
+  navigator: gpt-4o
+  embedding: ''
+embedding:
+  enabled: false
+audio:
+  voices_provider: kokoro
+  piper_bin: ''
+voices:
+  host: am_adam
+  narrator: bf_emma
+  court_agents: am_michael
+  court_0: am_michael
+  court_1: bf_isabella
+  court_2: bm_lewis
+  court_3: af_bella
+  oracle_inner: af_nicole
+  chronicler: bm_george
+  murmur: af_sky
+characters:
+  host:
+    role: moderator
+    traits:
+    - calm
+    - smart
+    focus:
+    - flow
+    - continuity
+feeds:
+  bluesky:
+    enabled: false
+    hashtags: []
+    poll_sec: 60
+    limit: 20
+    priority: 70
+  document:
+    enabled: false
+    files:
+    - name: strategy
+      path: ./strategy_reference.txt
+      max_chars: 5000
+      announce: true
+      announce_priority: 86
+      candidate: false
+    - name: playbook
+      path: ./coach_playbook.txt
+      max_chars: 7000
+      announce: false
+      candidate: true
+      candidate_priority: 80
+    poll_sec: 2.5
+    announce_cooldown_sec: 600
+  facebook:
+    enabled: false
+    access_token: ''
+    page_id: ''
+    keywords: []
+    poll_sec: 120
+    limit: 15
+    priority: 70
+  flows:
+    enabled: false
+    reaction_frequency: 0.2
+    min_reaction_gap_sec: 20
+    flow_songs_min: 2
+    flow_songs_max: 4
+    flow_songs_random: true
+    talk_segments_min: 2
+    talk_segments_max: 5
+    talk_segments_random: true
+  ftb_audio_engine:
+    enabled: false
+  ok_audio_engine:
+    enabled: true
+    poll_sec: 0.1
+  ftb_broadcast_commentary:
+    enabled: false
+  ftb_broadcast_commentary_llm:
+    enabled: false
+  ftb_components:
+    enabled: false
+  ftb_db_archival:
+    enabled: false
+  ftb_heritage_templates:
+    enabled: false
+  ftb_historical_integration:
+    enabled: false
+  ftb_names:
+    enabled: false
+  ftb_narrative_prompts:
+    enabled: false
+  ftb_race_day:
+    enabled: false
+  ftb_sponsors:
+    enabled: false
+  ftb_state_db:
+    enabled: false
+  futuresight:
+    enabled: false
+    poll_sec: 0.25
+    vision_provider: ollama
+    vision_model: llava:latest
+    vision_endpoint: http://localhost:11434
+    vision_api_key: ''
+    vision_prompt: Describe what is happening in this video frame as if you are a
+      commentator watching a live feed. Focus on the action, the people, and the atmosphere.
+      Keep it immediate and descriptive.
+  google_alerts:
+    enabled: false
+    urls: []
+    poll_sec: 180
+    burst_delay: 0.5
+    feed_delay: 1
+  instagram:
+    enabled: false
+    access_token: ''
+    hashtags: []
+    poll_sec: 120
+    limit: 15
+    priority: 70
+  markets:
+    enabled: false
+    symbols: []
+    poll_sec: 15
+    breakout_pct: 0.2
+    priority: 90
+    emit_limit: 2
+  mix_rebalance:
+    enabled: false
+  oracle_court:
+    enabled: true
+    plugin: oracle_court_feed
+    tick_sec: 12
+    startup_delay: 10
+  portfolio:
+    enabled: false
+    mode: hyperliquid
+    user_address: ''
+    poll_sec: 6
+    min_emit_gap_sec: 20
+    min_equity_delta_frac: 0.003
+    big_equity_delta_frac: 0.015
+    positions_change_priority: 95
+    equity_change_priority: 93
+    big_move_priority: 98
+    base_url: https://api.hyperliquid.xyz
+  producer_mix:
+    enabled: false
+  producer_settings:
+    enabled: false
+  reddit:
+    enabled: false
+    subreddits: []
+    poll_sec: 30
+    limit: 20
+    priority: 60
+    burst_delay: 0.25
+    seen_ttl_sec: 3600
+  rss:
+    enabled: false
+    urls: []
+    poll_sec: 180
+    priority: 72
+    burst_delay: 0.5
+    feed_delay: 2
+    emit_limit: 2
+    deep_fetch:
+      enabled: false
+      timeout_sec: 5
+      max_chars: 1500
+  tiktok:
+    enabled: false
+    api_key: ''
+    api_secret: ''
+    hashtags: []
+    poll_sec: 180
+    limit: 10
+    priority: 72
+  twitter:
+    enabled: false
+    bearer_token: ''
+    hashtags: []
+    poll_sec: 90
+    limit: 20
+    priority: 75
+  visual_reader:
+    enabled: false
+    source_type: screen
+    source_path: ''
+    source_window: ''
+    capture_interval: 5
+    talk_over_video: false
+    reaction_frequency: 30
+    max_interpretation_length: 500
+    interpretation_temperature: 0.7
+  oracle_court_feed:
+    tick_sec: 12
+    startup_delay: 10
+mix:
+  weights:
+    ok_audio_engine: 0.1
+    oracle_court: 1
+scheduler:
+  source_quotas:
+    ok_audio_engine: 3
+    oracle_court: 1
+paths:
+  db: station.sqlite
+  memory: station_memory.json

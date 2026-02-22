@@ -1,0 +1,24 @@
+[Unit]
+Description=Radio OS OLED Soul Display Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=airfryer
+WorkingDirectory=/home/airfryer/Radio-OS-1.03
+ExecStart=/home/airfryer/Radio-OS-1.03/radioenv/bin/python tools/oled_soul_daemon.py \
+    --driver ssd1306 \
+    --spi-port 0 \
+    --spi-device 0 \
+    --dc-pin 24 \
+    --rst-pin 25 \
+    --fps 20 \
+    --width 128 \
+    --height 64
+Restart=always
+RestartSec=3
+StandardOutput=append:/home/airfryer/oled_daemon.log
+StandardError=append:/home/airfryer/oled_daemon.log
+
+[Install]
+WantedBy=multi-user.target

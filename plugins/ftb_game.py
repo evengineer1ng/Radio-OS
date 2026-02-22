@@ -126,6 +126,51 @@ TIER_DISPLAY_NAMES = {
     4: "formula_y",
     5: "formula_z"
 }
+TIER_NAME_TO_LEVEL = {name: level for level, name in TIER_DISPLAY_NAMES.items()}
+
+
+def _coerce_tier_level(value: Any, default: int = 1) -> int:
+    """Convert tier values (int/string/name) into a safe 1-5 level."""
+    def _clamp(raw: Any, fallback: int) -> int:
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(1, min(5, parsed))
+
+    fallback = _clamp(default, 1)
+
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, (int, float)):
+        return _clamp(value, fallback)
+
+    token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if not token:
+        return fallback
+    if token in TIER_NAME_TO_LEVEL:
+        return TIER_NAME_TO_LEVEL[token]
+
+    compact = token.replace("_", "")
+    compact_map = {
+        "grassroots": 1,
+        "formulav": 2,
+        "formulax": 3,
+        "formulay": 4,
+        "formulaz": 5,
+    }
+    if compact in compact_map:
+        return compact_map[compact]
+
+    if token.startswith("tier") or token.startswith("t"):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        if digits:
+            return _clamp(digits, fallback)
+
+    if token.isdigit():
+        return _clamp(token, fallback)
+
+    return fallback
 
 # Tier-specific feature gates (Phase 3)
 TIER_FEATURES = {
@@ -272,7 +317,8 @@ PENALTY_CONFIG = {
 
 # Morale System Configuration (Phase 1 - Stabilization)
 MORALE_CONFIG = {
-    'daily_reversion_factor': 0.03,      # 3% daily pull toward baseline (was 8% - too aggressive)
+    'daily_reversion_factor': 0.01,      # 1% passive pull toward baseline (slow background drift)
+    'reversion_tick_interval': 3,        # Apply passive reversion every 3 ticks (not daily)
     'baseline_range': (40.0, 60.0),      # Min/max personality baselines
     'diminishing_returns_threshold': 20,  # Distance from 50 before diminishing returns
     'extreme_morale_cap': 0.2,           # Max 20% effectiveness at extremes (>40 from 50)
@@ -2997,6 +3043,7 @@ class Team:
             'ownership_confidence': 50.0,
             'political_capital': 50.0,
             'morale': 50.0,
+            'team_health': 50.0,
         }
         # Ownership model (for player teams)
         self.ownership_type: str = "hired_manager"  # "hired_manager" or "self_owned"
@@ -3550,6 +3597,11 @@ class SimState:
         self.world_state: Dict[str, Any] = {}
         self.pending_developments: List[Dict[str, Any]] = []  # List of {team_name, resolve_tick, cost, engineer_bonus}
         self.pending_decisions: List[DecisionEvent] = []  # Active decisions awaiting player response
+        # Promotion / relegation lifecycle state.
+        # promotion_opportunities contains JSON-serializable records for UI tabs.
+        self.promotion_opportunities: List[Dict[str, Any]] = []
+        self.pending_promotions: List[Dict[str, Any]] = []
+        self.pending_relegations: List[Dict[str, Any]] = []
         self._next_event_id: int = 1  # Auto-incrementing event ID counter
         
         # New systems
@@ -4423,10 +4475,15 @@ class SimState:
         """
         if not MORALE_CONFIG['reversion_enabled']:
             return []
+
+        # Passive morale drift should be occasional and subtle, not day-to-day noise.
+        reversion_interval = max(1, int(MORALE_CONFIG.get('reversion_tick_interval', 1) or 1))
+        if reversion_interval > 1 and (int(self.tick) % reversion_interval) != 0:
+            return []
         
         events = []
         current_day = self.sim_day_of_year
-        reversion_factor = MORALE_CONFIG['daily_reversion_factor']
+        reversion_factor = float(MORALE_CONFIG.get('daily_reversion_factor', 0.01))
         
         all_entities = []
         if hasattr(team, 'drivers'):
@@ -4540,7 +4597,7 @@ class SimState:
                 if hasattr(team, 'championship_position') and hasattr(team, 'league_id'):
                     # Find league size
                     league_size = 10  # default
-                    for league in self.leagues:
+                    for league in self.leagues.values():
                         if league.league_id == team.league_id:
                             league_size = len(league.teams)
                             break
@@ -4748,7 +4805,7 @@ class SimState:
         candidates = []
         
         # Search all leagues
-        for league in self.leagues:
+        for league in self.leagues.values():
             for team in league.teams:
                 # Don't poach from own team
                 if team == acquiring_team:
@@ -5476,7 +5533,11 @@ class SimState:
         return {
             'entity': self._serialize_entity(fa.entity),
             'entity_type': fa.entity_type,
+            # Canonical lowercase type for robust reloads (legacy saves may only have entity_type).
+            'entity_type_key': fa.entity_type.lower(),
             'asking_salary': fa.asking_salary,
+            'time_in_pool_days': fa.time_in_pool_days,
+            'exit_reason': fa.exit_reason,
             'contract_length_preference': fa.contract_length_preference,
             'entered_market_tick': fa.entered_market_tick,
             'entered_market_day': fa.entered_market_day,
@@ -5487,14 +5548,24 @@ class SimState:
     def _deserialize_free_agent(self, data: Dict[str, Any]) -> 'FreeAgent':
         """Deserialize a free agent"""
         entity_data = data.get('entity', {})
-        entity_type = data.get('entity_type', 'driver')
+        raw_entity_type = (
+            data.get('entity_type_key')
+            or data.get('entity_type')
+            or entity_data.get('entity_type')
+            or 'driver'
+        )
+        entity_type = str(raw_entity_type).strip().lower().replace(" ", "_")
         
         # Map entity_type to entity class
         entity_class_map = {
             'driver': Driver,
             'engineer': Engineer,
             'mechanic': Mechanic,
-            'strategist': Strategist
+            'strategist': Strategist,
+            'principal': AIPrincipal,
+            'team_principal': AIPrincipal,
+            'ai_principal': AIPrincipal,
+            'aiprincipal': AIPrincipal,
         }
         entity_class = entity_class_map.get(entity_type, Driver)
         entity = self._deserialize_entity(entity_data, entity_class)
@@ -5504,6 +5575,8 @@ class SimState:
             asking_salary=data.get('asking_salary', 50000.0),
             contract_length_preference=data.get('contract_length_preference', 2)
         )
+        fa.time_in_pool_days = data.get('time_in_pool_days', 0)
+        fa.exit_reason = data.get('exit_reason', "")
         fa.entered_market_tick = data.get('entered_market_tick', 0)
         fa.entered_market_day = data.get('entered_market_day', 0)
         fa.interested_in_tier = data.get('interested_in_tier', 1)
@@ -5512,25 +5585,38 @@ class SimState:
     
     def _serialize_job_listing(self, listing: JobListing) -> Dict[str, Any]:
         """Serialize a job listing"""
+        salary_value = getattr(listing, 'salary', None)
+        if salary_value is None:
+            salary_value = getattr(listing, 'salary_offer', 0)
+
         return {
-            'team_name': listing.team_name,
-            'role': listing.role,
-            'expectation_band': listing.expectation_band,
-            'salary_offer': listing.salary_offer,
-            'contract_duration_seasons': listing.contract_duration_seasons,
-            'created_tick': listing.created_tick,
-            'visibility_threshold': listing.visibility_threshold,
+            'team_name': getattr(listing, 'team_name', ''),
+            'role': getattr(listing, 'role', 'Driver'),
+            'expectation_band': getattr(listing, 'expectation_band', 'mid'),
+            'salary': salary_value,
+            'created_tick': int(getattr(listing, 'created_tick', 0) or 0),
+            'visibility_threshold': float(getattr(listing, 'visibility_threshold', 0.0) or 0.0),
+            'patience_profile': float(getattr(listing, 'patience_profile', 0.5) or 0.5),
+            'risk_profile': float(getattr(listing, 'risk_profile', 0.5) or 0.5),
+            'tier': str(getattr(listing, 'tier', 'grassroots') or 'grassroots'),
         }
     
     def _deserialize_job_listing(self, data: Dict[str, Any]) -> JobListing:
         """Deserialize a job listing"""
+        salary_value = data.get('salary')
+        if salary_value is None:
+            # Backward compatibility for older saves.
+            salary_value = data.get('salary_offer', 50000.0)
+
         return JobListing(
             team_name=data.get('team_name', 'Unknown Team'),
-            role=data.get('role', 'driver'),
-            expectation_band=data.get('expectation_band', (50.0, 70.0)),
-            salary_offer=data.get('salary_offer', 50000.0),
-            contract_duration_seasons=data.get('contract_duration_seasons', 2),
-            created_tick=data.get('created_tick', 0),
+            role=data.get('role', 'Driver'),
+            expectation_band=data.get('expectation_band', 'mid'),
+            patience_profile=float(data.get('patience_profile', 0.5) or 0.5),
+            risk_profile=float(data.get('risk_profile', 0.5) or 0.5),
+            tier=data.get('tier', 'grassroots'),
+            salary=salary_value,
+            created_tick=int(data.get('created_tick', 0) or 0),
             visibility_threshold=data.get('visibility_threshold', 0.0)
         )
     
@@ -5718,6 +5804,8 @@ class SimState:
                     'name': lg.name,
                     'tier': lg.tier,
                     'tier_name': lg.tier_name,
+                    'league_id': lg.league_id,
+                    'league_index': lg.league_index,
                     'team_names': [t.name for t in lg.teams],
                     'schedule': lg.schedule,
                     'championship_table': lg.championship_table,
@@ -5746,6 +5834,7 @@ class SimState:
                 }
                 for d in self.pending_decisions
             ],
+            'promotion_opportunities': self.promotion_opportunities,
             'event_history': [
                 {
                     'event_type': e.event_type,
@@ -5941,26 +6030,6 @@ class SimState:
         
         _dbg(f"[FTB LOAD] ✅ Race day state reset to IDLE (completed_races={len(state.completed_race_ticks)}, prompted={len(state.prompted_race_ticks)})")
         
-        # CRITICAL FIX: For old saves, infer completed races from league race counters
-        # This prevents re-running already completed races
-        if len(state.completed_race_ticks) == 0 and state.leagues:
-            _dbg(f"[FTB LOAD] 🔧 Old save detected - reconstructing race history...")
-            for league_id, league in state.leagues.items():
-                # If league has completed races but no completed_race_ticks,
-                # mark those early race ticks as completed
-                if league.races_this_season > 0 and league.schedule:
-                    for i in range(min(league.races_this_season, len(league.schedule))):
-                        entry = league.schedule[i]
-                        if isinstance(entry, (tuple, list)) and len(entry) >= 1:
-                            race_tick = entry[0]
-                        else:
-                            race_tick = entry
-                        
-                        state.completed_race_ticks.add((league_id, int(race_tick)))
-            
-            if state.completed_race_ticks:
-                _dbg(f"[FTB LOAD] ✅ Reconstructed {len(state.completed_race_ticks)} completed races from league history")
-        
         state.time_mode = data.get('time_mode', 'paused')
         state.control_mode = data.get('control_mode', 'human')
         state.delegation_settings = data.get('delegation_settings', {
@@ -6000,6 +6069,15 @@ class SimState:
         state.manager_last_name = data.get('manager_last_name', '')
         state.world_state = data.get('world_state', {})
         state.pending_developments = data.get('pending_developments', [])
+        raw_promo = data.get('promotion_opportunities', [])
+        if isinstance(raw_promo, list):
+            state.promotion_opportunities = [
+                p for p in raw_promo if isinstance(p, dict)
+            ]
+        else:
+            state.promotion_opportunities = []
+        state.pending_promotions = []
+        state.pending_relegations = []
         state._next_event_id = data.get('_next_event_id', 1)
         
         # Restore event history
@@ -6094,7 +6172,11 @@ class SimState:
             team.standing_metrics = team_data.get('standing_metrics', {})
             
             # Load tier attributes with backward compatibility (Phase 0 fix)
-            team.tier = team_data.get('tier', 0)
+            raw_team_tier = team_data.get('tier', 0)
+            try:
+                team.tier = int(raw_team_tier)
+            except (TypeError, ValueError):
+                team.tier = 0
             team.league_id = team_data.get('league_id', '')
             team.tier_name = team_data.get('tier_name', '')
             
@@ -6248,7 +6330,9 @@ class SimState:
             league = League(
                 name=lg_data['name'],
                 tier=lg_data['tier'],
-                tier_name=lg_data.get('tier_name', 'grassroots')
+                tier_name=lg_data.get('tier_name', 'grassroots'),
+                league_id=lg_data.get('league_id', name),
+                league_index=lg_data.get('league_index', 0)
             )
             league.schedule = lg_data.get('schedule', [])
             league.championship_table = lg_data.get('championship_table', {})
@@ -6269,8 +6353,37 @@ class SimState:
                         team_obj.tier = league.tier
                         team_obj.league_id = name
                         team_obj.tier_name = league.tier_name
+                    # Backfill missing team league linkage from legacy saves.
+                    if not getattr(team_obj, 'league_id', ''):
+                        team_obj.league_id = league.league_id or name
             
             state.leagues[name] = league
+        
+        # CRITICAL FIX: For old saves, infer completed races from league race counters.
+        # This must happen AFTER leagues are loaded.
+        if len(state.completed_race_ticks) == 0 and state.leagues:
+            _dbg(f"[FTB LOAD] 🔧 Old save detected - reconstructing race history...")
+            for league_id, league in state.leagues.items():
+                if league.races_this_season > 0 and league.schedule:
+                    for i in range(min(league.races_this_season, len(league.schedule))):
+                        entry = league.schedule[i]
+                        if isinstance(entry, (tuple, list)) and len(entry) >= 1:
+                            race_tick = entry[0]
+                        else:
+                            race_tick = entry
+                        state.completed_race_ticks.add((league_id, int(race_tick)))
+            if state.completed_race_ticks:
+                _dbg(f"[FTB LOAD] ✅ Reconstructed {len(state.completed_race_ticks)} completed races from league history")
+        
+        # Backfill player team league linkage if it was lost in legacy saves.
+        if state.player_team and (
+            not getattr(state.player_team, 'league_id', '')
+            or state.player_team.league_id not in state.leagues
+        ):
+            for league_id, league in state.leagues.items():
+                if state.player_team in league.teams:
+                    state.player_team.league_id = league_id
+                    break
         
         # Deserialize manufacturers and parts
         manufacturers_data = data.get('manufacturers', {})
@@ -6278,19 +6391,105 @@ class SimState:
             state.manufacturers[mfr_id] = state._deserialize_manufacturer(mfr_data)
         
         parts_data = data.get('parts_catalog', {})
-        for part_id, part_data in parts_data.items():
-            state.parts_catalog[part_id] = state._deserialize_part(part_data)
+        # Map raw save keys to canonical part IDs. Older saves can drift between
+        # dict key and part.part_id formats.
+        part_id_aliases: Dict[str, str] = {}
+        for raw_part_id, part_data in parts_data.items():
+            part_obj = state._deserialize_part(part_data)
+            canonical_part_id = str(getattr(part_obj, 'part_id', '') or raw_part_id)
+            state.parts_catalog[canonical_part_id] = part_obj
+            part_id_aliases[str(raw_part_id)] = canonical_part_id
         
         state.parts_generation_counter = data.get('parts_generation_counter', {})
         state.current_meta = data.get('current_meta', {})
         
         # Restore part references in teams (now that parts_catalog is loaded)
+        def _resolve_part_ref(part_ref: Any) -> Optional[Part]:
+            """Resolve legacy part IDs to loaded part objects."""
+            raw_id = str(part_ref or '').strip()
+            if not raw_id:
+                return None
+
+            # Direct match against canonical catalog IDs.
+            part_obj = state.parts_catalog.get(raw_id)
+            if part_obj is not None:
+                return part_obj
+
+            # Alias from raw save key to canonical ID.
+            aliased_id = part_id_aliases.get(raw_id)
+            if aliased_id:
+                part_obj = state.parts_catalog.get(aliased_id)
+                if part_obj is not None:
+                    return part_obj
+
+            # Legacy saves sometimes append a random hex suffix (e.g. _f0ac766b).
+            base_id, sep, suffix = raw_id.rpartition('_')
+            if sep and len(suffix) >= 6 and all(ch in '0123456789abcdefABCDEF' for ch in suffix):
+                part_obj = state.parts_catalog.get(base_id)
+                if part_obj is not None:
+                    return part_obj
+                aliased_base = part_id_aliases.get(base_id)
+                if aliased_base:
+                    part_obj = state.parts_catalog.get(aliased_base)
+                    if part_obj is not None:
+                        return part_obj
+
+            # Final fallback: compare against Part.part_id values.
+            for candidate in state.parts_catalog.values():
+                candidate_id = str(getattr(candidate, 'part_id', '') or '').strip()
+                if candidate_id == raw_id or (candidate_id and base_id and candidate_id == base_id):
+                    return candidate
+            return None
+
         for team in all_teams:
             if hasattr(team, '_parts_inventory_ids'):
-                team.parts_inventory = [state.parts_catalog[pid] for pid in team._parts_inventory_ids if pid in state.parts_catalog]
+                resolved_inventory: List[Part] = []
+                for part_ref in team._parts_inventory_ids:
+                    part_obj = _resolve_part_ref(part_ref)
+                    if part_obj is not None:
+                        resolved_inventory.append(part_obj)
+                team.parts_inventory = resolved_inventory
                 delattr(team, '_parts_inventory_ids')
             if hasattr(team, '_equipped_parts_ids'):
-                team.equipped_parts = {slot: state.parts_catalog[pid] for slot, pid in team._equipped_parts_ids.items() if pid in state.parts_catalog}
+                raw_equipped = team._equipped_parts_ids
+                resolved_equipped: Dict[str, Part] = {}
+
+                if isinstance(raw_equipped, dict):
+                    raw_items = raw_equipped.items()
+                elif isinstance(raw_equipped, list):
+                    # Backward compatibility: old saves may store only a list of IDs.
+                    raw_items = ((None, pid) for pid in raw_equipped)
+                else:
+                    raw_items = ()
+
+                for slot, part_ref in raw_items:
+                    part_obj = _resolve_part_ref(part_ref)
+                    if part_obj is None:
+                        continue
+                    part_slot = str(slot or getattr(part_obj, 'part_type', '') or '').strip()
+                    if not part_slot:
+                        continue
+                    resolved_equipped[part_slot] = part_obj
+
+                team.equipped_parts = resolved_equipped
+
+                # Ensure equipped parts are not duplicated in inventory lists.
+                equipped_part_ids = {
+                    str(getattr(part, 'part_id', '') or '')
+                    for part in team.equipped_parts.values()
+                }
+                if equipped_part_ids:
+                    team.parts_inventory = [
+                        part for part in team.parts_inventory
+                        if str(getattr(part, 'part_id', '') or '') not in equipped_part_ids
+                    ]
+
+                # Re-apply equipped parts so car ratings remain consistent post-load.
+                if team.car:
+                    base_ratings = getattr(team.car, 'base_ratings', None)
+                    if not isinstance(base_ratings, dict) or not base_ratings:
+                        team.car.base_ratings = dict(getattr(team.car, 'current_ratings', {}) or {})
+                    team.car.update_ratings(team.car.base_ratings, team.equipped_parts)
                 delattr(team, '_equipped_parts_ids')
         
         # Deserialize contracts
@@ -7044,105 +7243,59 @@ class WorldBuilder:
     def _generate_free_agents(state: SimState) -> None:
         """Generate initial free agent pool with grassroots-level entities"""
         rng = state.get_rng("world", "free_agents")
-        
-        # Generate 80-120 free agents (drivers, engineers, mechanics) - expanded pool for more dynamic job market
-        num_free_agents = rng.randint(80, 120)
-        
-        # Distribution: 40% drivers, 35% engineers, 25% mechanics
-        num_drivers = int(num_free_agents * 0.4)
-        num_engineers = int(num_free_agents * 0.35)
-        num_mechanics = num_free_agents - num_drivers - num_engineers
-        
+
+        # Generate 95-135 free agents across all major staffing roles.
+        num_free_agents = rng.randint(95, 135)
+        num_drivers = int(num_free_agents * 0.35)
+        num_engineers = int(num_free_agents * 0.28)
+        num_mechanics = int(num_free_agents * 0.22)
+        num_strategists = int(num_free_agents * 0.09)
+        num_principals = num_free_agents - num_drivers - num_engineers - num_mechanics - num_strategists
+
+        role_plan: List[Tuple[str, Any, int, Tuple[int, int], float, float]] = [
+            ("Driver", Driver, num_drivers, (16, 28), 30.0, 8.0),
+            ("Engineer", Engineer, num_engineers, (20, 38), 30.0, 8.0),
+            ("Mechanic", Mechanic, num_mechanics, (18, 42), 30.0, 8.0),
+            ("Strategist", Strategist, num_strategists, (24, 48), 31.0, 7.5),
+            ("AIPrincipal", AIPrincipal, num_principals, (30, 60), 34.0, 7.0),
+        ]
+
         free_agents_created = 0
-        
-        # Generate free agent drivers (grassroots level, low-tier ratings)
-        for i in range(num_drivers):
-            driver_id = state._next_entity_id
-            state._next_entity_id += 1
-            
-            if generate_name:
-                driver_name = generate_name(state.seed, "Driver", driver_id)
-            else:
-                driver_name = f"Free Agent Driver {i+1}"
-            
-            driver = Driver(driver_name)
-            driver.entity_id = driver_id
-            driver.display_name = driver_name
-            driver.age = rng.randint(16, 28)  # Younger skew for free agents
-            
-            # Grassroots-level stats (tier 1 quality: 20-45 range)
-            stat_mean = 30.0
-            stat_stddev = 8.0
-            for k in STATS_SCHEMAS['Driver']:
-                driver.current_ratings[k] = float(max(1, min(99, rng.gauss(stat_mean, stat_stddev))))
-            
-            # Calculate asking salary based on overall rating (convert per-tick to annual)
-            per_tick_salary = estimate_salary_expectation(driver, team_tier=1)  # Grassroots tier
-            asking_salary = per_tick_salary * 365  # Annual salary
-            
-            # Add to free agent pool
-            state.add_to_free_agent_pool(driver, "world_generation", asking_salary)
-            free_agents_created += 1
-        
-        # Generate free agent engineers
-        for i in range(num_engineers):
-            engineer_id = state._next_entity_id
-            state._next_entity_id += 1
-            
-            if generate_name:
-                engineer_name = generate_name(state.seed, "Engineer", engineer_id)
-            else:
-                engineer_name = f"Free Agent Engineer {i+1}"
-            
-            engineer = Engineer(engineer_name)
-            engineer.entity_id = engineer_id
-            engineer.display_name = engineer_name
-            engineer.age = rng.randint(20, 38)  # Younger staff ages
-            
-            # Grassroots-level stats
-            stat_mean = 30.0
-            stat_stddev = 8.0
-            for k in STATS_SCHEMAS['Engineer']:
-                engineer.current_ratings[k] = float(max(1, min(99, rng.gauss(stat_mean, stat_stddev))))
-            
-            # Calculate asking salary (convert per-tick to annual)
-            per_tick_salary = estimate_salary_expectation(engineer, team_tier=1)  # Grassroots tier
-            asking_salary = per_tick_salary * 365  # Annual salary
-            
-            # Add to free agent pool
-            state.add_to_free_agent_pool(engineer, "world_generation", asking_salary)
-            free_agents_created += 1
-        
-        # Generate free agent mechanics
-        for i in range(num_mechanics):
-            mechanic_id = state._next_entity_id
-            state._next_entity_id += 1
-            
-            if generate_name:
-                mechanic_name = generate_name(state.seed, "Mechanic", mechanic_id)
-            else:
-                mechanic_name = f"Free Agent Mechanic {i+1}"
-            
-            mechanic = Mechanic(mechanic_name)
-            mechanic.entity_id = mechanic_id
-            mechanic.display_name = mechanic_name
-            mechanic.age = rng.randint(18, 42)  # Younger staff ages
-            
-            # Grassroots-level stats
-            stat_mean = 30.0
-            stat_stddev = 8.0
-            for k in STATS_SCHEMAS['Mechanic']:
-                mechanic.current_ratings[k] = float(max(1, min(99, rng.gauss(stat_mean, stat_stddev))))
-            
-            # Calculate asking salary (convert per-tick to annual)
-            per_tick_salary = estimate_salary_expectation(mechanic, team_tier=1)  # Grassroots tier
-            asking_salary = per_tick_salary * 365  # Annual salary
-            
-            # Add to free agent pool
-            state.add_to_free_agent_pool(mechanic, "world_generation", asking_salary)
-            free_agents_created += 1
-        
-        _dbg(f"[FTB] WORLD_GEN: Generated {free_agents_created} free agents ({num_drivers} drivers, {num_engineers} engineers, {num_mechanics} mechanics)")
+        by_role_created: Dict[str, int] = {}
+
+        for role, entity_cls, count, age_range, stat_mean, stat_stddev in role_plan:
+            for idx in range(count):
+                entity_id = state._next_entity_id
+                state._next_entity_id += 1
+
+                if generate_name:
+                    entity_name = generate_name(state.seed, role, entity_id)
+                else:
+                    entity_name = f"Free Agent {role} {idx + 1}"
+
+                entity = entity_cls(entity_name)
+                entity.entity_id = entity_id
+                entity.display_name = entity_name
+                entity.age = rng.randint(age_range[0], age_range[1])
+
+                for stat in STATS_SCHEMAS[role]:
+                    entity.current_ratings[stat] = float(max(1, min(99, rng.gauss(stat_mean, stat_stddev))))
+
+                per_tick_salary = estimate_salary_expectation(entity, team_tier=1)
+                asking_salary = per_tick_salary * 365
+                state.add_to_free_agent_pool(entity, "world_generation", asking_salary)
+                free_agents_created += 1
+                by_role_created[role] = by_role_created.get(role, 0) + 1
+
+        _dbg(
+            "[FTB] WORLD_GEN: Generated "
+            f"{free_agents_created} free agents "
+            f"({by_role_created.get('Driver', 0)} drivers, "
+            f"{by_role_created.get('Engineer', 0)} engineers, "
+            f"{by_role_created.get('Mechanic', 0)} mechanics, "
+            f"{by_role_created.get('Strategist', 0)} strategists, "
+            f"{by_role_created.get('AIPrincipal', 0)} principals)"
+        )
     
     @staticmethod
     def _generate_tracks(state: SimState) -> None:
@@ -7291,7 +7444,9 @@ class WorldBuilder:
                 manufacturer.current_ratings[stat_name] = final_value
             
             manufacturer.current_generation = 1
-            manufacturer.last_innovation_tick = 0
+            # Stagger first innovation wave so the parts market evolves during season 1.
+            # With all manufacturers pinned to tick 0, first innovation is delayed too long.
+            manufacturer.last_innovation_tick = -rng.randint(0, 450)
             
             state.manufacturers[manufacturer_id] = manufacturer
             manufacturers_created.append((manufacturer_id, manufacturer))
@@ -7804,10 +7959,34 @@ def evaluate_sponsor_confidence(state: SimState, team: Team, sponsor: Sponsorshi
     
     factors = {}
     
-    # 1. Championship position factor
-    championship_pos = team.championship_position if hasattr(team, 'championship_position') else 5
-    all_teams = ([state.player_team] if state.player_team else []) + state.ai_teams
-    total_teams = len([t for t in all_teams if t.tier == team.tier])
+    # Resolve league context for accurate standings/points.
+    league = state.leagues.get(getattr(team, 'league_id', ''), None)
+    if league is None:
+        for lg in state.leagues.values():
+            if team in getattr(lg, 'teams', []):
+                league = lg
+                break
+
+    # 1. Championship position factor (prefer live championship table).
+    championship_pos = 5
+    total_teams = 1
+    points = float(team.standing_metrics.get('points', 0.0) if hasattr(team, 'standing_metrics') else 0.0)
+
+    if league and getattr(league, 'championship_table', None):
+        table_items = sorted(league.championship_table.items(), key=lambda x: x[1], reverse=True)
+        total_teams = max(1, len(table_items))
+        found_index = next((i for i, (team_name, _) in enumerate(table_items) if team_name == team.name), None)
+        if found_index is not None:
+            championship_pos = found_index + 1
+        elif hasattr(team, 'standing_metrics'):
+            championship_pos = int(team.standing_metrics.get('championship_position', max(1, total_teams // 2)))
+        points = float(league.championship_table.get(team.name, points))
+    else:
+        same_tier_teams = [t for t in (([state.player_team] if state.player_team else []) + state.ai_teams) if t and t.tier == team.tier]
+        total_teams = max(1, len(same_tier_teams))
+        if hasattr(team, 'standing_metrics'):
+            championship_pos = int(team.standing_metrics.get('championship_position', max(1, min(5, total_teams))))
+
     position_percentile = 1.0 - ((championship_pos - 1) / max(1, total_teams - 1))
     
     # Top 3 = positive, bottom half = negative
@@ -7820,19 +7999,21 @@ def evaluate_sponsor_confidence(state: SimState, team: Team, sponsor: Sponsorshi
     
     factors['championship_position'] = position_factor
     
-    # 2. Points rate factor
-    points = team.points if hasattr(team, 'points') else 0
-    races_run = max(1, state.races_run if hasattr(state, 'races_run') else 1)
+    # 2. Points rate factor (use current season races in this league).
+    races_run = int(getattr(league, 'races_this_season', 0)) if league else 0
+    if races_run <= 0:
+        races_run = int(getattr(state, 'races_completed_this_season', 0))
+    races_run = max(1, races_run)
     points_per_race = points / races_run
     
     # Expected points per race based on position
-    expected_ppr = max(5, 30 - championship_pos * 3)
+    expected_ppr = max(2.0, 18.0 - (championship_pos - 1) * (14.0 / max(1, total_teams - 1)))
     points_gap = (points_per_race - expected_ppr) / max(1, expected_ppr)
-    points_factor = points_gap * 0.20  # +/- 20% based on gap
+    points_factor = max(-0.20, min(0.20, points_gap * 0.20))  # clamp to +/- 20%
     factors['points_rate'] = points_factor
     
-    # 3. Reputation factor
-    reputation = team.reputation if hasattr(team, 'reputation') else 50
+    # 3. Reputation factor (standing_metrics is the canonical source).
+    reputation = float(team.standing_metrics.get('reputation', 50.0)) if hasattr(team, 'standing_metrics') else 50.0
     rep_factor = (reputation - 50) / 100.0 * 0.15  # +/- 15%
     factors['reputation'] = rep_factor
     
@@ -8381,10 +8562,36 @@ class FTBSimulation:
     def _process_promotion(state: SimState, promo_data: dict) -> List[SimEvent]:
         """Execute a promotion (move team to higher tier)"""
         events = []
-        team_obj = promo_data['team_obj']
-        from_league = promo_data['from_league']
-        to_tier = promo_data['to_tier']
-        entry_fee = promo_data['entry_fee']
+        team_obj = promo_data.get('team_obj')
+        team_name = promo_data.get('team_name') or (team_obj.name if team_obj else "")
+        from_league = promo_data.get('from_league')
+        to_tier = int(promo_data.get('to_tier', 0) or 0)
+        entry_fee = int(promo_data.get('entry_fee', 0) or 0)
+
+        # Resolve team object if only team_name was provided.
+        if team_obj is None and team_name:
+            if state.player_team and state.player_team.name == team_name:
+                team_obj = state.player_team
+            else:
+                team_obj = next((t for t in state.ai_teams if t.name == team_name), None)
+
+        if not team_obj:
+            _dbg(f"[FTB] ERROR: Promotion target team not found ({team_name})")
+            return events
+
+        # Resolve source league if not directly passed.
+        if from_league is None:
+            from_league_id = promo_data.get('from_league_id') or getattr(team_obj, 'league_id', None)
+            if from_league_id:
+                from_league = state.leagues.get(from_league_id)
+        if from_league is None:
+            from_league = next((lg for lg in state.leagues.values() if team_obj in lg.teams), None)
+        if not from_league:
+            _dbg(f"[FTB] ERROR: Could not resolve source league for promotion ({team_obj.name})")
+            return events
+        if to_tier <= 0:
+            _dbg(f"[FTB] ERROR: Invalid promotion tier for {team_obj.name}: {to_tier}")
+            return events
         
         # Find target league
         target_leagues = [l for l in state.leagues.values() if l.tier == to_tier]
@@ -8396,6 +8603,21 @@ class FTBSimulation:
         
         # Charge entry fee if applicable
         if entry_fee > 0:
+            if team_obj.budget.cash < entry_fee:
+                events.append(SimEvent(
+                    event_type="outcome",
+                    category="promotion_fee_failed",
+                    ts=state.tick,
+                    priority=85.0,
+                    severity="warning",
+                    data={
+                        'team': team_obj.name,
+                        'fee': entry_fee,
+                        'cash': team_obj.budget.cash,
+                        'message': f'Promotion failed: ${entry_fee:,} fee could not be paid'
+                    }
+                ))
+                return events
             team_obj.budget.cash -= entry_fee
             events.append(SimEvent(
                 event_type="outcome",
@@ -8412,7 +8634,8 @@ class FTBSimulation:
         
         # Move team
         old_tier = team_obj.tier
-        from_league.teams.remove(team_obj)
+        if team_obj in from_league.teams:
+            from_league.teams.remove(team_obj)
         target_league.teams.append(team_obj)
         team_obj.tier = target_league.tier
         team_obj.league_id = target_league.league_id
@@ -8465,7 +8688,22 @@ class FTBSimulation:
                 }
             ))
         
+        # Resolve/close any matching promotion opportunities for this team.
+        opp_id = str(promo_data.get('opportunity_id', '') or '')
+        if hasattr(state, 'promotion_opportunities') and isinstance(state.promotion_opportunities, list):
+            for opp in state.promotion_opportunities:
+                if not isinstance(opp, dict):
+                    continue
+                if opp_id and str(opp.get('opportunity_id', '')) != opp_id:
+                    continue
+                if str(opp.get('team', '')) != team_obj.name:
+                    continue
+                opp['status'] = 'promoted'
+                opp['resolved_tick'] = state.tick
+
         state.mark_dirty('standings')
+        state.mark_dirty('finance')
+        state.mark_dirty('sponsors')
         _dbg(f"[FTB] PROMOTION: {team_obj.name} moved from {FTBSimulation._get_tier_name(old_tier)} to {target_league.tier_name}")
         return events
     
@@ -8654,7 +8892,12 @@ class FTBSimulation:
         state.update_contract_openness_flags()
         
         # Process AI poaching attempts (monthly)
-        ai_poach_events = state.process_ai_poaching_attempts()
+        # Guard this path so one subsystem error cannot abort the whole tick.
+        try:
+            ai_poach_events = state.process_ai_poaching_attempts()
+        except Exception as e:
+            ai_poach_events = []
+            _dbg(f"[FTB] WARNING: process_ai_poaching_attempts failed at tick {state.tick}: {e}")
         events.extend(ai_poach_events)
         if ai_poach_events:
             state.mark_dirty('roster')
@@ -8663,6 +8906,14 @@ class FTBSimulation:
         # Age free agents and remove expired ones
         fa_events = state.age_free_agents()
         events.extend(fa_events)
+
+        # Keep the grassroots entry pipeline healthy: replenish job market
+        # and schedule replacement entrants for underfilled leagues.
+        entry_pipeline_events = FTBSimulation.maintain_grassroots_entry_pipeline(state)
+        events.extend(entry_pipeline_events)
+        if entry_pipeline_events:
+            state.mark_dirty('team')
+            state.mark_dirty('contracts')
         
         # Process scheduled team spawns (after folds)
         if hasattr(state, '_teams_to_spawn') and state._teams_to_spawn:
@@ -8672,7 +8923,8 @@ class FTBSimulation:
                     new_team = FTBSimulation.spawn_new_team(
                         state,
                         tier=spawn_data['tier'],
-                        replaced_team_name=spawn_data.get('replaced_team_name')
+                        replaced_team_name=spawn_data.get('replaced_team_name'),
+                        league_id=spawn_data.get('league_id')
                     )
                     
                     if new_team:
@@ -8687,7 +8939,11 @@ class FTBSimulation:
                                 'team_name': new_team.name,
                                 'tier': new_team.tier,
                                 'ownership_type': new_team.ownership_type,
+                                'league_id': new_team.league_id,
                                 'replaced_team': spawn_data.get('replaced_team_name'),
+                                'spawn_reason': spawn_data.get('reason', 'replacement'),
+                                'staffing_strategy': getattr(new_team, 'staffing_strategy', ''),
+                                'staffing_mix': getattr(new_team, 'entry_staffing_mix', {}),
                                 'starting_budget': new_team.budget.cash,
                                 'message': f'New team {new_team.name} enters {["", "Grassroots", "Formula V", "Formula X", "Formula Y", "Formula Z"][new_team.tier]} competition'
                             }
@@ -8754,6 +9010,19 @@ class FTBSimulation:
         if state.tick % 30 == 0:
             all_teams = ([state.player_team] if state.player_team else []) + state.ai_teams
             for team in all_teams:
+                # Expire stale pending offers so the market keeps flowing.
+                # Pending offers use signed_tick as "offer created" timestamp until accepted.
+                if team.name not in state.pending_sponsor_offers:
+                    state.pending_sponsor_offers[team.name] = []
+                offer_ttl_ticks = 90
+                pending_before = len(state.pending_sponsor_offers[team.name])
+                state.pending_sponsor_offers[team.name] = [
+                    offer for offer in state.pending_sponsor_offers[team.name]
+                    if (state.tick - int(getattr(offer, "signed_tick", 0))) <= offer_ttl_ticks
+                ]
+                if len(state.pending_sponsor_offers[team.name]) != pending_before:
+                    state.mark_dirty('sponsors')
+
                 # Only generate offers if team doesn't have too many pending and doesn't have max sponsors
                 active_count = len(state.sponsorships.get(team.name, []))
                 pending_count = len(state.pending_sponsor_offers.get(team.name, []))
@@ -8765,8 +9034,8 @@ class FTBSimulation:
                     # Generate 1-2 new offers
                     new_offers = generate_sponsor_offers(state, team, rng, count=rng.randint(1, 2))
                     if new_offers:
-                        if team.name not in state.pending_sponsor_offers:
-                            state.pending_sponsor_offers[team.name] = []
+                        for offer in new_offers:
+                            offer.signed_tick = state.tick
                         state.pending_sponsor_offers[team.name].extend(new_offers)
                         # Mark sponsors dirty to trigger UI refresh for new offers
                         state.mark_dirty('sponsors')
@@ -9131,6 +9400,9 @@ class FTBSimulation:
         # Generate opportunities
         opp_events = FTBSimulation.generate_opportunities(state)
         events.extend(opp_events)
+        if any(evt.category in ("job_listing", "job_removed") for evt in opp_events):
+            state.mark_dirty('team')
+            state.mark_dirty('job_market')
         
         # Regulation changes (every 3 seasons = 48 races, announce 180 days ahead)
         if state.races_completed_this_season % 48 == 0 and state.races_completed_this_season > 0:
@@ -9330,6 +9602,33 @@ class FTBSimulation:
         expected_positions = {}
         for idx, (team, driver, qual_score) in enumerate(qualifying_scores, 1):
             expected_positions[team.name] = idx
+
+        def _team_context_score(team_obj: Team) -> float:
+            """Blend team-health and current team morale into one context signal."""
+            metrics = getattr(team_obj, 'standing_metrics', {}) or {}
+            team_health = float(metrics.get('team_health', 50.0))
+            team_morale = float(metrics.get('morale', 50.0))
+            return max(0.0, min(100.0, team_health * 0.7 + team_morale * 0.3))
+
+        def _team_morale_impact_multiplier(team_obj: Team, base_change: float) -> float:
+            """Scale team-morale race impact using broader team context."""
+            context_score = _team_context_score(team_obj)
+            if base_change < 0:
+                # Healthy/stable teams absorb bad weekends better.
+                mult = 0.45 + ((100.0 - context_score) / 210.0)
+                return max(0.35, min(0.93, mult))
+            # Positive swings are damped to avoid runaway growth.
+            mult = 0.30 + (context_score / 260.0)
+            return max(0.25, min(0.72, mult))
+
+        def _driver_result_multiplier(team_obj: Team, base_change: float) -> float:
+            """Apply team-state context to individual result-driven morale swings."""
+            context_score = _team_context_score(team_obj)
+            if base_change < 0:
+                mult = 0.78 + ((100.0 - context_score) / 180.0)
+                return max(0.70, min(1.25, mult))
+            mult = 0.72 + (context_score / 320.0)
+            return max(0.65, min(1.08, mult))
         
         # Process race results and apply morale changes
         for position, (driver_name, team_name, status) in enumerate(race_result.final_positions, 1):
@@ -9362,6 +9661,11 @@ class FTBSimulation:
                     # Apply diminishing returns to prevent runaway low morale
                     diminishing_mult = FTBSimulation.calculate_morale_diminishing_returns(old_morale, adjusted_dnf_loss)
                     final_dnf_change = adjusted_dnf_loss * diminishing_mult
+                    driver_mult = _driver_result_multiplier(team, final_dnf_change)
+                    final_dnf_change *= driver_mult
+
+                    max_change = MORALE_CONFIG.get('max_single_change', 20.0)
+                    final_dnf_change = max(-max_change, min(max_change, final_dnf_change))
                     
                     driver.morale = max(0.0, min(100.0, driver.morale + final_dnf_change))
                     
@@ -9379,14 +9683,17 @@ class FTBSimulation:
                             'new_morale': driver.morale,
                             'reason': f"DNF: {status}",
                             'mettle': driver_mettle,
-                            'diminishing_multiplier': diminishing_mult
+                            'diminishing_multiplier': diminishing_mult,
+                            'team_context_multiplier': driver_mult
                         }
                     ))
                 
-                # Apply to team morale metric (full impact, not half)
+                # Apply to team morale metric with team-health dampening.
                 if 'morale' in team.standing_metrics:
                     old_team_morale = team.standing_metrics['morale']
-                    team.standing_metrics['morale'] = max(0.0, min(100.0, old_team_morale + adjusted_dnf_loss * 0.8))
+                    team_mult = _team_morale_impact_multiplier(team, adjusted_dnf_loss)
+                    team_morale_change = adjusted_dnf_loss * team_mult
+                    team.standing_metrics['morale'] = max(0.0, min(100.0, old_team_morale + team_morale_change))
                 continue
             
             # Calculate morale change based on performance delta (3x more reactive)
@@ -9419,6 +9726,8 @@ class FTBSimulation:
                 # Apply diminishing returns to prevent runaway morale
                 diminishing_mult = FTBSimulation.calculate_morale_diminishing_returns(old_morale, morale_change)
                 final_change = morale_change * diminishing_mult
+                driver_mult = _driver_result_multiplier(team, final_change)
+                final_change *= driver_mult
                 
                 # Cap at max single change limit
                 max_change = MORALE_CONFIG.get('max_single_change', 20.0)
@@ -9442,15 +9751,16 @@ class FTBSimulation:
                         'position': position,
                         'expected_position': expected_pos,
                         'mettle': getattr(driver, 'mettle', 55.0),
-                        'diminishing_multiplier': diminishing_mult
+                        'diminishing_multiplier': diminishing_mult,
+                        'team_context_multiplier': driver_mult
                     }
                 ))
             
-            # Apply to team morale metric (aggregate effect, 80% of driver morale change)
+            # Apply to team morale metric with team-health context.
             if 'morale' in team.standing_metrics and abs(morale_change) >= 0.5:
                 old_team_morale = team.standing_metrics['morale']
-                # Team morale changes almost as much as driver morale
-                team_morale_change = morale_change * 0.8
+                team_mult = _team_morale_impact_multiplier(team, morale_change)
+                team_morale_change = morale_change * team_mult
                 team.standing_metrics['morale'] = max(0.0, min(100.0, old_team_morale + team_morale_change))
         
         return events
@@ -9476,6 +9786,38 @@ class FTBSimulation:
         if total_points <= 0:
             return 0.0
         return float(points_table[position - 1]) / float(total_points)
+
+    @staticmethod
+    def _get_championship_prize_pool(league: League) -> float:
+        """Season-end championship payout pool (distributed by final standings)."""
+        tier_pools = {
+            1: 650000,       # Grassroots
+            2: 1200000,      # Formula V
+            3: 2500000,      # Formula X
+            4: 6000000,      # Formula Y
+            5: 15000000,     # Formula Z
+        }
+        return float(tier_pools.get(league.tier, 650000))
+
+    @staticmethod
+    def _get_championship_payout_share(position: int, field_size: int) -> float:
+        """
+        Return payout share for a championship finishing position.
+        Top 10 are paid; if field is smaller, shares are renormalized.
+        """
+        if position <= 0 or field_size <= 0:
+            return 0.0
+
+        share_table = [0.24, 0.18, 0.14, 0.11, 0.09, 0.07, 0.06, 0.05, 0.035, 0.025]
+        paid_positions = min(field_size, len(share_table))
+        if position > paid_positions:
+            return 0.0
+
+        active_shares = share_table[:paid_positions]
+        total_share = sum(active_shares)
+        if total_share <= 0:
+            return 0.0
+        return float(active_shares[position - 1]) / float(total_share)
 
     @staticmethod
     def _calculate_race_hype(league: League, race_result, qualifying_scores: List) -> float:
@@ -11066,6 +11408,80 @@ class FTBSimulation:
             _dbg(f"[FTB] WARNING: No standings for {league.name} at season end")
             return events
         
+        # Resolve player finish once so every consumer (UI, DB, historical) uses the same values.
+        player_position = None
+        player_points = 0.0
+        if state.player_team:
+            for idx, (team_name, points) in enumerate(teams_sorted, 1):
+                if team_name == state.player_team.name:
+                    player_position = idx
+                    player_points = float(points)
+                    break
+
+        # Season-end championship payouts: distributed across final standings (not winner-take-all).
+        def _resolve_team_by_name(name: str) -> Optional[Team]:
+            if state.player_team and state.player_team.name == name:
+                return state.player_team
+            return next((t for t in state.ai_teams if t.name == name), None)
+
+        championship_pool = FTBSimulation._get_championship_prize_pool(league)
+        championship_payout_rows: List[Dict[str, Any]] = []
+
+        for position, (team_name, points) in enumerate(teams_sorted, 1):
+            payout_share = FTBSimulation._get_championship_payout_share(position, len(teams_sorted))
+            if payout_share <= 0:
+                continue
+
+            payout_value = int(round(championship_pool * payout_share))
+            if payout_value <= 0:
+                continue
+
+            payout_team = _resolve_team_by_name(team_name)
+            if not payout_team:
+                continue
+
+            payout_team.budget.cash += payout_value
+            championship_payout_rows.append({
+                'position': position,
+                'team': team_name,
+                'points': float(points),
+                'payout': payout_value,
+            })
+
+            if payout_team == state.player_team:
+                state.mark_dirty('finance')
+                state.log_transaction(
+                    type="income",
+                    category="championship_payout",
+                    amount=payout_value,
+                    description=f"Season championship payout: P{position} in {league.name}",
+                    balance_after=payout_team.budget.cash,
+                    metadata={
+                        'league': league.name,
+                        'league_id': league.league_id,
+                        'position': position,
+                        'season': state.season_number,
+                    }
+                )
+
+            events.append(SimEvent(
+                event_type="outcome",
+                category="championship_payout",
+                ts=state.tick,
+                priority=72.0 if position <= 3 else 60.0,
+                severity="info",
+                data={
+                    'league': league.name,
+                    'league_id': league.league_id,
+                    'team': team_name,
+                    'position': position,
+                    'points': float(points),
+                    'payout': payout_value,
+                    'pool': int(championship_pool),
+                    'share': round(payout_share, 4),
+                }
+            ))
+
         # Emit championship standings event
         events.append(SimEvent(
             event_type="outcome",
@@ -11079,11 +11495,49 @@ class FTBSimulation:
                 'tier': league.tier,
                 'champion': teams_sorted[0][0],
                 'champion_points': teams_sorted[0][1],
+                'player_team': state.player_team.name if state.player_team else None,
+                'player_position': player_position,
+                'player_points': player_points if player_position else None,
+                'championship_payout_pool': int(championship_pool),
+                'championship_payouts': championship_payout_rows[:10],
                 'standings': teams_sorted[:10]  # Top 10
             }
         ))
         
         _dbg(f"[FTB] SEASON_CHAMPION: {teams_sorted[0][0]} wins {league.name} with {teams_sorted[0][1]} points")
+
+        # Season-end standing metric update so championship outcomes visibly affect
+        # reputation/morale and downstream sponsor confidence decisions.
+        total_ranked = max(1, len(teams_sorted))
+        for position, (team_name, _) in enumerate(teams_sorted, 1):
+            team_obj = None
+            if state.player_team and state.player_team.name == team_name:
+                team_obj = state.player_team
+            else:
+                team_obj = next((t for t in state.ai_teams if t.name == team_name), None)
+            if not team_obj or not hasattr(team_obj, "standing_metrics"):
+                continue
+
+            sm = team_obj.standing_metrics
+            sm["championship_position"] = float(position)
+
+            if position == 1:
+                rep_delta, morale_delta = 10.0, 8.0
+            elif position <= max(2, total_ranked // 3):
+                rep_delta, morale_delta = 5.0, 3.0
+            elif position >= total_ranked:
+                rep_delta, morale_delta = -4.0, -5.0
+            elif position >= max(1, total_ranked - 1):
+                rep_delta, morale_delta = -2.0, -3.0
+            else:
+                rep_delta, morale_delta = (1.0, 1.0) if position <= (total_ranked / 2) else (-1.0, -1.0)
+
+            sm["reputation"] = max(0.0, min(100.0, float(sm.get("reputation", 50.0)) + rep_delta))
+            sm["morale"] = max(0.0, min(100.0, float(sm.get("morale", 50.0)) + morale_delta))
+        
+        if state.player_team and state.player_team.league_id == league.league_id:
+            state.mark_dirty('stats')
+            state.mark_dirty('sponsors')
         
         # Write season summary for player team (if they participated in this league)
         if state.player_team and state.player_team.league_id == league.league_id and state.state_db_path:
@@ -11091,22 +11545,17 @@ class FTBSimulation:
                 import json
                 from plugins import ftb_state_db
                 
-                # Find player team's final position
-                player_position = None
-                player_points = 0.0
-                for idx, (team_name, points) in enumerate(teams_sorted):
-                    if team_name == state.player_team.name:
-                        player_position = idx + 1
-                        player_points = points
-                        break
-                
                 # Calculate season financial totals from transaction log
                 transactions = ftb_state_db.query_financial_transactions(
                     state.state_db_path,
                     seasons=[state.season_number]
                 )
                 
-                season_prize_money = sum(t['amount'] for t in transactions if t['type'] == 'income' and t['category'] == 'prize_money')
+                season_prize_money = sum(
+                    t['amount']
+                    for t in transactions
+                    if t['type'] == 'income' and t['category'] in ('prize_money', 'championship_payout')
+                )
                 season_sponsor_income = sum(t['amount'] for t in transactions if t['type'] == 'income' and t['category'] == 'sponsor_payment')
                 season_expenses = sum(t['amount'] for t in transactions if t['type'] == 'expense')
                 
@@ -11198,7 +11647,144 @@ class FTBSimulation:
                     
             except Exception as e:
                 _dbg(f"[FTB] Warning: Could not write season summary: {e}")
-        
+
+        # ============================================================
+        # PROMOTION ELIGIBILITY & APPLICATION WINDOW
+        # ============================================================
+        # The legacy season-end path generated promotion invitations/applications.
+        # This keeps that behavior in the per-league path and stores opportunities
+        # persistently for both tkinter and web tabs.
+        if league.tier < 5 and len(teams_sorted) >= 2:
+            if not hasattr(state, 'promotion_opportunities') or not isinstance(state.promotion_opportunities, list):
+                state.promotion_opportunities = []
+
+            for i in range(min(3, len(teams_sorted))):
+                team_name = teams_sorted[i][0]
+                team_obj = next((t for t in league.teams if t and t.name == team_name), None)
+                if not team_obj:
+                    continue
+
+                position = i + 1
+                final_points = float(teams_sorted[i][1])
+                eligibility_score = FTBSimulation._calculate_promotion_eligibility(
+                    state, team_obj, position, final_points, league
+                )
+
+                is_invited = (
+                    position <= 2
+                    and eligibility_score >= 75
+                    and team_obj.budget.cash >= 200000
+                )
+                can_apply = (
+                    position <= 3
+                    and eligibility_score >= 50
+                )
+
+                if team_obj == state.player_team:
+                    if is_invited or can_apply:
+                        entry_fee = 0 if is_invited else FTBSimulation._calculate_promotion_fee(league.tier + 1, team_obj)
+                        expires_tick = state.tick + 42  # ~6 weeks.
+                        opportunity_id = f"{league.league_id}:{state.season_number}:{team_name}:{league.tier + 1}"
+                        event_category = "promotion_invitation" if is_invited else "promotion_application"
+                        message = (
+                            f"Congratulations! P{position} finish has earned an invitation to {FTBSimulation._get_tier_name(league.tier + 1)}!"
+                            if is_invited else
+                            f"P{position} finish qualifies you to apply for promotion to {FTBSimulation._get_tier_name(league.tier + 1)}"
+                        )
+
+                        opportunity_payload = {
+                            'opportunity_id': opportunity_id,
+                            'team': team_name,
+                            'league_id': league.league_id,
+                            'league_name': league.name,
+                            'season': state.season_number,
+                            'from_tier': league.tier,
+                            'to_tier': league.tier + 1,
+                            'from_tier_name': league.tier_name,
+                            'to_tier_name': FTBSimulation._get_tier_name(league.tier + 1),
+                            'position': position,
+                            'points': final_points,
+                            'eligibility_score': round(float(eligibility_score), 1),
+                            'entry_fee': int(entry_fee),
+                            'invited': bool(is_invited),
+                            'status': 'open',
+                            'created_tick': state.tick,
+                            'expires_tick': expires_tick,
+                            'message': message,
+                        }
+
+                        existing_idx = next(
+                            (
+                                idx for idx, opp in enumerate(state.promotion_opportunities)
+                                if isinstance(opp, dict) and str(opp.get('opportunity_id', '')) == opportunity_id
+                            ),
+                            None
+                        )
+                        if existing_idx is None:
+                            state.promotion_opportunities.append(opportunity_payload)
+                        else:
+                            # Replace stale data but preserve non-open terminal states.
+                            old = state.promotion_opportunities[existing_idx]
+                            if str(old.get('status', 'open')).lower() in {"applied", "declined", "promoted", "expired"}:
+                                opportunity_payload['status'] = old.get('status', 'open')
+                                if 'applied_tick' in old:
+                                    opportunity_payload['applied_tick'] = old.get('applied_tick')
+                                if 'resolved_tick' in old:
+                                    opportunity_payload['resolved_tick'] = old.get('resolved_tick')
+                            state.promotion_opportunities[existing_idx] = opportunity_payload
+
+                        events.append(SimEvent(
+                            event_type="opportunity",
+                            category=event_category,
+                            ts=state.tick,
+                            priority=95.0 if is_invited else 85.0,
+                            severity="major" if is_invited else "info",
+                            data={
+                                **opportunity_payload,
+                                'action_required': True,
+                            }
+                        ))
+                    else:
+                        events.append(SimEvent(
+                            event_type="outcome",
+                            category="promotion_ineligible",
+                            ts=state.tick,
+                            priority=60.0,
+                            severity="info",
+                            data={
+                                'team': team_name,
+                                'league_id': league.league_id,
+                                'position': position,
+                                'points': final_points,
+                                'eligibility_score': round(float(eligibility_score), 1),
+                                'threshold': 50,
+                                'message': f'P{position} finish - Not yet eligible for promotion (Score: {eligibility_score:.0f}/100)'
+                            }
+                        ))
+                else:
+                    ai_rng = state.get_rng("world", f"promotion_{state.season_number}_{league.league_id}_{team_name}")
+                    if is_invited or (can_apply and ai_rng.random() > 0.3):
+                        existing_pending = any(
+                            str(p.get('team_name', '')) == team_name
+                            and int(p.get('to_tier', 0) or 0) == (league.tier + 1)
+                            for p in getattr(state, 'pending_promotions', [])
+                        )
+                        if not existing_pending:
+                            state.pending_promotions.append({
+                                'team_name': team_name,
+                                'team_obj': team_obj,
+                                'from_league': league,
+                                'from_league_id': league.league_id,
+                                'to_tier': league.tier + 1,
+                                'is_invited': is_invited,
+                                'entry_fee': 0 if is_invited else FTBSimulation._calculate_promotion_fee(league.tier + 1, team_obj),
+                                'process_tick': state.tick + 14  # Process in ~2 weeks.
+                            })
+
+            if state.player_team and state.player_team.league_id == league.league_id:
+                state.mark_dirty('standings')
+                state.mark_dirty('sponsors')
+
         # Apply infrastructure decay at season end
         for team_name in league.championship_table.keys():
             # Find the team object
@@ -12572,7 +13158,7 @@ class FTBSimulation:
         """
         import sqlite3
         import json
-        
+
         # Prevent folding the player team (this would be game over)
         if team == state.player_team:
             _dbg(f"[FTB] Player team {team.name} reached fold condition - triggering game over state")
@@ -12589,7 +13175,10 @@ class FTBSimulation:
                     'message': f'Game Over: {team.name} has collapsed due to insolvency'
                 }
             )
-        
+
+        team_league = next((lg for lg in state.leagues.values() if team in lg.teams), None)
+        league_id = team_league.league_id if team_league else getattr(team, 'league_id', '')
+
         # Archive team to folded_teams table
         team_id = f"TEAM_{state.seed}_{hash(team.name) % 100000}"
         seasons_active = getattr(team, 'seasons_active', 1)
@@ -12627,7 +13216,7 @@ class FTBSimulation:
                 metadata = {
                     'tier': team.tier,
                     'ownership_type': team.ownership_type,
-                    'principal': team.principal_name,
+                    'principal': getattr(getattr(team, 'principal', None), 'name', ''),
                     'bailout_history': getattr(team, '_bailout_history', [])
                 }
                 
@@ -12654,46 +13243,81 @@ class FTBSimulation:
                 _dbg(f"[FTB] Team {team.name} archived to folded_teams table")
         except Exception as e:
             _dbg(f"[FTB] Error archiving folded team: {e}")
-        
-        # Release staff and drivers to market
-        released_staff = []
-        for driver in team.drivers[:]:
-            driver.is_free_agent = True
-            driver.team_name = None
-            driver.former_team_folded = True
-            released_staff.append(('Driver', driver.name))
-        
-        for engineer in team.engineers[:]:
-            engineer.is_free_agent = True
-            engineer.team_name = None
-            engineer.former_team_folded = True
-            released_staff.append(('Engineer', engineer.name))
-        
-        for mechanic in team.mechanics[:]:
-            mechanic.is_free_agent = True
-            mechanic.team_name = None
-            mechanic.former_team_folded = True
-            released_staff.append(('Mechanic', mechanic.name))
-        
+
+        # Release all roster members to free agency.
+        released_staff: List[Dict[str, Any]] = []
+        released_entities: List[Entity] = []
+        roster_groups = [
+            ('Driver', list(team.drivers or [])),
+            ('Engineer', list(team.engineers or [])),
+            ('Mechanic', list(team.mechanics or [])),
+            ('Strategist', [team.strategist] if team.strategist else []),
+            ('AIPrincipal', [team.principal] if team.principal else []),
+        ]
+
+        for role, members in roster_groups:
+            for member in members:
+                if member is None:
+                    continue
+                member.is_free_agent = True
+                member.team_name = None
+                member.former_team_folded = True
+                asking_salary = int(max(15000, estimate_salary_expectation(member, team_tier=max(1, int(team.tier or 1))) * 365))
+                state.add_to_free_agent_pool(member, "team_fold", asking_salary)
+                released_entities.append(member)
+                released_staff.append({
+                    'role': role,
+                    'name': member.name,
+                    'asking_salary': asking_salary,
+                })
+
+        # Remove team contracts from active books.
+        released_ids = {
+            getattr(member, 'entity_id', None)
+            for member in released_entities
+            if getattr(member, 'entity_id', None) is not None
+        }
+        for entity_id, contract in list(state.contracts.items()):
+            if entity_id in released_ids or getattr(contract, 'team_name', '') == team.name:
+                del state.contracts[entity_id]
+
         # Remove all sponsors
         if team.name in state.sponsorships:
             del state.sponsorships[team.name]
         if team.name in state.pending_sponsor_offers:
             del state.pending_sponsor_offers[team.name]
-        
-        # Mark team as folded (don't remove from league yet, that happens in cleanup)
+
+        # Remove team from active competition immediately.
         team.status = 'folded'
         team.folded_tick = state.tick
-        
-        # Schedule new team creation to fill grid slot
+        if team_league and team in team_league.teams:
+            team_league.teams.remove(team)
+        if team.name in getattr(team_league, 'championship_table', {}):
+            del team_league.championship_table[team.name]
+        state.ai_teams = [t for t in state.ai_teams if t is not team]
+        state.unregister_team_name(team.name)
+        if hasattr(state, 'job_board') and getattr(state.job_board, 'vacancies', None):
+            state.job_board.vacancies = [
+                listing for listing in state.job_board.vacancies
+                if getattr(listing, 'team_name', '') != team.name
+            ]
+
+        # Schedule new team creation to fill the vacancy.
         if not hasattr(state, '_teams_to_spawn'):
             state._teams_to_spawn = []
+        fold_rng = state.get_rng("world", f"team_fold_spawn:{team.name}:{state.tick}")
         state._teams_to_spawn.append({
             'tier': team.tier,
+            'league_id': league_id,
             'replaced_team_name': team.name,
-            'spawn_after_tick': state.tick + 90  # Spawn new team after 90 ticks
+            'spawn_after_tick': state.tick + fold_rng.randint(30, 75),
+            'reason': 'fold_replacement',
         })
-        
+
+        if isinstance(state.economic_state, dict):
+            current_folds = int(state.economic_state.get('recent_folds_count', 0) or 0)
+            state.economic_state['recent_folds_count'] = current_folds + 1
+
         # Create fold event
         fold_event = SimEvent(
             event_type="consequence",
@@ -12703,6 +13327,7 @@ class FTBSimulation:
             severity="critical",
             data={
                 'team': team.name,
+                'league_id': league_id,
                 'tier': team.tier,
                 'fold_reason': fold_reason,
                 'championship_position': championship_position,
@@ -12713,118 +13338,561 @@ class FTBSimulation:
                 'message': f'{team.name} has folded due to {fold_reason} - grid slot will be filled by new entrant'
             }
         )
-        
+
         _dbg(f"[FTB] Team {team.name} (Tier {team.tier}) has folded: {fold_reason}")
         return fold_event
     
     @staticmethod
-    def spawn_new_team(state: SimState, tier: int, replaced_team_name: str = None) -> Optional[Team]:
+    def _resolve_spawn_league(state: SimState, tier: int, league_id: Optional[str] = None) -> Optional['League']:
+        """Pick the destination league for a replacement/entry spawn."""
+        if league_id and league_id in state.leagues:
+            league = state.leagues[league_id]
+            if int(getattr(league, 'tier', 0) or 0) == int(tier):
+                return league
+
+        candidates = [lg for lg in state.leagues.values() if int(getattr(lg, 'tier', 0) or 0) == int(tier)]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda lg: len(getattr(lg, 'teams', []) or []))
+
+    @staticmethod
+    def _spawn_role_targets(tier: int, tier_name: str) -> Dict[str, int]:
+        envelope = WorldBuilder.TIER_ENVELOPES.get(tier_name, {
+            'engineers_count': 1,
+            'mechanics_count': 1,
+        })
+        return {
+            'Driver': 2,
+            'Engineer': max(1, int(envelope.get('engineers_count', 1))),
+            'Mechanic': max(1, int(envelope.get('mechanics_count', 1))),
+            'Strategist': 1,
+            'AIPrincipal': 1,
+        }
+
+    @staticmethod
+    def _generate_entry_entity(
+        state: SimState,
+        role: str,
+        tier: int,
+        tier_name: str,
+        rng: random.Random,
+        quality_bias: float = 0.0,
+    ) -> Optional[Entity]:
+        role_map: Dict[str, Any] = {
+            'Driver': Driver,
+            'Engineer': Engineer,
+            'Mechanic': Mechanic,
+            'Strategist': Strategist,
+            'AIPrincipal': AIPrincipal,
+        }
+        entity_cls = role_map.get(role)
+        if entity_cls is None:
+            return None
+
+        entity_id = state._next_entity_id
+        state._next_entity_id += 1
+
+        if generate_name:
+            entity_name = generate_name(state.seed, role, entity_id)
+        else:
+            entity_name = f"{role} {entity_id}"
+
+        entity = entity_cls(entity_name)
+        entity.entity_id = entity_id
+        entity.display_name = entity_name
+
+        envelope = WorldBuilder.TIER_ENVELOPES.get(tier_name, {
+            'driver_age_range': (18, 30),
+            'principal_age_range': (30, 60),
+            'staff_age_range': (22, 50),
+            'stat_mean': 30,
+            'stat_stddev': 8,
+        })
+
+        if role == 'Driver':
+            age_low, age_high = envelope.get('driver_age_range', (18, 30))
+        elif role == 'AIPrincipal':
+            age_low, age_high = envelope.get('principal_age_range', (30, 60))
+        else:
+            age_low, age_high = envelope.get('staff_age_range', (22, 50))
+        entity.age = rng.randint(int(age_low), int(age_high))
+
+        role_bias = {
+            'AIPrincipal': 4.0,
+            'Strategist': 2.0,
+            'Engineer': 1.0,
+            'Mechanic': 0.0,
+            'Driver': 0.0,
+        }.get(role, 0.0)
+        mean = float(envelope.get('stat_mean', 30.0)) + role_bias + quality_bias
+        stddev = max(4.0, float(envelope.get('stat_stddev', 8.0)))
+
+        for stat in STATS_SCHEMAS.get(role, {}):
+            entity.current_ratings[stat] = float(max(1.0, min(99.0, rng.gauss(mean, stddev))))
+
+        entity.form_momentum = rng.uniform(-0.15, 0.15)
+        entity.potential_ceiling = max(
+            entity.overall_rating,
+            min(99.0, entity.overall_rating + rng.uniform(8.0, 22.0)),
+        )
+        return entity
+
+    @staticmethod
+    def _register_spawn_contract(
+        state: SimState,
+        team: Team,
+        entity: Entity,
+        role: str,
+        annual_salary: int,
+        rng: random.Random,
+    ) -> None:
+        role_lower = role.lower()
+        if role_lower == 'aiprincipal':
+            role_lower = 'principal'
+        duration_days_range = {
+            'driver': (52 * 7, 104 * 7),
+            'engineer': (104 * 7, 156 * 7),
+            'mechanic': (104 * 7, 208 * 7),
+            'strategist': (104 * 7, 156 * 7),
+            'principal': (104 * 7, 182 * 7),
+        }
+        min_days, max_days = duration_days_range.get(role_lower, (104 * 7, 156 * 7))
+        duration_days = rng.randint(min_days, max_days)
+
+        state.contracts[entity.entity_id] = Contract(
+            entity_id=entity.entity_id,
+            entity_name=getattr(entity, 'display_name', entity.name),
+            team_name=team.name,
+            role=role_lower,
+            start_day=state.sim_day_of_year - rng.randint(0, 21),
+            duration_days=duration_days,
+            base_salary=max(1, int(annual_salary)),
+            seasons_duration=max(1, Contract.days_to_seasons(duration_days)),
+            signing_bonus=0,
+            poaching_protection_until=state.sim_day_of_year + 30,
+        )
+
+    @staticmethod
+    def _assign_entry_car_setup(state: SimState, team: Team, tier: int, tier_name: str, rng: random.Random) -> None:
+        envelope = WorldBuilder.TIER_ENVELOPES.get(tier_name, {
+            'stat_mean': 32.0,
+            'stat_stddev': 8.0,
+        })
+        car = Car(f"{team.name} Chassis")
+        mean = float(envelope.get('stat_mean', 32.0)) - 2.0
+        stddev = max(3.0, float(envelope.get('stat_stddev', 8.0)) - 1.0)
+
+        for stat in STATS_SCHEMAS['Car']:
+            car.current_ratings[stat] = float(max(1.0, min(99.0, rng.gauss(mean, stddev))))
+
+        car.base_ratings = car.current_ratings.copy()
+        team.car = car
+
+        preferred_part_types: List[str] = ['engine', 'tires']
+        if tier >= 2:
+            preferred_part_types.extend(['suspension', 'brakes'])
+        if tier >= 3:
+            preferred_part_types.append('aero_package')
+        if tier >= 4:
+            preferred_part_types.extend(['chassis', 'cooling'])
+        if tier >= 5:
+            preferred_part_types.extend(['electronics', 'transmission'])
+
+        selected_parts: Dict[str, Part] = {}
+        for part_type in preferred_part_types:
+            bucket = [
+                part for part in state.parts_catalog.values()
+                if getattr(part, 'part_type', '') == part_type
+                and int(getattr(part, 'tier_minimum', 1) or 1) <= tier
+                and int(getattr(part, 'tier_maximum', 5) or 5) >= tier
+            ]
+            if not bucket:
+                continue
+            bucket.sort(key=lambda part: getattr(part, 'performance_score', 0), reverse=True)
+            shortlist = bucket[:min(5, len(bucket))]
+            selected_parts[part_type] = rng.choice(shortlist)
+
+        team.equipped_parts = selected_parts
+        team.parts_inventory = []
+        team.car.update_ratings(team.car.base_ratings, team.equipped_parts)
+
+    @staticmethod
+    def _pull_market_candidate(state: SimState, role: str, rng: random.Random) -> Optional[FreeAgent]:
+        candidates = [fa for fa in state.free_agents if getattr(fa, 'entity_type', '') == role]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda fa: getattr(fa, 'overall_rating', 0), reverse=True)
+        shortlist = candidates[:min(len(candidates), 12)]
+        weights = [max(1, len(shortlist) - idx) for idx, _ in enumerate(shortlist)]
+        chosen = rng.choices(shortlist, weights=weights, k=1)[0]
+        state.free_agents.remove(chosen)
+        return chosen
+
+    @staticmethod
+    def _staff_spawned_team(
+        state: SimState,
+        team: Team,
+        tier: int,
+        tier_name: str,
+        rng: random.Random,
+    ) -> None:
+        staffing_roll = rng.random()
+        if staffing_roll < 0.28:
+            staffing_strategy = "market_scouted"
+            market_ratio = 0.86
+        elif staffing_roll < 0.76:
+            staffing_strategy = "hybrid_build"
+            market_ratio = 0.55
+        else:
+            staffing_strategy = "academy_launch"
+            market_ratio = 0.20
+
+        ownership_adjustment = {
+            'cash_rich_startup': 0.05,
+            'family_funded': 0.00,
+            'investor_group': 0.03,
+            'scrappy_independent': 0.10,
+            'manufacturer_works': -0.10,
+        }.get(getattr(team, 'ownership_type', ''), 0.0)
+        market_ratio = max(0.05, min(0.95, market_ratio + ownership_adjustment))
+
+        role_targets = FTBSimulation._spawn_role_targets(tier, tier_name)
+        role_order = ['AIPrincipal', 'Driver', 'Engineer', 'Mechanic', 'Strategist']
+        role_mix: Dict[str, Dict[str, int]] = {
+            role: {'market': 0, 'generated': 0}
+            for role in role_targets.keys()
+        }
+        market_hires = 0
+        generated_hires = 0
+
+        for role in role_order:
+            target_count = int(role_targets.get(role, 0) or 0)
+            for _ in range(target_count):
+                selected_entity: Optional[Entity] = None
+                annual_salary = 0
+                from_market = rng.random() < market_ratio
+
+                if from_market:
+                    selected_fa = FTBSimulation._pull_market_candidate(state, role, rng)
+                    if selected_fa:
+                        selected_entity = selected_fa.entity
+                        annual_salary = int(max(selected_fa.asking_salary, estimate_salary_expectation(selected_entity, team_tier=tier) * 365))
+                        market_hires += 1
+                        role_mix[role]['market'] += 1
+
+                if selected_entity is None:
+                    selected_entity = FTBSimulation._generate_entry_entity(
+                        state=state,
+                        role=role,
+                        tier=tier,
+                        tier_name=tier_name,
+                        rng=rng,
+                        quality_bias=rng.uniform(-4.0, 4.0),
+                    )
+                    if selected_entity is None:
+                        continue
+                    annual_salary = int(max(10000, estimate_salary_expectation(selected_entity, team_tier=tier) * 365))
+                    generated_hires += 1
+                    role_mix[role]['generated'] += 1
+
+                per_tick_salary = max(40, int(estimate_salary_expectation(selected_entity, team_tier=tier)))
+                team.add_entity_with_salary(selected_entity, salary_per_tick=per_tick_salary)
+                FTBSimulation._register_spawn_contract(
+                    state=state,
+                    team=team,
+                    entity=selected_entity,
+                    role=role,
+                    annual_salary=annual_salary,
+                    rng=rng,
+                )
+
+        team.normalize_roster()
+        team.ensure_staff_salaries()
+        team.staffing_strategy = staffing_strategy
+        team.entry_staffing_mix = {
+            'market_hires': market_hires,
+            'generated_hires': generated_hires,
+            'market_ratio': round(market_ratio, 2),
+            'by_role': role_mix,
+        }
+
+    @staticmethod
+    def spawn_new_team(
+        state: SimState,
+        tier: int,
+        replaced_team_name: str = None,
+        league_id: Optional[str] = None,
+    ) -> Optional[Team]:
         """
-        Spawn a new team to fill a grid slot (typically after a fold).
-        Returns the new team if successful.
+        Spawn a fully staffed team to fill a vacant grid slot.
+        Teams can be market-built, academy-built, or a hybrid.
         """
-        import random
-        from plugins.ftb_names import generate_team_name
-        
-        # Generate team name (avoid collision with existing teams)
-        existing_names = [t.name for league in state.leagues.values() for t in league.teams]
+        target_league = FTBSimulation._resolve_spawn_league(state, tier=tier, league_id=league_id)
+        if not target_league:
+            _dbg(f"[FTB] Could not find league for tier {tier}, cannot spawn team")
+            return None
+
+        existing_names = set(state.team_name_registry)
+        for league in state.leagues.values():
+            for existing_team in getattr(league, 'teams', []) or []:
+                if existing_team:
+                    existing_names.add(existing_team.name)
+
         new_name = None
         attempts = 0
-        while not new_name or new_name in existing_names:
+        while attempts < 120 and not new_name:
             seed_offset = state.tick + attempts
-            new_name = generate_team_name(state.seed + seed_offset, tier)
+            if generate_team_name:
+                candidate = generate_team_name(
+                    state.seed + seed_offset,
+                    int(tier),
+                    int(getattr(target_league, 'league_index', 0) or 0),
+                    len(getattr(target_league, 'teams', []) or []) + attempts,
+                )
+            else:
+                candidate = f"{target_league.name.split(' ')[0]} Entry {len(target_league.teams) + attempts + 1}"
+            if candidate not in existing_names:
+                new_name = candidate
+                break
             attempts += 1
-            if attempts > 100:
-                _dbg(f"[FTB] Failed to generate unique team name after 100 attempts")
-                return None
-        
-        # Create new team
+
+        if not new_name:
+            _dbg("[FTB] Failed to generate unique team name for spawn")
+            return None
+
+        rng = state.get_rng("world", f"team_spawn:{target_league.league_id}:{new_name}:{state.tick}")
         new_team = Team(new_name)
-        new_team.tier = tier
-        new_team.entry_season = getattr(state, 'season', 1)
+        state.register_team_name(new_name)
+
+        new_team.tier = int(tier)
+        new_team.tier_name = getattr(target_league, 'tier_name', TIER_DISPLAY_NAMES.get(int(tier), 'grassroots'))
+        new_team.league_id = target_league.league_id
+        new_team.entry_season = getattr(state, 'season_number', 1)
         new_team.entry_tick = state.tick
         if replaced_team_name:
             new_team.replaced_team_id = replaced_team_name
-        
-        # Set ownership type (varied archetypes)
-        rng = random.Random(state.seed + state.tick + hash(new_name))
+
         archetype_roll = rng.random()
         if archetype_roll < 0.30:
             new_team.ownership_type = "cash_rich_startup"
-            budget_percentile = 0.65  # Well-funded but inexperienced
+            budget_percentile = 0.65
         elif archetype_roll < 0.55:
             new_team.ownership_type = "family_funded"
-            budget_percentile = 0.50  # Median budget
+            budget_percentile = 0.50
         elif archetype_roll < 0.75:
             new_team.ownership_type = "investor_group"
-            budget_percentile = 0.60  # Above median
+            budget_percentile = 0.60
         elif archetype_roll < 0.90:
             new_team.ownership_type = "scrappy_independent"
-            budget_percentile = 0.35  # Below median but ambitious
+            budget_percentile = 0.35
         else:
             new_team.ownership_type = "manufacturer_works"
-            budget_percentile = 0.75  # Top quartile (manufacturer backing)
-        
-        # Set starting budget based on tier and archetype
+            budget_percentile = 0.75
+
         tier_budget_ranges = {
             1: (40000, 130000),
             2: (200000, 800000),
             3: (1500000, 10000000),
             4: (15000000, 60000000),
-            5: (80000000, 250000000)
+            5: (80000000, 250000000),
         }
-        min_budget, max_budget = tier_budget_ranges.get(tier, (100000, 500000))
+        min_budget, max_budget = tier_budget_ranges.get(int(tier), (100000, 500000))
         starting_budget = int(min_budget + (max_budget - min_budget) * budget_percentile)
-        
-        # Deduct entry fee (20-30% of tier median)
         entry_fee_pct = 0.20 + rng.random() * 0.10
         entry_fee = int((min_budget + max_budget) / 2 * entry_fee_pct)
         new_team.budget.cash = starting_budget - entry_fee
-        
-        # Set reputation (new entrant)
-        new_team.standing_metrics['reputation'] = 30 + rng.randint(0, 15)  # 30-45
-        new_team.standing_metrics['legitimacy'] = 25 + rng.randint(0, 20)  # 25-45
-        new_team.standing_metrics['morale'] = 60 + rng.randint(0, 20)  # 60-80 (optimistic new team)
-        
-        # Set league
-        # Find league matching tier
-        target_league = None
-        for league in state.leagues.values():
-            if league.tier == tier:
-                target_league = league
-                break
-        
-        if not target_league:
-            _dbg(f"[FTB] Could not find league for tier {tier}, cannot spawn team")
-            return None
-        
-        new_team.league_id = target_league.league_id
-        
-        # Generate starter sponsors
+
+        new_team.standing_metrics['reputation'] = 28 + rng.randint(0, 18)
+        new_team.standing_metrics['legitimacy'] = 24 + rng.randint(0, 20)
+        new_team.standing_metrics['morale'] = 58 + rng.randint(0, 22)
+
+        FTBSimulation._assign_entry_car_setup(
+            state=state,
+            team=new_team,
+            tier=int(tier),
+            tier_name=new_team.tier_name,
+            rng=rng,
+        )
+        FTBSimulation._staff_spawned_team(
+            state=state,
+            team=new_team,
+            tier=int(tier),
+            tier_name=new_team.tier_name,
+            rng=rng,
+        )
+
         if ftb_sponsors:
-            starter_count = 2 if tier <= 2 else 3
+            starter_count = 2 if int(tier) <= 2 else 3
             starter_offers = generate_sponsor_offers(state, new_team, rng, count=starter_count)
-            
-            # Auto-accept starter sponsors
-            if new_team.name not in state.sponsorships:
-                state.sponsorships[new_team.name] = []
-            
+            state.sponsorships.setdefault(new_team.name, [])
             for offer in starter_offers:
                 offer.signed_tick = state.tick
                 offer.seasons_active = 0
                 state.sponsorships[new_team.name].append(offer)
-        
-        # Generate starter staff (minimal crew)
-        # TODO: Flesh this out with actual staff generation
-        # For now, just create basic placeholders
-        new_team.principal_name = f"{new_name} Owner"
-        
-        # Add to league
-        target_league.teams.append(new_team)
-        
-        _dbg(f"[FTB] Spawned new team: {new_name} (Tier {tier}, {new_team.ownership_type}, ${new_team.budget.cash:,})")
-        
+
+        if new_team not in target_league.teams:
+            target_league.teams.append(new_team)
+        if new_team not in state.ai_teams:
+            state.ai_teams.append(new_team)
+
+        _dbg(
+            f"[FTB] Spawned new team: {new_name} (Tier {tier}, {new_team.ownership_type}, "
+            f"${new_team.budget.cash:,.0f}, strategy={getattr(new_team, 'staffing_strategy', 'n/a')})"
+        )
         return new_team
+
+    @staticmethod
+    def _replenish_grassroots_market(state: SimState) -> List[SimEvent]:
+        """Create new grassroots talent when market depth gets thin."""
+        if state.tick <= 0 or state.tick % 21 != 0:
+            return []
+
+        rng = state.get_rng("world", f"entry_market:{state.tick}")
+        grassroots_team_count = sum(
+            len(getattr(league, 'teams', []) or [])
+            for league in state.leagues.values()
+            if int(getattr(league, 'tier', 0) or 0) == 1
+        )
+        recent_folds = int(getattr(state, 'economic_state', {}).get('recent_folds_count', 0) or 0)
+        fold_pressure = min(8, recent_folds * 2)
+
+        targets = {
+            'Driver': max(40, int(grassroots_team_count * 0.40)) + fold_pressure,
+            'Engineer': max(30, int(grassroots_team_count * 0.28)) + fold_pressure,
+            'Mechanic': max(26, int(grassroots_team_count * 0.24)) + fold_pressure,
+            'Strategist': max(14, int(grassroots_team_count * 0.12)) + max(0, fold_pressure // 2),
+            'AIPrincipal': max(10, int(grassroots_team_count * 0.08)) + max(0, fold_pressure // 2),
+        }
+
+        current_counts: Dict[str, int] = {role: 0 for role in targets.keys()}
+        for free_agent in state.free_agents:
+            role = getattr(free_agent, 'entity_type', '')
+            if role in current_counts:
+                current_counts[role] += 1
+
+        generated_counts: Dict[str, int] = {role: 0 for role in targets.keys()}
+        for role, target in targets.items():
+            deficit = max(0, int(target) - int(current_counts.get(role, 0)))
+            if deficit <= 0:
+                if rng.random() < 0.08:
+                    deficit = 1
+                else:
+                    continue
+
+            to_create = min(deficit, rng.randint(1, 4))
+            for _ in range(to_create):
+                entity = FTBSimulation._generate_entry_entity(
+                    state=state,
+                    role=role,
+                    tier=1,
+                    tier_name='grassroots',
+                    rng=rng,
+                    quality_bias=rng.uniform(-3.0, 3.0),
+                )
+                if entity is None:
+                    continue
+                asking_salary = int(max(9000, estimate_salary_expectation(entity, team_tier=1) * 365))
+                state.add_to_free_agent_pool(entity, "entry_pipeline_replenishment", asking_salary)
+                for fa in reversed(state.free_agents):
+                    if getattr(fa, 'entity', None) is entity:
+                        fa.entered_market_tick = state.tick
+                        fa.entered_market_day = state.sim_day_of_year
+                        fa.interested_in_tier = 1 + rng.randint(0, 1)
+                        break
+                generated_counts[role] += 1
+
+        total_generated = sum(generated_counts.values())
+        if total_generated <= 0:
+            return []
+
+        return [
+            SimEvent(
+                event_type="structural",
+                category="entry_pipeline_market",
+                ts=state.tick,
+                priority=45.0,
+                severity="info",
+                data={
+                    'created': generated_counts,
+                    'message': f'Entry pipeline refreshed with {total_generated} new grassroots free agents',
+                },
+            )
+        ]
+
+    @staticmethod
+    def _schedule_grassroots_capacity_spawns(state: SimState) -> List[SimEvent]:
+        """Queue replacement teams for underfilled grassroots leagues."""
+        if state.tick <= 0 or state.tick % 30 != 0:
+            return []
+
+        if not hasattr(state, '_teams_to_spawn'):
+            state._teams_to_spawn = []
+
+        rng = state.get_rng("world", f"entry_capacity:{state.tick}")
+        queued_by_league: Dict[str, int] = {}
+        for row in state._teams_to_spawn:
+            league_id = str(row.get('league_id', '') or '')
+            if not league_id:
+                continue
+            queued_by_league[league_id] = queued_by_league.get(league_id, 0) + 1
+
+        queued_total = 0
+        for league in state.leagues.values():
+            if int(getattr(league, 'tier', 0) or 0) != 1:
+                continue
+
+            expected_teams = int(
+                WorldBuilder.TIER_CONFIG.get(getattr(league, 'tier_name', 'grassroots'), {})
+                .get('teams', len(getattr(league, 'teams', []) or []))
+            )
+            current_teams = len(getattr(league, 'teams', []) or [])
+            already_queued = queued_by_league.get(league.league_id, 0)
+            deficit = expected_teams - (current_teams + already_queued)
+            if deficit <= 0:
+                continue
+
+            queue_now = min(deficit, rng.randint(1, 2))
+            for _ in range(queue_now):
+                state._teams_to_spawn.append({
+                    'tier': int(getattr(league, 'tier', 1) or 1),
+                    'league_id': league.league_id,
+                    'replaced_team_name': None,
+                    'spawn_after_tick': state.tick + rng.randint(6, 24),
+                    'reason': 'entry_pipeline_capacity',
+                })
+                queued_total += 1
+
+        if queued_total <= 0:
+            return []
+
+        return [
+            SimEvent(
+                event_type="structural",
+                category="entry_pipeline_capacity",
+                ts=state.tick,
+                priority=50.0,
+                severity="info",
+                data={
+                    'queued_teams': queued_total,
+                    'message': f'Entry pipeline queued {queued_total} grassroots replacement team(s)',
+                },
+            )
+        ]
+
+    @staticmethod
+    def maintain_grassroots_entry_pipeline(state: SimState) -> List[SimEvent]:
+        """
+        Keep entry-level leagues stocked with people and teams as the world churns.
+        """
+        if isinstance(getattr(state, 'economic_state', None), dict) and state.tick % 60 == 0:
+            current_folds = int(state.economic_state.get('recent_folds_count', 0) or 0)
+            if current_folds > 0:
+                state.economic_state['recent_folds_count'] = current_folds - 1
+
+        events: List[SimEvent] = []
+        events.extend(FTBSimulation._replenish_grassroots_market(state))
+        events.extend(FTBSimulation._schedule_grassroots_capacity_spawns(state))
+        return events
     
     @staticmethod
     def infer_role_and_expectations(state: SimState, team: Team) -> Dict[str, Any]:
@@ -12945,10 +14013,21 @@ class FTBSimulation:
         """
         events = []
         
-        # Passive decay
-        for metric in team.standing_metrics:
-            team.standing_metrics[metric] *= 0.999  # Slow continuous decay
-            team.standing_metrics[metric] = max(0, min(100, team.standing_metrics[metric]))
+        # Ensure expected metrics exist on old saves.
+        if 'morale' not in team.standing_metrics:
+            team.standing_metrics['morale'] = 50.0
+        if 'team_health' not in team.standing_metrics:
+            team.standing_metrics['team_health'] = 50.0
+        if 'championship_position' not in team.standing_metrics:
+            team.standing_metrics['championship_position'] = 50.0
+
+        # Passive decay for soft sentiment metrics only.
+        # Hard state metrics (morale, health, points, championship position) are
+        # derived elsewhere and should not decay automatically.
+        for metric in ('legitimacy', 'reputation', 'media_standing', 'ownership_confidence', 'political_capital'):
+            if metric in team.standing_metrics:
+                team.standing_metrics[metric] *= 0.999
+                team.standing_metrics[metric] = max(0.0, min(100.0, float(team.standing_metrics[metric])))
         
         # Results impact (simplified)
         if 'race_position' in results:
@@ -12958,11 +14037,24 @@ class FTBSimulation:
             elif position <= 10:
                 team.standing_metrics['reputation'] += 0.1
         
-        # Wire race results to standing metrics
-        # Parse recent race_result events from event history
+        # Find league context once (needed by multiple metrics below).
+        league_for_team = None
+        budget_percentile = 50.0
+        for league in state.leagues.values():
+            if team in league.teams:
+                league_for_team = league
+                budgets = sorted([t.budget.cash for t in league.teams])
+                if team.budget.cash in budgets:
+                    rank = budgets.index(team.budget.cash)
+                    budget_percentile = (rank / max(1, len(budgets) - 1)) * 100.0
+                break
+
+        # Wire race results to standing metrics from the most recent completed tick.
+        # This avoids re-applying the same race-result effects every day.
         recent_positions = []
-        for event in state.event_history[-10:]:  # Check last 10 events
-            if event.category == 'race_result':
+        recent_tick = int(state.tick) - 1
+        for event in state.event_history[-80:]:
+            if event.category == 'race_result' and int(getattr(event, 'ts', -999999)) == recent_tick:
                 event_team = event.data.get('team', '')
                 position = event.data.get('position', 0)
                 
@@ -12987,23 +14079,11 @@ class FTBSimulation:
                         elif position >= 11:
                             team.standing_metrics['ownership_confidence'] -= 0.02
         
-        # Calculate legitimacy dynamically
-        # Find budget percentile
-        budget_percentile = 50.0  # Default
-        league_for_team = None
-        for league in state.leagues.values():
-            if team in league.teams:
-                league_for_team = league
-                budgets = sorted([t.budget.cash for t in league.teams])
-                if team.budget.cash in budgets:
-                    rank = budgets.index(team.budget.cash)
-                    budget_percentile = (rank / max(1, len(budgets) - 1)) * 100
-                break
-        
-        # Average finish position for last 5 races
-        avg_finish = sum(recent_positions[-5:]) / len(recent_positions[-5:]) if recent_positions else 10
+        # Average finish position for last 5 races (fallback to current table rank).
         num_teams = len(league_for_team.teams) if league_for_team else 16
-        finish_score = max(0, 100 * (1 - avg_finish / num_teams))
+        inferred_rank = float(team.standing_metrics.get('championship_position', max(1, num_teams // 2)))
+        avg_finish = sum(recent_positions[-5:]) / len(recent_positions[-5:]) if recent_positions else inferred_rank
+        finish_score = max(0.0, 100.0 * (1.0 - avg_finish / max(1, num_teams)))
         
         # Years in tier (approximation from season number)
         years_in_tier = min(3, state.season_number)
@@ -13013,7 +14093,12 @@ class FTBSimulation:
         if league_for_team and team.name in league_for_team.championship_table:
             teams_sorted = sorted(league_for_team.championship_table.items(), key=lambda x: x[1], reverse=True)
             team_rank = next((i for i, (name, _) in enumerate(teams_sorted) if name == team.name), len(teams_sorted) // 2)
-            champ_score = max(0, 100 * (1 - team_rank / max(1, len(teams_sorted))))
+            team.standing_metrics['championship_position'] = float(team_rank + 1)
+            team.standing_metrics['points'] = float(league_for_team.championship_table.get(team.name, 0.0))
+            champ_score = max(0.0, 100.0 * (1.0 - team_rank / max(1, len(teams_sorted))))
+        else:
+            rank_based = max(1.0, float(team.standing_metrics.get('championship_position', max(1, num_teams // 2))))
+            champ_score = max(0.0, 100.0 * (1.0 - (rank_based - 1.0) / max(1.0, float(num_teams - 1))))
         
         # Composite legitimacy calculation
         new_legitimacy = (
@@ -13023,15 +14108,118 @@ class FTBSimulation:
             champ_score * 0.1
         )
         team.standing_metrics['legitimacy'] = new_legitimacy
-        
-        # Morale decay when cash runway < 10 weeks
-        cash_runway = FTBSimulation.calculate_cash_runway(team)
-        if cash_runway < 70:  # 10 weeks = 70 ticks
-            team.standing_metrics['morale'] -= 0.5
-        
-        # Clamp all values
-        for metric in team.standing_metrics:
-            team.standing_metrics[metric] = max(0, min(100, team.standing_metrics[metric]))
+
+        # Team health: aggregate non-race factors so morale is not just individual swings.
+        personnel_morale_values = []
+        for entity in (team.drivers or []):
+            if entity is not None and hasattr(entity, 'morale'):
+                personnel_morale_values.append(float(getattr(entity, 'morale', 50.0)))
+        for entity in (team.engineers or []):
+            if entity is not None and hasattr(entity, 'morale'):
+                personnel_morale_values.append(float(getattr(entity, 'morale', 50.0)))
+        for entity in (team.mechanics or []):
+            if entity is not None and hasattr(entity, 'morale'):
+                personnel_morale_values.append(float(getattr(entity, 'morale', 50.0)))
+        if team.strategist is not None and hasattr(team.strategist, 'morale'):
+            personnel_morale_values.append(float(getattr(team.strategist, 'morale', 50.0)))
+        if team.principal is not None and hasattr(team.principal, 'morale'):
+            personnel_morale_values.append(float(getattr(team.principal, 'morale', 50.0)))
+        personnel_health = sum(personnel_morale_values) / len(personnel_morale_values) if personnel_morale_values else 50.0
+
+        cash_runway_weeks = FTBSimulation.calculate_cash_runway(team)
+        if cash_runway_weeks == float('inf'):
+            financial_health = 100.0
+        else:
+            financial_health = max(0.0, min(100.0, (float(cash_runway_weeks) / 30.0) * 100.0))
+
+        infrastructure_values = []
+        infra = getattr(team, 'infrastructure', {}) or {}
+        if isinstance(infra, dict):
+            for key, value in infra.items():
+                if key.endswith('_unlocked'):
+                    continue
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                unlock_key = f"{key}_unlocked"
+                if unlock_key in infra and not bool(infra.get(unlock_key, False)):
+                    continue
+                infrastructure_values.append(float(value))
+        infrastructure_health = (
+            sum(infrastructure_values) / len(infrastructure_values)
+            if infrastructure_values else 50.0
+        )
+
+        # Keep team-health anchored in broad organizational state, not just individual mood.
+        team_health = (
+            personnel_health * 0.25 +
+            financial_health * 0.30 +
+            infrastructure_health * 0.20 +
+            champ_score * 0.25
+        )
+        team_health = max(0.0, min(100.0, team_health))
+        team.standing_metrics['team_health'] = team_health
+
+        # Morale anchor: centered around 50 with bounded offsets.
+        # This avoids passive "always rising" behavior when the team is merely stable.
+        current_morale = float(team.standing_metrics.get('morale', 50.0))
+        reputation = float(team.standing_metrics.get('reputation', 50.0))
+
+        morale_target = (
+            50.0 +
+            (team_health - 50.0) * 0.60 +
+            (champ_score - 50.0) * 0.12 +
+            (reputation - 50.0) * 0.08
+        )
+
+        # Fresh race momentum only applies on race-result ticks.
+        has_race_signal = bool(recent_positions)
+        race_momentum = 0.0
+        if has_race_signal:
+            avg_recent_finish = sum(recent_positions) / len(recent_positions)
+            normalized_finish = 1.0 - ((avg_recent_finish - 1.0) / max(1.0, float(num_teams - 1)))
+            race_momentum = (normalized_finish - 0.5) * 10.0
+        morale_target += race_momentum
+        morale_target = max(28.0, min(72.0, morale_target))
+
+        delta_to_target = morale_target - current_morale
+        if has_race_signal:
+            # Results days: morale can move, scaled by team state.
+            if delta_to_target > 0.0:
+                positive_context = max(0.55, min(1.20, 0.85 + ((team_health - 50.0) / 250.0)))
+                morale_step = min(0.70, delta_to_target * 0.045 * positive_context)
+            elif delta_to_target < 0.0:
+                negative_context = max(0.75, min(1.30, 1.0 + ((50.0 - team_health) / 220.0)))
+                morale_step = max(-0.95, delta_to_target * 0.055 * negative_context)
+            else:
+                morale_step = 0.0
+        else:
+            # Non-race days: keep movement minimal to avoid day-by-day creep.
+            if abs(delta_to_target) < 2.0:
+                morale_step = 0.0
+            else:
+                morale_step = max(-0.06, min(0.05, delta_to_target * 0.006))
+
+        # Soft saturation to prevent steady passive climb or collapse at extremes.
+        if current_morale > 68.0:
+            morale_step -= min(0.18 if has_race_signal else 0.03, (current_morale - 68.0) * 0.015)
+        elif current_morale < 32.0:
+            morale_step += min(0.18 if has_race_signal else 0.03, (32.0 - current_morale) * 0.015)
+
+        new_morale = current_morale + morale_step
+
+        # Financial stress still hurts morale, but now uses true runway-in-weeks thresholds.
+        if cash_runway_weeks < 4.0:
+            new_morale -= 0.25
+        elif cash_runway_weeks < 8.0:
+            new_morale -= 0.12
+        elif cash_runway_weeks < 12.0:
+            new_morale -= 0.05
+        team.standing_metrics['morale'] = new_morale
+
+        # Clamp numeric values to 0-100.
+        for metric, value in list(team.standing_metrics.items()):
+            if isinstance(value, (int, float)):
+                team.standing_metrics[metric] = max(0.0, min(100.0, float(value)))
         
         # ============================================================
         # THRESHOLD-TRIGGERED EVENTS (Hard Gates)
@@ -13187,91 +14375,171 @@ class FTBSimulation:
     
     @staticmethod
     def generate_opportunities(state: SimState) -> List[SimEvent]:
-        """Contract expiries, job board updates"""
+        """Maintain job board churn so openings refresh throughout the season."""
         events = []
         rng = state.get_rng("opportunities", state.tick)
-        
-        # Job vacancy creation (15% chance per tick)
-        if rng.random() < 0.15:
-            # Find underperforming AI teams (legitimacy < 40 or low standing metrics)
-            struggling_teams = [
-                t for t in state.ai_teams 
-                if t.standing_metrics.get('legitimacy', 50) < 40 
-                or t.standing_metrics.get('reputation', 50) < 35
-            ]
-            
-            if struggling_teams:
-                team = rng.choice(struggling_teams)
-                
-                # Determine role (weighted toward driver/engineer)
-                role_weights = [
-                    ('Driver', 0.4),
-                    ('Engineer', 0.3),
-                    ('Team_Principal', 0.2),
-                    ('Strategist', 0.1)
-                ]
-                role = rng.choices(
-                    [r for r, w in role_weights],
-                    weights=[w for r, w in role_weights]
-                )[0]
-                
-                # Find team's tier name
-                tier = team.tier_name if hasattr(team, 'tier_name') else "grassroots"
-                
-                expectation_band = rng.choices(
-                    ["low", "mid", "high"],
-                    weights=[0.4, 0.4, 0.2]
-                )[0]
-                
-                # Create job listing
-                job = JobListing(
-                    team=team,
-                    team_name=team.name,
-                    role=role.replace("_", " "),
-                    tier=tier,
-                    expectation_band=expectation_band,
-                    patience_profile=rng.uniform(0.3, 0.8),
-                    risk_profile=rng.uniform(0.2, 0.8),
-                    created_tick=state.tick
+
+        ai_teams = [t for t in state.ai_teams if t]
+        if not ai_teams:
+            return events
+
+        team_lookup = {t.name: t for t in ai_teams}
+        vacancies = getattr(state.job_board, 'vacancies', None)
+        if not isinstance(vacancies, list):
+            state.job_board.vacancies = []
+            vacancies = state.job_board.vacancies
+
+        # --- Remove stale / invalid listings ---
+        max_listing_age_ticks = 56  # ~8 weeks in-sim
+        random_close_chance = 0.035
+        kept_listings: List[JobListing] = []
+        removed_count = 0
+
+        for raw_listing in vacancies:
+            listing: Optional[JobListing] = raw_listing if isinstance(raw_listing, JobListing) else None
+            if listing is None and isinstance(raw_listing, dict):
+                # Backward compatibility: normalize legacy dict rows into JobListing objects.
+                listing = JobListing(
+                    team_name=str(raw_listing.get('team_name', 'Unknown Team')),
+                    role=str(raw_listing.get('role', 'Driver')),
+                    expectation_band=str(raw_listing.get('expectation_band', 'mid')),
+                    patience_profile=float(raw_listing.get('patience_profile', 0.5) or 0.5),
+                    risk_profile=float(raw_listing.get('risk_profile', 0.5) or 0.5),
+                    tier=str(raw_listing.get('tier', 'grassroots') or 'grassroots'),
+                    salary=raw_listing.get('salary', raw_listing.get('salary_offer', 50000.0)),
+                    visibility_threshold=float(raw_listing.get('visibility_threshold', 0.0) or 0.0),
+                    created_tick=int(raw_listing.get('created_tick', state.tick) or state.tick),
                 )
-                
-                state.job_board.vacancies.append(job)
-                
-                events.append(SimEvent(
-                    event_type="opportunity",
-                    category="job_listing",
-                    ts=state.tick,
-                    priority=50.0,
-                    severity="info",
-                    data={
-                        'role': role,
-                        'team': team.name,
-                        'tier': tier
-                    }
-                ))
-        
-        # Job vacancy removal (5% chance per tick per vacancy)
-        vacancies_to_remove = []
-        for job in state.job_board.vacancies:
-            if rng.random() < 0.05:
-                vacancies_to_remove.append(job)
-                
-                events.append(SimEvent(
-                    event_type="opportunity",
-                    category="job_removed",
-                    ts=state.tick,
-                    priority=20.0,
-                    severity="info",
-                    data={
-                        'role': job.role,
-                        'team': job.team_name,
-                        'reason': 'position filled'
-                    }
-                ))
-        
-        for job in vacancies_to_remove:
-            state.job_board.vacancies.remove(job)
-        
+
+            if listing is None:
+                removed_count += 1
+                continue
+
+            team_name = str(getattr(listing, 'team_name', '') or '')
+            if team_name not in team_lookup:
+                removed_count += 1
+                continue
+
+            created_tick = int(getattr(listing, 'created_tick', state.tick) or state.tick)
+            expired = (state.tick - created_tick) >= max_listing_age_ticks
+            filled = rng.random() < random_close_chance
+            if expired or filled:
+                removed_count += 1
+                continue
+
+            listing.team = team_lookup[team_name]
+            kept_listings.append(listing)
+
+        if removed_count > 0:
+            events.append(SimEvent(
+                event_type="opportunity",
+                category="job_removed",
+                ts=state.tick,
+                priority=25.0,
+                severity="info",
+                data={
+                    'removed_count': removed_count,
+                    'reason': 'market_refresh'
+                }
+            ))
+
+        vacancies[:] = kept_listings
+
+        # --- Create new listings (target a healthy amount of churn) ---
+        desired_openings = max(4, min(18, len(ai_teams) // 2))
+        creation_quota = max(0, desired_openings - len(vacancies))
+        if creation_quota <= 0 and rng.random() < 0.20:
+            creation_quota = 1
+        creation_quota = min(3, creation_quota)
+
+        def _team_pressure_score(team_obj: Team) -> float:
+            sm = getattr(team_obj, 'standing_metrics', {}) or {}
+            morale = float(sm.get('morale', 50.0))
+            legitimacy = float(sm.get('legitimacy', 50.0))
+            reputation = float(sm.get('reputation', 50.0))
+            ownership_conf = float(sm.get('ownership_confidence', 50.0))
+
+            # Championship pressure: lower table teams have higher turnover pressure.
+            league_size = 12
+            for lg in state.leagues.values():
+                if team_obj in lg.teams:
+                    league_size = max(2, len(lg.teams))
+                    break
+            champ_pos = float(sm.get('championship_position', league_size / 2))
+            champ_pressure = max(0.0, min(1.0, (champ_pos - 1.0) / max(1.0, float(league_size - 1))))
+
+            score = 0.35
+            score += max(0.0, (50.0 - morale) / 55.0)
+            score += max(0.0, (50.0 - legitimacy) / 60.0)
+            score += max(0.0, (50.0 - reputation) / 60.0)
+            score += max(0.0, (50.0 - ownership_conf) / 65.0)
+            score += champ_pressure * 0.55
+            return max(0.1, score)
+
+        open_slots = {
+            (str(getattr(listing, 'team_name', '') or ''), str(getattr(listing, 'role', '') or '').lower())
+            for listing in vacancies
+            if isinstance(listing, JobListing)
+        }
+
+        role_options = [
+            ('Driver', 0.36),
+            ('Engineer', 0.30),
+            ('Mechanic', 0.12),
+            ('Strategist', 0.10),
+            ('Team Principal', 0.12),
+        ]
+
+        created_count = 0
+        attempts = 0
+        max_attempts = max(6, creation_quota * 8)
+
+        while created_count < creation_quota and attempts < max_attempts:
+            attempts += 1
+
+            team = rng.choices(ai_teams, weights=[_team_pressure_score(t) for t in ai_teams], k=1)[0]
+            role = rng.choices(
+                [role_name for role_name, _ in role_options],
+                weights=[weight for _, weight in role_options],
+                k=1
+            )[0]
+            slot_key = (team.name, role.lower())
+            if slot_key in open_slots:
+                continue
+
+            expectation_band = rng.choices(
+                ["low", "mid", "high"],
+                weights=[0.45, 0.40, 0.15]
+            )[0]
+
+            listing = JobListing(
+                team=team,
+                team_name=team.name,
+                role=role,
+                tier=team.tier_name if hasattr(team, 'tier_name') else "grassroots",
+                expectation_band=expectation_band,
+                patience_profile=rng.uniform(0.3, 0.85),
+                risk_profile=rng.uniform(0.2, 0.85),
+                created_tick=state.tick
+            )
+            vacancies.append(listing)
+            open_slots.add(slot_key)
+            created_count += 1
+
+            events.append(SimEvent(
+                event_type="opportunity",
+                category="job_listing",
+                ts=state.tick,
+                priority=45.0,
+                severity="info",
+                data={
+                    'role': role,
+                    'team': team.name,
+                    'tier': listing.tier,
+                    'expectation_band': expectation_band,
+                }
+            ))
+
         return events
     
     @staticmethod
@@ -13764,7 +15032,12 @@ class FTBSimulation:
             
             # Check if target job is actually better
             if hasattr(action.target, 'tier'):
-                tier_improvement = action.target.tier - team.tier
+                team_tier_level = _coerce_tier_level(getattr(team, 'tier', 1), default=1)
+                target_tier_level = _coerce_tier_level(
+                    getattr(action.target, 'tier', None),
+                    default=team_tier_level
+                )
+                tier_improvement = target_tier_level - team_tier_level
                 base_score += tier_improvement * 25  # Big boost for tier upgrades
             
             # Small cost consideration
@@ -14100,8 +15373,15 @@ class FTBSimulation:
     def ai_team_decide(team: Team, state: SimState) -> Optional[Action]:
         """AI team decision: evaluate + weight + select (with optional ML policy and personality inflection)"""
         # SAFETY CHECK: Never make AI decisions for player team (even if accidentally called)
-        if state.player_team and team.team_id == state.player_team.team_id:
-            return None
+        if state.player_team:
+            same_object = team is state.player_team
+            same_name = getattr(team, 'name', None) == getattr(state.player_team, 'name', None)
+            same_team_id = (
+                getattr(team, 'team_id', None) is not None
+                and getattr(team, 'team_id', None) == getattr(state.player_team, 'team_id', None)
+            )
+            if same_object or same_name or same_team_id:
+                return None
         
         actions = FTBSimulation.get_available_actions(team, state)
         
@@ -14309,11 +15589,12 @@ class FTBSimulation:
                 # Add upgrade purchase action
                 actions.append(Action('purchase_upgrade', cost=template['cost'], target=upgrade_id))
         
-        # Job applications (for all teams, but AI teams will use this rarely)
-        visible_jobs = state.job_board.filter_visible_to_player(team.standing_metrics)
-        for job in visible_jobs:
-            # Application fee (small)
-            actions.append(Action("apply_for_job", cost=1000, target=job))
+        # Job applications are a player-driven action only.
+        # Keep them out of AI/delegation action lists so team control cannot transfer implicitly.
+        if team == state.player_team and state.control_mode == "human":
+            visible_jobs = state.job_board.filter_visible_to_player(team.standing_metrics)
+            for job in visible_jobs:
+                actions.append(Action("apply_for_job", cost=1000, target=job))
         
         # Sponsor management actions (for all teams)
         # Accept pending sponsor offers
@@ -15093,6 +16374,29 @@ class FTBSimulation:
         
         if not job or not isinstance(job, JobListing):
             return events
+
+        # Defensive guard: only the actual player-controlled team can transfer control.
+        is_player_applicant = bool(state.player_team) and (
+            team is state.player_team
+            or getattr(team, 'name', None) == getattr(state.player_team, 'name', None)
+        )
+        if not is_player_applicant:
+            # apply_action() already deducted cost before routing; refund blocked attempts.
+            if action.cost > 0:
+                team.budget.cash += action.cost
+            events.append(SimEvent(
+                event_type="outcome",
+                category="job_application_blocked",
+                ts=state.tick,
+                priority=70.0,
+                severity="warning",
+                data={
+                    'team': team.name,
+                    'target_team': job.team_name,
+                    'reason': 'non_player_job_application_blocked'
+                }
+            ))
+            return events
         
         # Check acceptance probability based on standing metrics
         acceptance_prob = state.job_board.get_acceptance_chance(team.standing_metrics, job)
@@ -15106,10 +16410,17 @@ class FTBSimulation:
             
             if target_team:
                 # Transfer player identity to new team
-                old_team_name = state.player_team.name
-                state.player_team = target_team
-                # Remove by name to ensure it works even if object references differ
+                old_player_team = state.player_team
+                old_team_name = old_player_team.name if old_player_team else team.name
+
+                # Previous player team returns to AI pool unless it's the same destination team.
+                if old_player_team and old_player_team is not target_team:
+                    if not any(t.name == old_player_team.name for t in state.ai_teams):
+                        state.ai_teams.append(old_player_team)
+
+                # Destination team is no longer AI-controlled.
                 state.ai_teams = [t for t in state.ai_teams if t.name != target_team.name]
+                state.player_team = target_team
                 
                 events.append(SimEvent(
                     event_type="structural",
@@ -15856,8 +17167,11 @@ class FTBSimulation:
                             manufacturer_id = f"custom_{team.name.replace(' ', '_')}"
                             
                             # Create part with boosted stats
-                            from ftb_names import generate_part_model_name
-                            part_name = generate_part_model_name(state.seed, part_id, team.name, project.part_type, 1)
+                            try:
+                                from plugins.ftb_names import generate_part_model_name
+                                part_name = generate_part_model_name(state.seed, part_id, team.name, project.part_type, 1)
+                            except Exception:
+                                part_name = f"{team.name} {project.part_type.title()} Prototype"
                             
                             custom_part = Part(
                                 name=part_name,
@@ -16412,7 +17726,7 @@ class FTBSimulation:
                 
                 # Generate new parts for this generation
                 new_parts_count = 0
-                for part_type in ['engine', 'chassis', 'aero', 'suspension', 'electronics', 'cooling']:
+                for part_type in ['engine', 'chassis', 'aero_package', 'suspension', 'electronics', 'cooling']:
                     # Generate new part for each tier the manufacturer serves
                     for tier in manufacturer.active_tiers:
                         # Import name generator
@@ -17140,11 +18454,18 @@ class FTBSimulation:
         """
         events = []
         rng = state.get_rng("ai_actions", state.tick)
+        original_player_team = state.player_team
         
-        for team in state.ai_teams:
+        for team in [t for t in state.ai_teams if t is not None]:
             # SAFETY CHECK: Never process player team in AI team actions
-            # Compare by name since team_id changes across save/load cycles
-            if state.player_team and team.name == state.player_team.name:
+            if state.player_team and (
+                team is state.player_team
+                or team.name == state.player_team.name
+                or (
+                    getattr(team, 'team_id', None) is not None
+                    and getattr(team, 'team_id', None) == getattr(state.player_team, 'team_id', None)
+                )
+            ):
                 _dbg(f"[FTB AI_ACTIONS] ✓ Skipping player team '{team.name}' from AI actions (safety check passed)")
                 continue
             if rng.random() < 0.10:  # 10% chance per tick
@@ -17153,22 +18474,22 @@ class FTBSimulation:
                 team_features = TIER_FEATURES.get(team.tier, TIER_FEATURES[1])
                 
                 if team_features.get('can_rd_projects', False):
-                    # Tier 4+: include R&D projects, upgrades, parts, infrastructure, job board, and sponsors
+                    # Tier 4+: include R&D projects, upgrades, parts, infrastructure, and sponsors.
                     action_type = rng.choices(
-                        ['hire', 'fire', 'poach', 'develop', 'rd_project', 'upgrade_package', 'purchase_part', 'infrastructure_upgrade', 'job_board', 'sponsor_management'],
-                        weights=[0.20, 0.07, 0.10, 0.12, 0.10, 0.07, 0.17, 0.12, 0.02, 0.03]
+                        ['hire', 'fire', 'poach', 'develop', 'rd_project', 'upgrade_package', 'purchase_part', 'infrastructure_upgrade', 'sponsor_management'],
+                        weights=[0.20, 0.07, 0.10, 0.12, 0.10, 0.07, 0.18, 0.13, 0.03]
                     )[0]
                 elif team.tier >= 2:
-                    # Tier 2-3: include upgrades, parts, infrastructure, job board, and sponsors but no R&D
+                    # Tier 2-3: include upgrades, parts, infrastructure, and sponsors but no R&D.
                     action_type = rng.choices(
-                        ['hire', 'fire', 'poach', 'develop', 'upgrade_package', 'purchase_part', 'infrastructure_upgrade', 'job_board', 'sponsor_management'],
-                        weights=[0.25, 0.08, 0.12, 0.12, 0.07, 0.18, 0.11, 0.02, 0.05]
+                        ['hire', 'fire', 'poach', 'develop', 'upgrade_package', 'purchase_part', 'infrastructure_upgrade', 'sponsor_management'],
+                        weights=[0.25, 0.08, 0.12, 0.12, 0.07, 0.19, 0.12, 0.05]
                     )[0]
                 else:
-                    # Tier 1: no R&D, upgrades, or parts but can upgrade infrastructure, apply for jobs, and manage sponsors
+                    # Tier 1: no R&D, upgrades, or parts but can still improve infra and sponsors.
                     action_type = rng.choices(
-                        ['hire', 'fire', 'poach', 'develop', 'infrastructure_upgrade', 'job_board', 'sponsor_management'],
-                        weights=[0.32, 0.07, 0.15, 0.23, 0.14, 0.03, 0.06]
+                        ['hire', 'fire', 'poach', 'develop', 'infrastructure_upgrade', 'sponsor_management'],
+                        weights=[0.33, 0.07, 0.15, 0.24, 0.15, 0.06]
                     )[0]
                 
                 # HIRING: Fill vacant positions or upgrade weak staff (Phase 3.4: tier-aware)
@@ -17572,32 +18893,6 @@ class FTBSimulation:
                                             action_events = FTBSimulation.apply_action(action, team, state)
                                             events.extend(action_events)
                 
-                # JOB BOARD: Apply for new roles (very rare - 2% chance)
-                elif action_type == 'job_board':
-                    # AI teams can apply for jobs, but very rarely and only if dissatisfied
-                    team_satisfaction = team.standing_metrics.get('morale', 50.0)
-                    
-                    # Only apply if morale is low (below 40) or team is underperforming
-                    if team_satisfaction < 40.0 and team.budget.cash >= 1000:
-                        available_jobs = state.job_board.filter_visible_to_player(team.standing_metrics)
-                        
-                        if available_jobs:
-                            # Prefer higher-tier opportunities
-                            job_weights = []
-                            for job in available_jobs:
-                                job_tier = getattr(job, 'tier', 1)
-                                if job_tier > team.tier:  # Only apply to better positions
-                                    job_weights.append(job_tier * 2)  # Weight by tier improvement
-                                else:
-                                    job_weights.append(0)  # Don't apply to lateral/downward moves
-                            
-                            if any(w > 0 for w in job_weights):
-                                # Select weighted random job
-                                selected_job = rng.choices(available_jobs, weights=job_weights)[0]
-                                action = Action('apply_for_job', cost=1000, target=selected_job)
-                                action_events = FTBSimulation.apply_action(action, team, state)
-                                events.extend(action_events)
-                
                 # SPONSOR MANAGEMENT: Handle sponsor offers and renewals
                 elif action_type == 'sponsor_management':
                     # Handle pending sponsor offers (accept good ones, reject bad ones)
@@ -17657,6 +18952,14 @@ class FTBSimulation:
                             action_events = FTBSimulation.apply_action(action, team, state)
                             events.extend(action_events)
         
+        # Hard safety rail: AI team actions must never transfer player control.
+        if original_player_team is not None and state.player_team is not original_player_team:
+            _dbg(
+                f"[FTB AI_ACTIONS] ⚠️ Restoring player team from '{state.player_team.name if state.player_team else 'None'}' "
+                f"to '{original_player_team.name}' after unexpected mutation"
+            )
+            state.player_team = original_player_team
+
         return events
     
     @staticmethod
@@ -17713,19 +19016,8 @@ class FTBSimulation:
         if not actions:
             return events
         
-        # Filter out job board actions for delegated player (make them extremely rare)
-        # Player delegation should not frequently apply for new jobs
-        filtered_actions = []
-        for action in actions:
-            if action.name == "apply_for_job":
-                # Only include job applications if team morale is very low (below 30)
-                team_morale = state.player_team.standing_metrics.get('morale', 50.0)
-                if team_morale < 30.0 and rng.random() < 0.05:  # 5% chance even when desperate
-                    filtered_actions.append(action)
-            else:
-                filtered_actions.append(action)
-        
-        actions = filtered_actions
+        # Delegation must never auto-transfer player control via job board moves.
+        actions = [action for action in actions if action.name != "apply_for_job"]
         if not actions:
             return events
         
@@ -19184,6 +20476,7 @@ Start game with these settings?"""
             self.tab_racing_stats = self.tabview.add("Racing Stats")  # New tab
             self.tab_analytics = self.tabview.add("Analytics")
             self.tab_sponsors = self.tabview.add("Sponsors")
+            self.tab_promotion = self.tabview.add("Promotion")
             self.tab_penalties = self.tabview.add("Penalties")
             self.tab_audio_settings = self.tabview.add("Audio Settings")  # New audio settings tab
             self.tab_history = self.tabview.add("History")  # New history tab
@@ -19200,6 +20493,7 @@ Start game with these settings?"""
             self._build_racing_stats_tab()  # New tab builder
             self._build_analytics_tab()
             self._build_sponsors_tab()
+            self._build_promotion_tab()
             self._build_penalties_tab()
             self._build_audio_settings_tab()  # New audio settings tab builder
             self._build_history_tab()  # New history tab builder
@@ -24488,10 +25782,10 @@ Teams Managed: {len(stats.teams_managed)}"""
                 return
 
             self.sim_state.player_team.normalize_roster()
+            rds = getattr(self.sim_state, 'race_day_state', None)
             
             # Show/hide live race button based on race day state
             try:
-                rds = getattr(self.sim_state, 'race_day_state', None)
                 if rds and ftb_race_day:
                     from plugins.ftb_race_day import RaceDayPhase
                     if rds.phase == RaceDayPhase.QUALI_COMPLETE:
@@ -24513,22 +25807,48 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             # Update phase indicator
             phase = self.sim_state.phase
+            phase_key = str(phase).lower()
+            race_day_phase_obj = getattr(rds, "phase", None)
+            race_day_phase_val = getattr(race_day_phase_obj, "value", race_day_phase_obj)
+            race_day_phase = str(race_day_phase_val).lower() if race_day_phase_val else "idle"
+            if race_day_phase != "idle":
+                phase_key = f"race_day:{race_day_phase}"
+            elif getattr(self.sim_state, "in_offseason", False):
+                phase_key = "offseason"
+
             phase_map = {
                 "offseason": "⏸️ Off-Season",
                 "race_weekend": "🏁 Race Weekend!",
-                "development": "🔧 Development Phase"
+                "development": "🔧 Development Phase",
+                "race_day:pre_race_prompt": "📣 Pre-Race Prompt",
+                "race_day:quali_ready": "🟡 Qualifying Ready",
+                "race_day:quali_running": "⏱️ Qualifying Running",
+                "race_day:quali_complete": "🧾 Qualifying Complete",
+                "race_day:race_ready": "🏎️ Race Ready",
+                "race_day:race_running": "🔴 Race Running",
+                "race_day:race_complete": "✅ Race Complete",
+                "race_day:post_race_advance": "📦 Post-Race Advance",
             }
-            phase_text = phase_map.get(phase, phase)
+            fallback_phase_text = phase_key.replace("race_day:", "").replace("_", " ").title()
+            phase_text = phase_map.get(phase_key, fallback_phase_text)
             
             phase_colors = {
                 "offseason": FTBTheme.TEXT_MUTED,
                 "race_weekend": FTBTheme.ACCENT,
-                "development": FTBTheme.WARNING
+                "development": FTBTheme.WARNING,
+                "race_day:pre_race_prompt": FTBTheme.WARNING,
+                "race_day:quali_ready": FTBTheme.WARNING,
+                "race_day:quali_running": FTBTheme.WARNING,
+                "race_day:quali_complete": FTBTheme.ACCENT,
+                "race_day:race_ready": FTBTheme.ACCENT,
+                "race_day:race_running": FTBTheme.DANGER,
+                "race_day:race_complete": FTBTheme.SUCCESS,
+                "race_day:post_race_advance": FTBTheme.ACCENT,
             }
             
             self.race_phase_label.configure(
                 text=f"Phase: {phase_text}",
-                text_color=phase_colors.get(phase, FTBTheme.TEXT)
+                text_color=phase_colors.get(phase_key, FTBTheme.TEXT)
             )
             
             # Update countdown (simplified - show races completed)
@@ -26072,6 +27392,50 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             self.pending_offers_container = ctk.CTkFrame(right_col, fg_color="transparent")
             self.pending_offers_container.pack(fill=tk.BOTH, expand=True)
+
+        def _build_promotion_tab(self):
+            """Build Promotion tab - persistent promotion opportunities and actions."""
+            tab = self.tab_promotion
+
+            container = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+            container.pack(fill=tk.BOTH, expand=True)
+
+            header = ctk.CTkFrame(container, fg_color=FTBTheme.CARD, corner_radius=8)
+            header.pack(fill=tk.X, padx=10, pady=(10, 8))
+
+            header_row = ctk.CTkFrame(header, fg_color="transparent")
+            header_row.pack(fill=tk.X, padx=15, pady=15)
+
+            ctk.CTkLabel(
+                header_row,
+                text="📈 Team Promotion",
+                font=("Arial", 16, "bold"),
+                text_color=FTBTheme.TEXT,
+            ).pack(side=tk.LEFT)
+
+            ctk.CTkButton(
+                header_row,
+                text="🔄 Refresh",
+                command=self._refresh_promotion_tab,
+                fg_color=FTBTheme.BUTTON_SECONDARY,
+                hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                width=100,
+                height=28,
+                font=("Arial", 11),
+            ).pack(side=tk.RIGHT)
+
+            self.promotion_status_label = ctk.CTkLabel(
+                header,
+                text="Promotion opportunities appear here after season completion.",
+                font=("Arial", 11),
+                text_color=FTBTheme.TEXT_MUTED,
+                anchor="w",
+                justify="left",
+            )
+            self.promotion_status_label.pack(fill=tk.X, padx=15, pady=(0, 12))
+
+            self.promotion_opportunities_container = ctk.CTkFrame(container, fg_color="transparent")
+            self.promotion_opportunities_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         
         def _build_audio_settings_tab(self):
             """Build Audio Settings tab - Control volume levels for different audio channels"""
@@ -27183,6 +28547,170 @@ Teams Managed: {len(stats.teams_managed)}"""
             
             # Refresh UI
             self._refresh_sponsors()
+
+        def _on_apply_promotion(self, opportunity_id: str):
+            """Queue promotion-application command for the controller."""
+            cmd_q = self.runtime.get("ftb_cmd_q")
+            if cmd_q:
+                cmd_q.put({"cmd": "ftb_apply_promotion", "opportunity_id": opportunity_id})
+                if hasattr(self, "promotion_status_label"):
+                    self.promotion_status_label.configure(
+                        text="Promotion application submitted. Processing now...",
+                        text_color=FTBTheme.TEXT_MUTED
+                    )
+
+        def _on_decline_promotion(self, opportunity_id: str):
+            """Queue promotion-decline command for the controller."""
+            cmd_q = self.runtime.get("ftb_cmd_q")
+            if cmd_q:
+                cmd_q.put({"cmd": "ftb_decline_promotion", "opportunity_id": opportunity_id})
+                if hasattr(self, "promotion_status_label"):
+                    self.promotion_status_label.configure(
+                        text="Promotion opportunity declined.",
+                        text_color=FTBTheme.TEXT_MUTED
+                    )
+
+        def _refresh_promotion_tab(self):
+            """Refresh promotion opportunities panel."""
+            if not self.sim_state or not self.sim_state.player_team:
+                return
+            if not hasattr(self, "promotion_opportunities_container"):
+                return
+
+            for widget in self.promotion_opportunities_container.winfo_children():
+                widget.destroy()
+
+            team = self.sim_state.player_team
+            opportunities = getattr(self.sim_state, "promotion_opportunities", [])
+            if not isinstance(opportunities, list):
+                opportunities = []
+
+            team_opps = [
+                opp for opp in opportunities
+                if isinstance(opp, dict) and str(opp.get("team", "")) == team.name
+            ]
+            team_opps.sort(key=lambda o: int(o.get("created_tick", 0) or 0), reverse=True)
+
+            if not team_opps:
+                if hasattr(self, "promotion_status_label"):
+                    self.promotion_status_label.configure(
+                        text="No active promotion opportunities. Finish high in your championship to unlock one.",
+                        text_color=FTBTheme.TEXT_MUTED
+                    )
+                ctk.CTkLabel(
+                    self.promotion_opportunities_container,
+                    text="No promotion opportunities yet",
+                    font=("Arial", 12),
+                    text_color=FTBTheme.TEXT_MUTED
+                ).pack(pady=24)
+                return
+
+            if hasattr(self, "promotion_status_label"):
+                self.promotion_status_label.configure(
+                    text=f"{len(team_opps)} promotion opportunity record(s) for {team.name}",
+                    text_color=FTBTheme.TEXT_MUTED
+                )
+
+            for opp in team_opps:
+                opp_id = str(opp.get("opportunity_id", ""))
+                status = str(opp.get("status", "open")).lower()
+                expires_tick = int(opp.get("expires_tick", 0) or 0)
+                if status == "open" and expires_tick and self.sim_state.tick > expires_tick:
+                    status = "expired"
+                    opp["status"] = "expired"
+                    opp["resolved_tick"] = self.sim_state.tick
+
+                status_color_map = {
+                    "open": FTBTheme.SUCCESS,
+                    "applied": FTBTheme.ACCENT,
+                    "promoted": FTBTheme.SUCCESS,
+                    "declined": FTBTheme.TEXT_MUTED,
+                    "expired": FTBTheme.WARNING,
+                }
+                status_color = status_color_map.get(status, FTBTheme.TEXT)
+
+                card = ctk.CTkFrame(self.promotion_opportunities_container, fg_color=FTBTheme.CARD, corner_radius=8)
+                card.pack(fill=tk.X, pady=(0, 10))
+
+                top_row = ctk.CTkFrame(card, fg_color="transparent")
+                top_row.pack(fill=tk.X, padx=12, pady=(10, 4))
+
+                ctk.CTkLabel(
+                    top_row,
+                    text=f"Season {opp.get('season', '?')} • {opp.get('league_name', opp.get('league_id', 'League'))}",
+                    font=("Arial", 12, "bold"),
+                    text_color=FTBTheme.TEXT
+                ).pack(side=tk.LEFT)
+
+                ctk.CTkLabel(
+                    top_row,
+                    text=status.upper(),
+                    font=("Arial", 10, "bold"),
+                    text_color=status_color
+                ).pack(side=tk.RIGHT)
+
+                details = (
+                    f"P{int(opp.get('position', 0) or 0)} • {float(opp.get('points', 0) or 0):.0f} pts • "
+                    f"Eligibility {float(opp.get('eligibility_score', 0) or 0):.0f}/100\n"
+                    f"{opp.get('from_tier_name', 'Current')} → {opp.get('to_tier_name', 'Next Tier')}"
+                )
+                ctk.CTkLabel(
+                    card,
+                    text=details,
+                    font=("Arial", 11),
+                    text_color=FTBTheme.TEXT,
+                    justify="left",
+                    anchor="w"
+                ).pack(fill=tk.X, padx=12, pady=2)
+
+                fee = int(opp.get("entry_fee", 0) or 0)
+                fee_text = "No entry fee (invited)" if fee <= 0 else f"Entry fee: ${fee:,}"
+                ctk.CTkLabel(
+                    card,
+                    text=fee_text,
+                    font=("Arial", 10),
+                    text_color=FTBTheme.TEXT_MUTED,
+                    anchor="w"
+                ).pack(fill=tk.X, padx=12, pady=(0, 6))
+
+                if status == "open":
+                    btn_row = ctk.CTkFrame(card, fg_color="transparent")
+                    btn_row.pack(fill=tk.X, padx=12, pady=(0, 10))
+
+                    can_afford = fee <= 0 or team.budget.cash >= fee
+                    apply_label = "Apply For Promotion" if can_afford else "Insufficient Cash"
+
+                    ctk.CTkButton(
+                        btn_row,
+                        text=apply_label,
+                        command=lambda oid=opp_id: self._on_apply_promotion(oid),
+                        state="normal" if can_afford else "disabled",
+                        fg_color=FTBTheme.SUCCESS,
+                        hover_color="#2E7D32",
+                        width=170,
+                        height=30,
+                        font=("Arial", 11, "bold")
+                    ).pack(side=tk.LEFT, padx=(0, 8))
+
+                    ctk.CTkButton(
+                        btn_row,
+                        text="Decline",
+                        command=lambda oid=opp_id: self._on_decline_promotion(oid),
+                        fg_color=FTBTheme.BUTTON_SECONDARY,
+                        hover_color=FTBTheme.BUTTON_SECONDARY_HOVER,
+                        width=100,
+                        height=30,
+                        font=("Arial", 11)
+                    ).pack(side=tk.LEFT)
+                else:
+                    ctk.CTkLabel(
+                        card,
+                        text=opp.get("message", ""),
+                        font=("Arial", 10),
+                        text_color=FTBTheme.TEXT_MUTED,
+                        justify="left",
+                        anchor="w"
+                    ).pack(fill=tk.X, padx=12, pady=(0, 10))
         
         def _refresh_penalties(self):
             """Refresh penalties display"""
@@ -28265,6 +29793,14 @@ Teams Managed: {len(stats.teams_managed)}"""
                         _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Sponsors tab refreshed")
                     except Exception as e:
                         _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Sponsors tab refresh error: {e}")
+
+                    # Refresh Promotion tab
+                    try:
+                        if hasattr(self, 'promotion_opportunities_container'):
+                            self._refresh_promotion_tab()
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ✅ Promotion tab refreshed")
+                    except Exception as e:
+                        _dbg(f"[FTB WIDGET {self.widget_id}] ❌ Promotion tab refresh error: {e}")
                         
                     # Clear all dirty flags after full refresh
                     if hasattr(state, 'clear_dirty_flags'):
@@ -28387,6 +29923,9 @@ Teams Managed: {len(stats.teams_managed)}"""
                     if hasattr(self, 'current_sponsors_container'):
                         self._refresh_sponsors()
                         state._sponsors_dirty = False
+                elif current_tab == "Promotion" and (tab_changed or should_update):
+                    if hasattr(self, 'promotion_opportunities_container'):
+                        self._refresh_promotion_tab()
                 elif current_tab == "Penalties" and should_update:
                     if hasattr(self, 'penalties_list_container'):
                         self._refresh_penalties()
@@ -30145,12 +31684,12 @@ class FTBController:
         narrative = getattr(self, '_broadcast_narrative', ftb_broadcast_commentary_llm.NarrativeState())
         dispatcher = getattr(self, '_broadcast_dispatcher', ftb_broadcast_commentary_llm.BeatDispatcher())
         
-        # ── Build prompt for this lap (all instant work) ──
-        prompt_obj, voice_key, priority = self._build_lap_prompt(
+        # ── Build prompt(s) for this lap (all instant work) ──
+        prompt_plan = self._build_lap_prompts(
             rds, lap, total, player_team, narrative, dispatcher, gen
         )
         
-        if not prompt_obj:
+        if not prompt_plan:
             narrative.laps_since_commentary += 1
             return
         
@@ -30160,24 +31699,36 @@ class FTBController:
         
         def _bg_generate():
             try:
-                text = self._call_commentary_llm(prompt_obj)
+                generated_segments = []
+                now_lap = lap
                 
-                # ── Check: has the race moved on while we were waiting? ──
-                current_rds = self.state.race_day_state if self.state else None
-                now_lap = current_rds.current_lap if current_rds else lap
+                for prompt_obj, voice_key, priority in prompt_plan:
+                    text = self._call_commentary_llm(prompt_obj)
+                    
+                    # ── Check: has the race moved on while we were waiting? ──
+                    current_rds = self.state.race_day_state if self.state else None
+                    now_lap = current_rds.current_lap if current_rds else lap
+                    if now_lap > lap + 1 and now_lap < total:
+                        # Race moved on significantly — discard stale text entirely.
+                        # The next lap tick will see _pbp_llm_inflight=False and
+                        # generate a fresh prompt for the current lap automatically.
+                        print(f"[FTB PBP] ⏩ Discarding stale lap {lap} text (race now on lap {now_lap})")
+                        generated_segments = []
+                        self._flush_stale_broadcast_segments()
+                        break
+                    
+                    if text:
+                        generated_segments.append((text, voice_key, priority))
                 
-                if text and now_lap > lap + 1 and now_lap < total:
-                    # Race moved on significantly — discard stale text entirely.
-                    # The next lap tick will see _pbp_llm_inflight=False and
-                    # generate a fresh prompt for the current lap automatically.
-                    print(f"[FTB PBP] ⏩ Discarding stale lap {lap} text (race now on lap {now_lap})")
+                if generated_segments:
+                    # Still current enough — flush old segments and enqueue all fresh lines.
+                    # This preserves the intended PBP -> color handoff for a lap.
                     self._flush_stale_broadcast_segments()
-                elif text:
-                    # Still current enough — flush old segments and enqueue
-                    self._flush_stale_broadcast_segments()
-                    self._enqueue_pbp_segment(text, voice_key=voice_key, priority=priority)
-                    narrative.log_commentary(text)
-                    print(f"[FTB PBP] 🎙️ Lap {lap} commentary (race@{now_lap}): {text[:80]}...")
+                    for text, seg_voice_key, seg_priority in generated_segments:
+                        self._enqueue_pbp_segment(text, voice_key=seg_voice_key, priority=seg_priority)
+                        narrative.log_commentary(text)
+                    spoken_voices = ", ".join(sorted({v for _, v, _ in generated_segments}))
+                    print(f"[FTB PBP] 🎙️ Lap {lap} commentary x{len(generated_segments)} [{spoken_voices}] (race@{now_lap})")
                 else:
                     narrative.laps_since_commentary += 1
             except Exception as exc:
@@ -30187,8 +31738,11 @@ class FTBController:
         
         threading.Thread(target=_bg_generate, daemon=True, name=f"pbp_llm_lap{lap}").start()
 
-    def _build_lap_prompt(self, rds, lap, total, player_team, narrative, dispatcher, gen):
-        """Build the LLM prompt for a given lap. Returns (prompt_obj, voice_key, priority) or (None, None, None).
+    def _build_lap_prompts(self, rds, lap, total, player_team, narrative, dispatcher, gen):
+        """Build one or more LLM prompts for a given lap.
+        
+        Returns:
+            List[Tuple[prompt_obj, voice_key, priority]]
         
         This does ONLY fast/instant work: narrative state update, event
         classification, scoring, beat selection, prompt construction.
@@ -30278,37 +31832,34 @@ class FTBController:
         if beats:
             narrative.remember_event(beats[0])
         
-        # ── Decide WHAT to say (instant) — build the prompt object ──
-        prompt_obj = None
-        voice_key = "play_by_play"
-        priority = 90.0
+        # ── Decide WHAT to say (instant) — build prompt plan ──
+        prompt_plan = []
         
         if lap == total:
             prompt_obj = gen.generate_final_lap_prompt(narrative, player_pos=player_pos)
-            priority = 95.0
+            if prompt_obj:
+                prompt_plan.append((prompt_obj, "play_by_play", 95.0))
         elif beats:
             include_color = dispatcher.color_roll(lap, total)
             prompts = gen.generate_beat_prompt(beats, lap, total, narrative, include_color=include_color)
-            if prompts:
-                prompt_obj = prompts[0]
+            for prompt_obj in prompts:
                 voice_key = "play_by_play" if prompt_obj.speaker == 'pbp' else "color_commentator"
                 priority = float(prompt_obj.priority) + 80.0
+                prompt_plan.append((prompt_obj, voice_key, priority))
         
-        if not prompt_obj:
+        if not prompt_plan:
             # Try every lap late-race, every 2 laps otherwise
             update_interval = 1 if narrative.race_phase in ('late', 'final') else 2
             should_update = (lap % update_interval == 0) or (narrative.laps_since_commentary >= 1)
             if should_update:
                 prompt_obj = gen.generate_lap_update_prompt(lap, total, narrative, player_pos=player_pos)
-                priority = 86.0
+                if prompt_obj:
+                    prompt_plan.append((prompt_obj, "play_by_play", 86.0))
         
         # Clear per-lap event collector
         narrative.current_lap_events.clear()
         
-        if not prompt_obj:
-            return None, None, None
-        
-        return prompt_obj, voice_key, priority
+        return prompt_plan
 
     def _stream_live_race_event(self) -> bool:
         """
@@ -32823,12 +34374,18 @@ class FTBController:
                                     self.state.job_board.vacancies.remove(listing)
                                     
                                     # Transfer player to new team
-                                    old_team = self.state.player_team.name
+                                    old_player_team = self.state.player_team
+                                    old_team = old_player_team.name if old_player_team else ''
                                     target_team = listing.team
                                     if not target_team:
                                         target_team = next((t for t in self.state.ai_teams if t.name == listing.team_name), None)
                                     if not target_team:
                                         target_team = self.state.player_team
+
+                                    if old_player_team and old_player_team is not target_team:
+                                        if not any(t.name == old_player_team.name for t in self.state.ai_teams):
+                                            self.state.ai_teams.append(old_player_team)
+                                    self.state.ai_teams = [t for t in self.state.ai_teams if t.name != target_team.name]
                                     self.state.player_team = target_team
                                     
                                     # Generate success event
@@ -32868,14 +34425,203 @@ class FTBController:
                                     self._emit_events([event], skip_narration=True)
                                     self.log("ftb", f"Job rejected: {listing.role} at {listing.team.name if listing.team else listing.team_name}")
                 
-                elif cmd == "ftb_start_development":
-                    config = msg.get("config")
-                    if self.state and self.state.player_team and config:
+                elif cmd == "ftb_apply_promotion":
+                    opportunity_id = str(msg.get("opportunity_id", "") or "").strip()
+                    if self.state and self.state.player_team:
+                        promo_events = []
                         with self.state_lock:
-                            # Accept direct project_id from msg or config, else map subsystem
+                            team = self.state.player_team
+                            opportunities = getattr(self.state, "promotion_opportunities", [])
+                            if not isinstance(opportunities, list):
+                                opportunities = []
+                                self.state.promotion_opportunities = opportunities
+
+                            candidate = None
+                            if opportunity_id:
+                                candidate = next(
+                                    (
+                                        o for o in opportunities
+                                        if isinstance(o, dict)
+                                        and str(o.get("opportunity_id", "")) == opportunity_id
+                                        and str(o.get("team", "")) == team.name
+                                    ),
+                                    None
+                                )
+                            if candidate is None:
+                                candidate = next(
+                                    (
+                                        o for o in opportunities
+                                        if isinstance(o, dict)
+                                        and str(o.get("team", "")) == team.name
+                                        and str(o.get("status", "open")).lower() == "open"
+                                    ),
+                                    None
+                                )
+
+                            if not candidate:
+                                self.log("ftb", "No open promotion opportunity available")
+                                continue
+
+                            status = str(candidate.get("status", "open")).lower()
+                            expires_tick = int(candidate.get("expires_tick", 0) or 0)
+                            if status != "open":
+                                self.log("ftb", f"Promotion opportunity is not open (status={status})")
+                                continue
+                            if expires_tick and self.state.tick > expires_tick:
+                                candidate["status"] = "expired"
+                                candidate["resolved_tick"] = self.state.tick
+                                self.log("ftb", "Promotion opportunity expired")
+                                self.state.mark_dirty("standings")
+                                self.state.mark_dirty("sponsors")
+                                continue
+
+                            to_tier = int(candidate.get("to_tier", team.tier + 1) or (team.tier + 1))
+                            from_league = self.state.leagues.get(team.league_id) if team.league_id else None
+                            if from_league is None:
+                                from_league = next((lg for lg in self.state.leagues.values() if team in lg.teams), None)
+                            if not from_league:
+                                self.log("ftb", "Promotion failed: source league not found")
+                                continue
+
+                            entry_fee = int(candidate.get("entry_fee", 0) or 0)
+                            if entry_fee > 0 and team.budget.cash < entry_fee:
+                                fail_event = SimEvent(
+                                    event_type="outcome",
+                                    category="promotion_fee_failed",
+                                    ts=self.state.tick,
+                                    priority=85.0,
+                                    severity="warning",
+                                    event_id=FTBSimulation._generate_event_id(self.state),
+                                    data={
+                                        "team": team.name,
+                                        "fee": entry_fee,
+                                        "cash": team.budget.cash,
+                                        "message": f"Insufficient funds for promotion fee (${entry_fee:,})",
+                                    },
+                                )
+                                self.state.event_history.append(fail_event)
+                                promo_events.append(fail_event)
+                                continue
+
+                            candidate["status"] = "applied"
+                            candidate["applied_tick"] = self.state.tick
+
+                            apply_event = SimEvent(
+                                event_type="opportunity",
+                                category="promotion_applied",
+                                ts=self.state.tick,
+                                priority=90.0,
+                                severity="major",
+                                event_id=FTBSimulation._generate_event_id(self.state),
+                                data={
+                                    "team": team.name,
+                                    "from_tier": team.tier,
+                                    "to_tier": to_tier,
+                                    "entry_fee": entry_fee,
+                                    "opportunity_id": candidate.get("opportunity_id"),
+                                    "message": f"Promotion application submitted for {candidate.get('to_tier_name', FTBSimulation._get_tier_name(to_tier))}",
+                                },
+                            )
+                            self.state.event_history.append(apply_event)
+                            promo_events.append(apply_event)
+
+                            result_events = FTBSimulation._process_promotion(
+                                self.state,
+                                {
+                                    "team_obj": team,
+                                    "team_name": team.name,
+                                    "from_league": from_league,
+                                    "from_league_id": from_league.league_id,
+                                    "to_tier": to_tier,
+                                    "entry_fee": entry_fee,
+                                    "is_invited": bool(candidate.get("invited", False)),
+                                    "opportunity_id": candidate.get("opportunity_id"),
+                                },
+                            )
+                            if result_events:
+                                self.state.event_history.extend(result_events)
+                                promo_events.extend(result_events)
+                                if any(e.category == "team_promoted" for e in result_events):
+                                    candidate["status"] = "promoted"
+                                    candidate["resolved_tick"] = self.state.tick
+
+                            self.state.mark_dirty("standings")
+                            self.state.mark_dirty("finance")
+                            self.state.mark_dirty("sponsors")
+
+                        if promo_events:
+                            self._emit_events(promo_events, skip_narration=True)
+                        self._refresh_widget()
+
+                elif cmd == "ftb_decline_promotion":
+                    opportunity_id = str(msg.get("opportunity_id", "") or "").strip()
+                    if self.state and self.state.player_team:
+                        decline_event = None
+                        with self.state_lock:
+                            team = self.state.player_team
+                            opportunities = getattr(self.state, "promotion_opportunities", [])
+                            if not isinstance(opportunities, list):
+                                opportunities = []
+                                self.state.promotion_opportunities = opportunities
+
+                            candidate = None
+                            if opportunity_id:
+                                candidate = next(
+                                    (
+                                        o for o in opportunities
+                                        if isinstance(o, dict)
+                                        and str(o.get("opportunity_id", "")) == opportunity_id
+                                        and str(o.get("team", "")) == team.name
+                                    ),
+                                    None,
+                                )
+                            if candidate is None:
+                                candidate = next(
+                                    (
+                                        o for o in opportunities
+                                        if isinstance(o, dict)
+                                        and str(o.get("team", "")) == team.name
+                                        and str(o.get("status", "open")).lower() == "open"
+                                    ),
+                                    None,
+                                )
+
+                            if not candidate:
+                                self.log("ftb", "No open promotion opportunity to decline")
+                                continue
+
+                            candidate["status"] = "declined"
+                            candidate["resolved_tick"] = self.state.tick
+                            decline_event = SimEvent(
+                                event_type="outcome",
+                                category="promotion_declined",
+                                ts=self.state.tick,
+                                priority=70.0,
+                                severity="info",
+                                event_id=FTBSimulation._generate_event_id(self.state),
+                                data={
+                                    "team": team.name,
+                                    "opportunity_id": candidate.get("opportunity_id"),
+                                    "to_tier": candidate.get("to_tier"),
+                                    "message": f"Declined promotion to {candidate.get('to_tier_name', 'higher tier')}",
+                                },
+                            )
+                            self.state.event_history.append(decline_event)
+                            self.state.mark_dirty("standings")
+                            self.state.mark_dirty("sponsors")
+
+                        if decline_event:
+                            self._emit_events([decline_event], skip_narration=True)
+                        self._refresh_widget()
+
+                elif cmd == "ftb_start_development":
+                    config = msg.get("config") or {}
+                    if self.state and self.state.player_team:
+                        with self.state_lock:
+                            # Accept direct project_id from msg or config, else map subsystem.
                             project_id = msg.get("project_id") or config.get("project_id")
+                            subsystem = config.get('subsystem', 'general')
                             if not project_id:
-                                subsystem = config.get('subsystem', 'general')
                                 subsystem_to_project = {
                                     'Aerodynamics': 'rd_aero_efficiency',
                                     'Power Unit': 'rd_power_output',
@@ -32889,17 +34635,16 @@ class FTBController:
                                     self.log("ftb", f"ERROR: Unknown subsystem '{subsystem}' - cannot map to project")
                                     project_id = 'rd_driveability'  # Fallback
                             
-                            # Get engineer entity IDs from names
+                            # Get engineer entity IDs from names/objects.
                             assigned_engineer_ids = []
                             assigned_engineers = config.get('engineers', [])
                             for eng in assigned_engineers:
-                                # eng is an Engineer object from the wizard
                                 if hasattr(eng, 'entity_id'):
                                     assigned_engineer_ids.append(eng.entity_id)
                                 elif hasattr(eng, 'name'):
                                     self.log("ftb", f"Engineer {eng.name} missing entity_id")
                             
-                            # Create action to start R&D project
+                            # Create action to start R&D project.
                             action = Action(
                                 name="start_rd_" + project_id,
                                 target=project_id,
@@ -32911,15 +34656,23 @@ class FTBController:
                                 }
                             )
                             
-                            # Apply action (this will handle cost deduction and validation)
+                            # Apply action (handles validation + deductions).
                             events = FTBSimulation._apply_start_rd_project(action, self.state.player_team, self.state)
                             if events:
                                 self.state.event_history.extend(events)
                                 self._emit_events(events, skip_narration=True)
-                                self.log("ftb", f"✓ Started R&D project: {project_id} ({subsystem})")
-                                self.state._rd_projects_dirty = True
+                                started = any(e.category == "rd_project_started" for e in events)
+                                if started:
+                                    self.state.mark_dirty('development')
+                                    self.state.mark_dirty('finance')
+                                    self.log("ftb", f"✓ Started R&D project: {project_id} ({subsystem})")
+                                else:
+                                    rejection = next((e for e in events if e.category == "rd_project_rejected"), None)
+                                    reason = rejection.data.get('reason') if rejection else "unknown reason"
+                                    self.log("ftb", f"R&D project rejected: {project_id} ({reason})")
                             else:
                                 self.log("ftb", f"WARNING: Failed to start R&D project {project_id} - no events returned")
+                        self._refresh_widget()
                 
                 elif cmd == "ftb_cancel_rd_project":
                     project_id = msg.get("project_id")
@@ -32937,7 +34690,10 @@ class FTBController:
                             if events:
                                 self.state.event_history.extend(events)
                                 self._emit_events(events, skip_narration=True)
+                                self.state.mark_dirty('development')
+                                self.state.mark_dirty('finance')
                                 self.log("ftb", f"Cancelled R&D project: {project_id}")
+                        self._refresh_widget()
                 
                 elif cmd == "ftb_rename_car":
                     new_name = msg.get("new_name")

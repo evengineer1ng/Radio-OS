@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tickStep, tickBatch, saveGame, fetchState, fetchSaves } from '../lib/api'
+  import { tickStep, tickBatch, saveGame, fetchSaves, globalRefresh } from '../lib/api'
   import { gameState, dateStr, tick, phase, notifications, unreadCount, hasGame, addToast } from '../lib/stores'
   import { createEventDispatcher } from 'svelte'
 
@@ -15,13 +15,13 @@
 
   async function handleTick(n: number) {
     if (working) return; working = true
-    try { await tickStep(n); await refreshState(); addToast(`Advanced ${n} day${n > 1 ? 's' : ''}`, 'success') } catch (e) { console.error('tick', e); addToast('Tick failed', 'error') }
+    try { await tickStep(n); await refreshState(600); addToast(`Advanced ${n} day${n > 1 ? 's' : ''}`, 'success') } catch (e) { console.error('tick', e); addToast('Tick failed', 'error') }
     working = false
   }
 
   async function handleBatch(n: number) {
     if (working) return; working = true
-    try { await tickBatch(n); await refreshState(); addToast(`Advanced ${n} days`, 'success') } catch (e) { console.error('batch', e); addToast('Batch failed', 'error') }
+    try { await tickBatch(n); await refreshState(600); addToast(`Advanced ${n} days`, 'success') } catch (e) { console.error('batch', e); addToast('Batch failed', 'error') }
     working = false
   }
 
@@ -63,12 +63,13 @@
     }
   }
 
-  async function refreshState() {
+  async function refreshState(delayMs: number = 0) {
     try {
-      // Small delay so backend processes queued command
-      await new Promise(r => setTimeout(r, 600))
-      const state = await fetchState()
-      gameState.set(state)
+      if (delayMs > 0) {
+        // Small delay so backend processes queued command
+        await new Promise(r => setTimeout(r, delayMs))
+      }
+      await globalRefresh()
     } catch (e) { console.error('refresh', e) }
   }
 </script>
@@ -91,7 +92,7 @@
   {/if}
 
   <div class="toolbar-right">
-    <button class="btn btn-ghost btn-sm" on:click={refreshState} title="Refresh">🔄</button>
+    <button class="btn btn-ghost btn-sm" on:click={() => refreshState()} title="Refresh">🔄</button>
     <button class="btn btn-ghost btn-sm" class:working={saving} disabled={saving} on:click={openSaveModal} title="Save Game">💾</button>
     <button class="btn btn-ghost btn-sm" on:click={() => dispatch('loadsave')} title="Load Save">📂</button>
     <button class="btn btn-ghost btn-sm" on:click={newGame} title="New Game">🆕</button>

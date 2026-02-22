@@ -30,17 +30,24 @@ MAX_HISTORY = 2000
 _ORIGINAL_SPEAK = None
 _HOOK_INSTALLED = False
 
-def _transcript_speak_hook(text: str, voice_key: str = "host"):
+def _transcript_speak_hook(
+    text: str,
+    voice_key: str = "host",
+    speaker_label: str = "",
+    *args,
+    **kwargs
+):
     """
     Intercepts the runtime speak() function to log text to transcript.
     """
     try:
         if text and text.strip():
             ts = time.time()
+            display_speaker = str(speaker_label).strip() if speaker_label else str(voice_key).upper()
             entry = {
                 "timestamp": ts,
                 "time_str": time.strftime("%H:%M:%S", time.localtime(ts)),
-                "speaker": str(voice_key).upper(),
+                "speaker": display_speaker,
                 "text": text.strip()
             }
             TRANSCRIPT_HISTORY.append(entry)
@@ -54,7 +61,13 @@ def _transcript_speak_hook(text: str, voice_key: str = "host"):
 
     # Pass through to the original function
     if _ORIGINAL_SPEAK:
-        return _ORIGINAL_SPEAK(text, voice_key)
+        return _ORIGINAL_SPEAK(
+            text,
+            voice_key,
+            speaker_label=speaker_label,
+            *args,
+            **kwargs
+        )
     return None
 
 def install_hook():

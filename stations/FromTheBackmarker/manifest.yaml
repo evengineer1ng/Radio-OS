@@ -338,7 +338,7 @@ ui_layout:
       - widget_key: ftb_data_explorer
         title: Data Explorer
       - widget_key: ftb_calendar
-        title: 📅 Calendar
+        title: "\U0001F4C5 Calendar"
       - widget_key: transcript
         title: Transcript
       - widget_key: ftb_game
@@ -346,8 +346,16 @@ ui_layout:
     center:
       tabs:
       - widget_key: segment_body
-        title: Segment • Body
+        title: "Segment \u2022 Body"
     right:
       tabs:
       - widget_key: segment_comments
-        title: Segment • Comments
+        title: "Segment \u2022 Comments"
+enabled: false
+flow_songs_min: 1
+flow_songs_max: 3
+flow_songs_random: true
+talk_segments_min: 2
+talk_segments_max: 5
+talk_segments_random: true
+reaction_frequency: 0.2

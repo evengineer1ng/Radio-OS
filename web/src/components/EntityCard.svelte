@@ -5,6 +5,7 @@
   export let entity: any = null
   export let compact: boolean = false
   export let onFire: (() => void) | null = null
+  export let onNegotiate: (() => void) | null = null
 
   let showDetail = false
 
@@ -52,9 +53,14 @@
     </div>
   {/if}
 
-  {#if onFire}
-    <div class="fire-row">
-      <button class="btn btn-danger btn-sm" on:click|stopPropagation={onFire}>🔥 Fire</button>
+  {#if onNegotiate || onFire}
+    <div class="action-row">
+      {#if onNegotiate}
+        <button class="btn btn-primary btn-sm" on:click|stopPropagation={onNegotiate}>📝 Negotiate</button>
+      {/if}
+      {#if onFire}
+        <button class="btn btn-danger btn-sm" on:click|stopPropagation={onFire}>🔥 Fire</button>
+      {/if}
     </div>
   {/if}
 </div>
@@ -122,11 +128,12 @@
     padding-top: 6px;
     border-top: 1px solid var(--c-border);
   }
-  .fire-row {
+  .action-row {
     margin-top: 6px;
     padding-top: 6px;
     border-top: 1px solid var(--c-border);
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
   }
 </style>

@@ -72,7 +72,6 @@ _ACLI_CFG = _load_audio_cli_config()
 # ---------------------------------------------------------------------------
 WAKE_PHRASE = _ACLI_CFG.get("wake_phrase", "hey radio")
 EXIT_PHRASE = _ACLI_CFG.get("exit_phrase", "thanks radio")
-SILENCE_TIMEOUT_SEC = int(_ACLI_CFG.get("silence_timeout_sec", 30))
 SAMPLE_RATE = 16000               # 16 kHz mono for STT
 CHANNELS = 1
 WAKE_LISTEN_CHUNK_SEC = 2.0       # Seconds per wake-detection chunk
@@ -176,6 +175,501 @@ def format_response(narration: str, state_snapshot: Dict[str, Any],
 
     # Fallback — concise
     return narration
+
+
+# ===========================================================================
+# Audio Persona System (Meta Plugin Contract for Audio CLI)
+# ===========================================================================
+#
+# Mirrors bookmark.py's MetaPluginBase / MetaPluginRegistry pattern but for
+# the audio voice-navigation layer.
+#
+# When a station with a meta plugin starts (e.g. "start Oracle Kingdom"),
+# the Audio CLI can load the corresponding AudioPersona so the voice-nav
+# experience becomes part of the game/station's world.
+#
+# ESCAPE HATCHES — these are ALWAYS owned by audio_cli, never overridable:
+#   • Wake phrase detection ("hey radio") — always activates session
+#   • Exit phrase handling ("thanks radio") — always ends session
+#   • "exit persona" / "reset voice" / "normal mode" — drops persona
+#   • Mic mute/unmute, audio mode switching (speaker/headphone)
+#   • Verbosity control
+#   • Session start/stop lifecycle
+#   • Mode switching (tkinter ↔ web)
+#
+# Everything else — system prompt personality, narration voice, greeting,
+# state description style, response reshaping — is delegable to the persona.
+# ===========================================================================
+
+from abc import ABC, abstractmethod as _persona_abstractmethod
+
+
+class AudioPersonaBase(ABC):
+    """
+    Audio Persona Contract (v1.0)
+
+    A persona reshapes HOW Audio CLI sounds and narrates — it never changes
+    WHAT Audio CLI can do.  The session lifecycle, escape hatches, wake/exit
+    phrases, and hardware controls remain immutably owned by audio_cli.py.
+
+    Persona responsibilities:
+      I.   System prompt overlay  — inject personality into LLM instructions
+      II.  Greeting / farewell    — themed session open/close narration
+      III. Narration reshaping     — post-process LLM output for flavor
+      IV.  Voice selection         — TTS voice/model override
+      V.   State description style — how UI/game state is narrated
+      VI.  Ambient vocabulary      — custom phrase hints for STT accuracy
+
+    Design invariants:
+      • Persona NEVER blocks escape hatches.
+      • Persona NEVER mutates session state (active, context, mode).
+      • Persona NEVER intercepts wake/exit phrase detection.
+      • Persona is stateless from audio_cli's perspective (persona owns
+        its own internal state but audio_cli can drop it at any time).
+      • Persona is optional — audio_cli works identically without one.
+    """
+
+    # =====================================================================
+    # LIFECYCLE (Required)
+    # =====================================================================
+
+    @_persona_abstractmethod
+    def initialize(self, audio_cli_context: Dict[str, Any]) -> None:
+        """
+        Called when the persona is activated.
+
+        Args:
+            audio_cli_context: Read-only dict with:
+                - station_id: str (active station)
+                - station_name: str (display name)
+                - meta_plugin: str (meta plugin name, e.g. "oracle_kingdom")
+                - verbosity: str (current verbosity level)
+                - audio_mode: str ("speaker" or "headphone")
+                - context: str ("runtime" or "game")
+                - game_state: Optional[Dict] (current game state if available)
+        """
+        pass
+
+    @_persona_abstractmethod
+    def shutdown(self) -> None:
+        """Called when persona is deactivated (station stop, persona reset, etc.)."""
+        pass
+
+    # =====================================================================
+    # I. SYSTEM PROMPT OVERLAY
+    # =====================================================================
+
+    @_persona_abstractmethod
+    def get_system_prompt_overlay(self) -> str:
+        """
+        Return a system prompt addendum injected AFTER the core Audio CLI
+        system prompt.  This shapes LLM personality without replacing the
+        structural command format.
+
+        The overlay should:
+          - Define the persona's voice/character ("You are the Court Herald…")
+          - Set narration tone (archaic, playful, clinical, etc.)
+          - Add domain vocabulary the LLM should use
+          - NOT redefine the JSON output format
+          - NOT override escape hatch behavior
+
+        Returns:
+            System prompt addendum string (may be multi-line).
+            Return "" to use the default Audio CLI voice.
+        """
+        return ""
+
+    # =====================================================================
+    # II. GREETING / FAREWELL
+    # =====================================================================
+
+    def get_greeting(self, ui_state: Dict[str, Any]) -> Optional[str]:
+        """
+        Custom greeting when "hey radio" activates a session while this
+        persona is loaded.
+
+        Args:
+            ui_state: Current UI/game state snapshot.
+
+        Returns:
+            Themed greeting string, or None to use default Audio CLI greeting.
+        """
+        return None
+
+    def get_farewell(self) -> Optional[str]:
+        """
+        Custom farewell when "thanks radio" ends a session while this
+        persona is loaded.
+
+        Returns:
+            Themed farewell string, or None to use default "Exiting Audio CLI."
+        """
+        return None
+
+    # =====================================================================
+    # III. NARRATION RESHAPING
+    # =====================================================================
+
+    def reshape_narration(self, narration: str, ui_state: Dict[str, Any],
+                          verbosity: str) -> str:
+        """
+        Post-process LLM narration output to add persona flavor.
+
+        Called AFTER format_response() and BEFORE TTS.  Light touch only —
+        the LLM system prompt overlay should do most of the personality work.
+
+        Args:
+            narration:  Formatted narration string from format_response().
+            ui_state:   Current UI/game state snapshot.
+            verbosity:  Current verbosity level.
+
+        Returns:
+            Reshaped narration string.  Return narration unchanged for no-op.
+        """
+        return narration
+
+    # =====================================================================
+    # IV. VOICE SELECTION
+    # =====================================================================
+
+    def get_voice_override(self) -> Optional[Dict[str, Any]]:
+        """
+        Override TTS voice for persona narration.
+
+        Returns:
+            Dict with voice_provider params, e.g.:
+                {"voice_id": "af_heart", "speed": 0.95}
+            Or None to use the default Audio CLI narrator voice.
+        """
+        return None
+
+    # =====================================================================
+    # V. STATE DESCRIPTION STYLE
+    # =====================================================================
+
+    def describe_state(self, ui_state: Dict[str, Any]) -> Optional[str]:
+        """
+        Custom state description for silence-timeout re-narration.
+
+        When the session has been quiet and Audio CLI re-describes the
+        current state, the persona can provide a themed version.
+
+        Args:
+            ui_state: Current UI/game state snapshot.
+
+        Returns:
+            Themed state description, or None to use default.
+        """
+        return None
+
+    # =====================================================================
+    # VI. AMBIENT VOCABULARY (STT phrase hints)
+    # =====================================================================
+
+    def get_phrase_hints(self) -> List[str]:
+        """
+        Return domain-specific phrases the STT engine should bias toward.
+
+        These get merged with the standard Audio CLI hints ("hey radio",
+        "thanks radio", station names, etc.).
+
+        Returns:
+            List of phrase strings, e.g. ["issue decree", "throne room",
+            "court herald", "faction loyalty"].
+        """
+        return []
+
+    # =====================================================================
+    # VII. CAPABILITIES DESCRIPTOR
+    # =====================================================================
+    #
+    # Single introspectable dict of everything this persona supports.
+    # Audio CLI checks this instead of calling individual methods blindly.
+    #
+    # Why a dict instead of N abstract methods?
+    #   - Extending capabilities in v2/v3 (custom command aliasing, contextual
+    #     STT models, delegation hints, persona-suggested intent mapping) only
+    #     requires adding a key — not a new abstract method that breaks every
+    #     existing persona subclass.
+    #   - The shell can cache and inspect capabilities without invoking hooks.
+    #
+    # Standard keys (v1.0):
+    #   ambient           — persona provides get_ambient_narration()
+    #   voice_override    — persona provides get_voice_override()
+    #   state_description — persona provides describe_state()
+    #   custom_greeting   — persona provides themed get_greeting()
+    #   custom_farewell   — persona provides themed get_farewell()
+    #   input_preprocessing — persona provides preprocess_user_input()
+    #
+    # Future keys (reserved, not yet consumed):
+    #   custom_commands    — persona provides command alias mapping
+    #   contextual_stt     — persona wants its own STT model/config
+    #   delegation_hints   — persona can suggest intent routing
+    #   intent_mapping     — persona maps in-universe phrases to actions
+
+    def get_capabilities(self) -> Dict[str, bool]:
+        """
+        Return a descriptor of what this persona supports.
+
+        Audio CLI uses this to gate hook calls — if a capability is False
+        or absent, the corresponding hook is never called.
+
+        Override this to declare which capabilities your persona provides.
+        The base implementation derives flags from the individual methods
+        for backward compatibility (existing subclasses that override
+        individual hooks without overriding get_capabilities will still work).
+
+        Returns:
+            Dict mapping capability name → enabled flag.
+        """
+        return {
+            "ambient": self.supports_ambient_narration(),
+            "voice_override": self.get_voice_override() is not None,
+            "state_description": True,
+            "custom_greeting": True,
+            "custom_farewell": True,
+            "input_preprocessing": False,
+            # Reserved v2/v3 — default off
+            "custom_commands": False,
+            "contextual_stt": False,
+            "delegation_hints": False,
+            "intent_mapping": False,
+        }
+
+    def supports_ambient_narration(self) -> bool:
+        """
+        Can this persona produce ambient narration between user commands?
+
+        If True, audio_cli may call get_ambient_narration() during idle
+        periods to fill silence with in-world audio.
+
+        Returns:
+            True if persona provides ambient narration.
+        """
+        return False
+
+    def get_ambient_narration(self, ui_state: Dict[str, Any],
+                              idle_seconds: float) -> Optional[str]:
+        """
+        Generate ambient in-world narration during idle periods.
+
+        Only called if supports_ambient_narration() returns True.
+
+        Args:
+            ui_state:      Current state snapshot.
+            idle_seconds:  Seconds since last user interaction.
+
+        Returns:
+            Ambient narration text, or None to stay silent.
+        """
+        return None
+
+    # =====================================================================
+    # VIII. INPUT PREPROCESSING (Optional — must run AFTER escape hatches)
+    # =====================================================================
+
+    def preprocess_user_input(self, transcript: str) -> str:
+        """
+        Transform user speech before it reaches the LLM command parser.
+
+        Runs AFTER wake/exit phrase detection AND after escape hatch
+        interception — those are immutably owned by audio_cli and are
+        never affected by this hook.
+
+        Use cases:
+          - Normalize archaic/in-universe speech to command equivalents
+            ("issue decree" → "advance_day", "consult the ledger" → "show finance")
+          - Expand domain abbreviations
+          - Strip filler words specific to the persona's speech register
+
+        IMPORTANT: This is a text→text transform.  The returned string
+        replaces the original transcript for LLM parsing.  Return the
+        input unchanged for a no-op.
+
+        Only called if get_capabilities().get("input_preprocessing") is True.
+
+        Args:
+            transcript: Raw STT transcript (already past escape hatch check).
+
+        Returns:
+            Preprocessed transcript string.
+        """
+        return transcript
+
+    # =====================================================================
+    # METADATA (Optional)
+    # =====================================================================
+
+    def get_display_name(self) -> str:
+        """Human-readable persona name for status display."""
+        return self.__class__.__name__
+
+    def get_description(self) -> str:
+        """Short description of this persona's character."""
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Audio Persona Registry
+# ---------------------------------------------------------------------------
+
+class AudioPersonaRegistry:
+    """
+    Global registry for audio personas.
+
+    Mirrors MetaPluginRegistry from bookmark.py.
+    Personas are discovered from plugins/meta/*.py alongside meta plugins.
+    A meta plugin module can export AUDIO_PERSONA_CLASS to register an
+    audio persona that pairs with its MetaPluginBase implementation.
+    """
+
+    def __init__(self):
+        self._personas: Dict[str, type] = {}
+        self._active: Optional[AudioPersonaBase] = None
+        self._active_name: str = ""
+
+    def register(self, name: str, persona_class: type) -> None:
+        """Register an audio persona class."""
+        name = name.strip().lower()
+        if not issubclass(persona_class, AudioPersonaBase):
+            raise TypeError(
+                f"Audio persona '{name}' must inherit from AudioPersonaBase"
+            )
+        self._personas[name] = persona_class
+        _log(f"Registered audio persona: {name}")
+
+    def load(self, name: str, audio_cli_context: Dict[str, Any]) -> AudioPersonaBase:
+        """Load and initialize an audio persona."""
+        name = name.strip().lower()
+        if name not in self._personas:
+            raise ValueError(
+                f"Audio persona '{name}' not found. "
+                f"Available: {list(self._personas.keys())}"
+            )
+
+        # Shut down previous persona cleanly
+        if self._active is not None:
+            try:
+                self._active.shutdown()
+            except Exception as e:
+                _log(f"Error shutting down persona '{self._active_name}': {e}")
+
+        persona_class = self._personas[name]
+        instance = persona_class()
+        # Defensive shallow copy — persona receives a snapshot, not the
+        # live mutable dict.  Prevents accidental mutation of session state
+        # by persona code.  (audio_cli owns session state exclusively.)
+        frozen_context = dict(audio_cli_context)
+        instance.initialize(frozen_context)
+        self._active = instance
+        self._active_name = name
+        _log(f"Loaded audio persona: {name} ({instance.get_display_name()})")
+        return instance
+
+    def unload(self) -> None:
+        """Deactivate the current persona, returning to default Audio CLI voice."""
+        if self._active is not None:
+            try:
+                self._active.shutdown()
+            except Exception as e:
+                _log(f"Error shutting down persona '{self._active_name}': {e}")
+            old_name = self._active_name
+            self._active = None
+            self._active_name = ""
+            _log(f"Unloaded audio persona: {old_name}. Default voice restored.")
+
+    def get_active(self) -> Optional[AudioPersonaBase]:
+        """Get the currently active audio persona (or None for default)."""
+        return self._active
+
+    @property
+    def active_name(self) -> str:
+        """Name of the active persona, or '' for default."""
+        return self._active_name
+
+    def available(self) -> List[str]:
+        """List registered audio persona names."""
+        return list(self._personas.keys())
+
+    def has(self, name: str) -> bool:
+        """Check if a persona is registered."""
+        return name.strip().lower() in self._personas
+
+
+# Global audio persona registry
+AUDIO_PERSONA_REGISTRY = AudioPersonaRegistry()
+
+
+def load_audio_personas(plugin_dir: str) -> None:
+    """
+    Scan plugins/meta/*.py for AUDIO_PERSONA_CLASS exports and register them.
+
+    Called during Audio CLI initialization.  Each meta plugin module can
+    optionally export:
+        AUDIO_PERSONA_CLASS = MyPersonaClass  (must inherit AudioPersonaBase)
+        AUDIO_PERSONA_NAME  = "oracle_kingdom"  (optional; defaults to module name)
+
+    This is the audio-side counterpart of bookmark.load_meta_plugins().
+    """
+    import importlib.util as _imp_util
+    import glob as _glob
+
+    meta_dir = os.path.join(plugin_dir, "meta")
+    pattern = os.path.join(meta_dir, "*.py")
+    _log(f"Scanning for audio personas in: {pattern}")
+
+    if not os.path.exists(meta_dir):
+        _log(f"Meta plugin directory not found at {meta_dir}")
+        return
+
+    files = _glob.glob(pattern)
+    _log(f"Found meta files for persona scan: {[os.path.basename(f) for f in files]}")
+
+    for path in files:
+        mod_name = os.path.splitext(os.path.basename(path))[0]
+        if mod_name.startswith("__"):
+            continue
+
+        try:
+            spec = _imp_util.spec_from_file_location(f"meta_persona_{mod_name}", path)
+            mod = _imp_util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            persona_cls = getattr(mod, "AUDIO_PERSONA_CLASS", None)
+            if persona_cls is None:
+                continue
+
+            if not isinstance(persona_cls, type) or not issubclass(persona_cls, AudioPersonaBase):
+                _log(f"WARNING: {mod_name}.AUDIO_PERSONA_CLASS is not an AudioPersonaBase subclass — skipping")
+                continue
+
+            persona_name = getattr(mod, "AUDIO_PERSONA_NAME", mod_name).strip().lower()
+            AUDIO_PERSONA_REGISTRY.register(persona_name, persona_cls)
+
+        except Exception as e:
+            _log(f"Error loading audio persona from {mod_name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Escape hatch phrases — ALWAYS intercepted by audio_cli, never delegated
+# ---------------------------------------------------------------------------
+ESCAPE_PHRASES = frozenset({
+    "exit persona",
+    "reset voice",
+    "normal mode",
+    "default voice",
+    "drop persona",
+    "drop character",
+    "exit character",
+    "radio default",
+    "radio normal",
+})
+
+
+def _is_escape_phrase(transcript_lower: str) -> bool:
+    """Check if transcript contains an escape hatch phrase."""
+    return any(phrase in transcript_lower for phrase in ESCAPE_PHRASES)
+
 
 # ---------------------------------------------------------------------------
 # Browser window controller (open / close the web UI in the system browser)
@@ -326,7 +820,7 @@ OUTPUT FORMAT
 "mode": "audio_cli",
 "actions": [
 {
-"type": "click | navigate | input | select | start | stop | open | close | back | wait | switch_mode | switch_context | start_game | show_browser | hide_browser | play_audio | stop_audio | mute_audio | list_plugins | toggle_feed | configure_feed | plugin_command | open_plugin_ui | restart_app | audio_keyboard | set_audio_mode | set_verbosity",
+"type": "click | navigate | input | select | start | stop | open | close | back | wait | switch_mode | switch_context | start_game | show_browser | hide_browser | play_audio | stop_audio | mute_audio | list_plugins | toggle_feed | configure_feed | plugin_command | open_plugin_ui | restart_app | audio_keyboard | set_audio_mode | set_verbosity | load_persona | unload_persona",
 "target": "string_identifier",
 "params": { },
 "condition": "always | if_success | if_fail"
@@ -809,6 +1303,8 @@ Once the audio keyboard is active, the session enters dictation mode:
    - User says "yes", "confirm", "correct", "that's right" → text is submitted.
    - User says "no", "try again", "redo", "wrong" → buffer is cleared, user
      dictates again.
+   - User says "clear text", "clear", "start over", "erase" → buffer is cleared,
+     user can dictate fresh text.
    - User says "cancel", "back out", "never mind", "exit keyboard" → keyboard
      deactivates, no text submitted.
 4. After successful confirmation, the keyboard deactivates and the text is applied
@@ -1047,12 +1543,6 @@ Calmly restate where the user is
 
 Restate available options
 
-If silence exceeds threshold (~77 seconds):
-
-Re-describe current location and options
-
-Do not sound urgent
-
 NARRATION STYLE
 
 Procedural
@@ -1096,6 +1586,27 @@ Do not apologize conversationally.
 Narrate current state.
 
 Re-offer available actions.
+
+AUDIO PERSONA
+
+When a station starts that has a paired audio persona, the Audio CLI voice
+may adopt a themed personality.  The persona overlay (if any) will appear
+as an addendum to this system prompt.
+
+The UI state may contain:
+  "audio_persona": {"name": "...", "display_name": "...", "description": "..."}
+
+When a persona is active:
+  - Adopt its narration style while STILL outputting valid JSON
+  - Keep all escape hatches working (hey radio, thanks radio, exit persona)
+  - The user can say "exit persona", "reset voice", "normal mode",
+    "default voice", or "radio default" to drop the persona
+
+To load a persona:
+  {"type": "load_persona", "target": "<persona_name>"}
+
+To unload:
+  {"type": "unload_persona", "target": ""}
 
 TERMINATION CONDITION
 
@@ -3401,9 +3912,18 @@ class CommandParser:
                 compact[k] = v
         return compact
 
-    def parse(self, transcript: str, ui_state: Dict[str, Any]) -> CLIResponse:
+    def parse(self, transcript: str, ui_state: Dict[str, Any],
+              persona_prompt_overlay: str = "") -> CLIResponse:
         """
         Send user transcript + UI state to LLM, return structured response.
+
+        Args:
+            transcript: User's spoken text.
+            ui_state:   Current UI/game state dict.
+            persona_prompt_overlay: Optional system prompt addendum from the
+                active AudioPersona.  Appended to SYSTEM_PROMPT so the LLM
+                adopts the persona's voice while keeping the structural
+                command format intact.
         """
         self._ensure_provider()
 
@@ -3437,10 +3957,23 @@ class CommandParser:
         }.get(verbosity, 400)
 
         try:
+            # Compose system prompt: core + persona overlay (if any)
+            effective_system_prompt = SYSTEM_PROMPT
+            if persona_prompt_overlay:
+                effective_system_prompt += (
+                    "\n\n"
+                    "# ── PERSONA OVERLAY ──\n"
+                    "The following personality instructions augment your voice and "
+                    "narration style.  You MUST still output valid JSON in the exact "
+                    "OUTPUT FORMAT above.  The persona shapes HOW you narrate, not "
+                    "WHAT actions are valid.\n\n"
+                    f"{persona_prompt_overlay}"
+                )
+
             raw = self._provider.generate(
                 model=self._model,
                 prompt=user_prompt,
-                system=SYSTEM_PROMPT,
+                system=effective_system_prompt,
                 num_predict=_token_budget,
                 temperature=0.1,
                 timeout=30,
@@ -5452,7 +5985,6 @@ class AudioCLISession:
       - Mic listening (wake detection + command capture)
       - Session state (inactive / active / speaking)
       - Audio ducking signaling
-      - Silence timeout re-narration
 
     Supports two modes:
       - **tkinter mode** (default): pass a RadioShell instance.
@@ -5546,10 +6078,170 @@ class AudioCLISession:
         # Speaker-mode settle flag for the main session listen cycle
         self._session_just_spoke = False
 
+        # Audio persona — loaded when a station with a paired persona starts.
+        # The persona reshapes narration style/voice; escape hatches remain
+        # immutably owned by this class.
+        self._persona: Optional[AudioPersonaBase] = None
+        self._persona_name: str = ""
+
+        # Discover available audio personas from plugins/meta/
+        self._discover_personas()
+
         # Callbacks for shell integration
         self.on_session_start: Optional[Callable] = None
         self.on_session_end: Optional[Callable] = None
         self.on_status_change: Optional[Callable[[str], None]] = None
+
+    # -------------------------------------------------------------------
+    # Audio Persona management
+    # -------------------------------------------------------------------
+    def _discover_personas(self) -> None:
+        """Scan plugins/meta/ for audio personas at startup."""
+        # Determine plugins dir relative to this file or RADIO_OS_ROOT
+        root = os.environ.get("RADIO_OS_ROOT", "")
+        if not root:
+            root = os.path.dirname(os.path.abspath(__file__))
+        plugins_dir = os.environ.get("RADIO_OS_PLUGINS", os.path.join(root, "plugins"))
+        load_audio_personas(plugins_dir)
+
+    def load_persona(self, name: str, ui_state: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Activate an audio persona by name.
+
+        Args:
+            name:     Persona name (e.g. "ok_narrator_plugin", "oracle_kingdom").
+            ui_state: Current UI state (optional, used for context).
+
+        Returns:
+            Narration string confirming the activation.
+        """
+        name_lower = name.strip().lower()
+        if not AUDIO_PERSONA_REGISTRY.has(name_lower):
+            avail = AUDIO_PERSONA_REGISTRY.available()
+            return (f"No audio persona '{name}' found. "
+                    f"Available: {', '.join(avail) if avail else 'none'}.")
+
+        # Build context for persona initialization
+        ctx: Dict[str, Any] = {
+            "station_id": "",
+            "station_name": "",
+            "meta_plugin": name_lower,
+            "verbosity": self._verbosity,
+            "audio_mode": self._audio_mode,
+            "context": self._context,
+            "game_state": (ui_state or {}).get("game_state"),
+        }
+
+        # Try to extract station info from UI state
+        if ui_state:
+            station = ui_state.get("station", {})
+            if station:
+                ctx["station_id"] = station.get("id", "")
+                ctx["station_name"] = station.get("name", "")
+
+        try:
+            persona = AUDIO_PERSONA_REGISTRY.load(name_lower, ctx)
+            self._persona = persona
+            self._persona_name = name_lower
+
+            # Merge persona phrase hints into STT
+            hints = persona.get_phrase_hints()
+            if hints:
+                try:
+                    self.stt.add_hints(hints)
+                except AttributeError:
+                    pass  # STT engine may not support dynamic hints
+
+            display = persona.get_display_name()
+            _log(f"Audio persona activated: {display}")
+            return f"Persona activated: {display}. Voice navigation is now in character."
+
+        except Exception as e:
+            _log(f"Failed to load persona '{name}': {e}")
+            return f"Failed to activate persona: {e}"
+
+    def unload_persona(self) -> str:
+        """Deactivate the current persona, restoring default Audio CLI voice."""
+        if self._persona is None:
+            return "No persona is active. Already using default voice."
+
+        old_name = self._persona_name
+        try:
+            self._persona.shutdown()
+        except Exception as e:
+            _log(f"Error shutting down persona '{old_name}': {e}")
+
+        self._persona = None
+        self._persona_name = ""
+        AUDIO_PERSONA_REGISTRY.unload()
+        _log(f"Audio persona deactivated: {old_name}")
+        return f"Persona '{old_name}' deactivated. Default radio voice restored."
+
+    def _try_auto_load_persona(self, ui_state: Dict[str, Any]) -> None:
+        """
+        After a station starts, check if it has a paired audio persona
+        and auto-load it.
+
+        The mapping is: station manifest "meta_plugin" value → persona name.
+        For example, a station with meta_plugin="oracle_kingdom" will look
+        for an audio persona registered as "ok_narrator_plugin" or
+        "oracle_kingdom".
+
+        Also tries common name variations (underscored, hyphenated, etc.).
+        """
+        # Get the meta_plugin name from the current station info
+        meta_plugin = ""
+
+        # Try from station info in UI state
+        stations = ui_state.get("stations") or []
+        for st in stations:
+            if st.get("running"):
+                meta_plugin = st.get("meta_plugin", "")
+                break
+
+        if not meta_plugin:
+            # Try from station manifest
+            station = ui_state.get("station") or {}
+            meta_plugin = station.get("meta_plugin", "")
+
+        if not meta_plugin or meta_plugin == "radio_station":
+            # Default radio station doesn't need a persona
+            return
+
+        # Try to find a matching persona — try several name patterns
+        meta_lower = meta_plugin.strip().lower()
+        candidates = [
+            meta_lower,
+            meta_lower.replace(" ", "_"),
+            meta_lower.replace("-", "_"),
+            f"{meta_lower}_narrator_plugin",
+        ]
+
+        # Also try the meta plugin module name variations
+        # e.g. "oracle kingdom" → "ok_narrator_plugin"
+        words = meta_lower.split("_")
+        if len(words) >= 2:
+            initials = "".join(w[0] for w in words if w)
+            candidates.append(f"{initials}_narrator_plugin")
+
+        for name in candidates:
+            if AUDIO_PERSONA_REGISTRY.has(name):
+                result = self.load_persona(name, ui_state)
+                _log(f"Auto-loaded persona '{name}' for meta_plugin '{meta_plugin}': {result}")
+                return
+
+        _log(f"No audio persona found for meta_plugin '{meta_plugin}' "
+             f"(tried: {candidates})")
+
+    @property
+    def persona(self) -> Optional[AudioPersonaBase]:
+        """The active audio persona, or None."""
+        return self._persona
+
+    @property
+    def persona_name(self) -> str:
+        """Name of the active persona, or ''."""
+        return self._persona_name
 
     @property
     def is_active(self) -> bool:
@@ -5986,29 +6678,6 @@ class AudioCLISession:
             self._audio_keyboard_listen_cycle()
             return
 
-        # Check silence timeout — but only if the mic has no speech energy
-        # right now.  If the user is mid-utterance (e.g. saying "thanks
-        # radio") we must capture & transcribe first so we don't fire a
-        # long re-narration over their exit phrase.
-        elapsed = time.time() - self._last_interaction_ts
-        if elapsed >= SILENCE_TIMEOUT_SEC:
-            # Peek at current mic energy — skip timeout if user is speaking
-            mic_has_speech = False
-            if self._mic and self._mic.is_open:
-                try:
-                    rms = self._mic.current_rms(window_sec=0.3)
-                    mic_has_speech = rms >= SILENCE_THRESHOLD
-                except Exception:
-                    pass
-
-            if not mic_has_speech:
-                self._handle_silence_timeout()
-                # _handle_silence_timeout speaks — return so the next cycle
-                # starts fresh rather than processing stale buffer audio
-                # captured during the narration.
-                self._session_just_spoke = True
-                return
-
         # After a speaker-mode speak() the ring buffer was drained — let it
         # refill before polling for speech.
         needs_settle = (self._session_just_spoke
@@ -6035,25 +6704,65 @@ class AudioCLISession:
 
         _log(f"User said: '{transcript}'")
 
-        # Check for exit phrase
+        # Check for exit phrase — ESCAPE HATCH, never overridden by persona
         if EXIT_PHRASE in transcript.lower().strip():
             # Mark inactive immediately so no silence-timeout or other
             # cycle can fire while the goodbye TTS plays.
             self.active = False
+
+            # Persona farewell (themed) or default
+            farewell = "Exiting Audio CLI."
+            if self._persona:
+                try:
+                    custom = self._persona.get_farewell()
+                    if custom:
+                        farewell = custom
+                except Exception:
+                    pass
+
             exit_response = CLIResponse(
                 actions=[],
-                narration="Exiting Audio CLI.",
+                narration=farewell,
             )
             self.narration.speak(exit_response.narration)
             self._end_session()
             return
 
+        # Check for persona escape hatch phrases — ALWAYS owned by audio_cli
+        if self._persona and _is_escape_phrase(transcript.lower().strip()):
+            result = self.unload_persona()
+            self.narration.speak(result)
+            self._session_just_spoke = True
+            self._update_status("Listening...")
+            return
+
+        # Persona input preprocessing — runs AFTER escape hatches, BEFORE LLM.
+        # The persona can map in-universe phrases to standard commands here
+        # (e.g. "consult the ledger" → "show finance").
+        if self._persona:
+            try:
+                caps = self._persona.get_capabilities()
+                if caps.get("input_preprocessing"):
+                    preprocessed = self._persona.preprocess_user_input(transcript)
+                    if isinstance(preprocessed, str) and preprocessed:
+                        transcript = preprocessed
+            except Exception as e:
+                _log(f"Persona input preprocessing error: {e}")
+
         # Get current UI state (thread-safe via queue)
         self._update_status("Processing...")
         ui_state = self._get_ui_state_safe()
 
+        # Build persona system prompt overlay (if persona active)
+        persona_overlay = ""
+        if self._persona:
+            try:
+                persona_overlay = self._persona.get_system_prompt_overlay()
+            except Exception as e:
+                _log(f"Persona prompt overlay error: {e}")
+
         # Send to LLM
-        response = self.parser.parse(transcript, ui_state)
+        response = self.parser.parse(transcript, ui_state, persona_overlay)
 
         # Execute actions
         if response.actions:
@@ -6065,6 +6774,7 @@ class AudioCLISession:
             _SESSION_TYPES = {
                 "switch_mode", "switch_context", "start_game",
                 "set_audio_mode", "set_verbosity",
+                "load_persona", "unload_persona",
             }
 
             session_results: List[str] = []
@@ -6082,6 +6792,10 @@ class AudioCLISession:
                         r = self.set_audio_mode(act.target or "")
                     elif act.type == "set_verbosity":
                         r = self.set_verbosity(act.target or "")
+                    elif act.type == "load_persona":
+                        r = self.load_persona(act.target or "", ui_state)
+                    elif act.type == "unload_persona":
+                        r = self.unload_persona()
                     else:
                         r = ""
                     _log(f"{act.type} → {r}")
@@ -6115,6 +6829,17 @@ class AudioCLISession:
                     self._session_just_spoke = True
                     return
 
+                # ── Auto-load audio persona on station start ──
+                # If one of the dispatched actions was "start", check whether
+                # the started station has a paired audio persona and load it.
+                started_station = False
+                for act in remaining_actions:
+                    if act.type == "start":
+                        started_station = True
+                        break
+                if started_station:
+                    self._try_auto_load_persona(ui_state)
+
             # ── Build narration from execution results ──
             # Filter out internal signals and "Waited X seconds" filler
             action_descriptions = [
@@ -6140,7 +6865,7 @@ class AudioCLISession:
             except Exception:
                 pass
 
-        # Narrate (apply verbosity formatting)
+        # Narrate (apply verbosity formatting + persona reshaping)
         if response.narration:
             self._update_status("Speaking...")
             formatted = format_response(
@@ -6149,6 +6874,16 @@ class AudioCLISession:
                 self._verbosity,
                 intent=transcript,
             )
+
+            # Persona narration reshaping
+            if self._persona:
+                try:
+                    formatted = self._persona.reshape_narration(
+                        formatted, ui_state, self._verbosity
+                    )
+                except Exception:
+                    pass
+
             self.narration.speak(formatted)
             self._session_just_spoke = True
 
@@ -6169,7 +6904,7 @@ class AudioCLISession:
         self._update_status(f"Audio KB: {field}")
         self.narration.speak(
             f"Audio keyboard active for {field}. Speak your text. "
-            "Say enter when done, or cancel to back out."
+            "Say enter when done, clear text to start over, or cancel to back out."
         )
 
     def _deactivate_audio_keyboard(self, reason: str = "cancelled") -> None:
@@ -6197,29 +6932,6 @@ class AudioCLISession:
         # cycle so that _capture_until_silence lets the buffer refill.
         just_spoke = self._audio_kb_just_spoke
         self._audio_kb_just_spoke = False
-
-        # Check silence timeout — in keyboard mode, just nudge.
-        # Skip if mic already has speech energy (user is talking).
-        elapsed = time.time() - self._last_interaction_ts
-        if elapsed >= SILENCE_TIMEOUT_SEC:
-            mic_has_speech = False
-            if self._mic and self._mic.is_open:
-                try:
-                    rms = self._mic.current_rms(window_sec=0.3)
-                    mic_has_speech = rms >= SILENCE_THRESHOLD
-                except Exception:
-                    pass
-
-            if not mic_has_speech:
-                self._last_interaction_ts = time.time()
-                self.narration.speak(
-                    f"Audio keyboard for {self._audio_kb_target}. "
-                    f"Current text: {self._audio_kb_buffer or 'empty'}. "
-                    "Keep speaking, say enter when done, or cancel to exit."
-                )
-                # Return so the next cycle starts fresh after the narration
-                self._audio_kb_just_spoke = True
-                return
 
         # Capture speech — after a speaker-mode speak() we need to let the
         # ring buffer refill with real audio before checking for speech.
@@ -6299,8 +7011,9 @@ class AudioCLISession:
             self._update_status("Listening...")
             return
 
-        clear_phrases = ("clear", "clear all", "start over", "erase",
-                         "delete all", "wipe")
+        clear_phrases = ("clear", "clear all", "clear text", "clear the text",
+                         "start over", "erase", "erase all", "erase text",
+                         "delete all", "delete text", "wipe", "wipe text")
         if any(text_lower.strip() == p for p in clear_phrases):
             self._audio_kb_buffer = ""
             self.narration.speak("Text cleared. Speak your text.")
@@ -6407,8 +7120,39 @@ class AudioCLISession:
         except Exception:
             pass
 
-        initial_narration = self._build_initial_narration(ui_state)
+        # Merge persona phrase hints if active
+        if self._persona:
+            try:
+                hints = self._persona.get_phrase_hints()
+                if hints:
+                    self.stt.add_hints(hints)
+            except Exception:
+                pass
+
+        # Build greeting — persona can override
+        persona_greeting = None
+        if self._persona:
+            try:
+                persona_greeting = self._persona.get_greeting(ui_state)
+            except Exception as e:
+                _log(f"Persona greeting error: {e}")
+
+        if persona_greeting:
+            initial_narration = persona_greeting
+        else:
+            initial_narration = self._build_initial_narration(ui_state)
+
         formatted = format_response(initial_narration, ui_state, self._verbosity)
+
+        # Persona narration reshaping
+        if self._persona:
+            try:
+                formatted = self._persona.reshape_narration(
+                    formatted, ui_state, self._verbosity
+                )
+            except Exception:
+                pass
+
         self.narration.speak(formatted)
         self._session_just_spoke = True
         self._update_status("Listening...")
@@ -6437,16 +7181,6 @@ class AudioCLISession:
                 self.on_session_end()
             except Exception:
                 pass
-
-    def _handle_silence_timeout(self) -> None:
-        """Re-describe current state after silence timeout."""
-        _log(f"Silence timeout ({SILENCE_TIMEOUT_SEC}s) — re-narrating.")
-        self._last_interaction_ts = time.time()  # Reset timer
-
-        ui_state = self._get_ui_state_safe()
-        narration = self._build_state_narration(ui_state)
-        formatted = format_response(narration, ui_state, self._verbosity)
-        self.narration.speak(formatted)
 
     # -----------------------------------------------------------------------
     # Audio capture helpers (read from persistent MicStream)
@@ -6567,6 +7301,16 @@ class AudioCLISession:
         # Inject active context so the LLM knows where commands will go
         state["active_context"] = self._context
         state["game_port"] = self._game_port
+
+        # Inject active persona info so the LLM knows the voice character
+        if self._persona:
+            state["audio_persona"] = {
+                "name": self._persona_name,
+                "display_name": self._persona.get_display_name(),
+                "description": self._persona.get_description(),
+            }
+        else:
+            state["audio_persona"] = None
 
         # When in game context, always fetch fresh game state directly from
         # the game server (port 7555) instead of relying on the runtime's

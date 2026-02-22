@@ -49,8 +49,8 @@ class WebBridge:
     # All valid in-game tab IDs (must match App.svelte tab list)
     VALID_TABS = {
         "dashboard", "team", "car", "development", "raceops", "pbp",
-        "finance", "sponsors", "stats", "analytics", "career",
-        "calendar", "ai", "penalties", "history", "data",
+        "finance", "sponsors", "promotion", "stats", "analytics", "career",
+        "calendar", "ai", "penalties", "history", "help", "data",
     }
 
     def __init__(self):
@@ -260,6 +260,30 @@ def _part_cost(part) -> int:
     return int(cost)
 
 
+def _part_is_tier_compatible(part, team_tier: Optional[int]) -> bool:
+    """Return True when a part can be used by the given team tier."""
+    if team_tier is None:
+        return True
+    try:
+        tier = int(team_tier)
+    except Exception:
+        return True
+
+    tier_min = getattr(part, "tier_minimum", None)
+    tier_max = getattr(part, "tier_maximum", None)
+    if tier_min is None and tier_max is None:
+        return True
+    if tier_min is None:
+        tier_min = tier
+    if tier_max is None:
+        tier_max = tier
+
+    try:
+        return int(tier_min) <= tier <= int(tier_max)
+    except Exception:
+        return True
+
+
 def serialize_part(part) -> Dict[str, Any]:
     """Serialize a Part entity to dict for the web frontend."""
     if part is None:
@@ -277,6 +301,7 @@ def serialize_part(part) -> Dict[str, Any]:
         "id": getattr(part, "part_id", ""),
         "name": getattr(part, "name", "") or getattr(part, "display_name", ""),
         "type": getattr(part, "part_type", ""),
+        "age": int(getattr(part, "age", 0) or 0),
         "quality": overall,
         "cost": _part_cost(part),
         "generation": getattr(part, "generation", 1),
@@ -287,6 +312,477 @@ def serialize_part(part) -> Dict[str, Any]:
     if ratings and isinstance(ratings, dict):
         d["stats"] = {k: round(float(v), 1) for k, v in ratings.items() if isinstance(v, (int, float))}
     return d
+
+
+def _json_safe(value: Any) -> Any:
+    """Best-effort conversion to JSON-safe primitives for event payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "__dict__"):
+        try:
+            return {str(k): _json_safe(v) for k, v in vars(value).items()}
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _build_player_driver_recent_results(state, per_driver: int = 6) -> List[Dict[str, Any]]:
+    """Return recent race finishes for each player-team driver (newest first)."""
+    team = getattr(state, "player_team", None)
+    if not team:
+        return []
+
+    driver_names = [getattr(d, "name", "") for d in (getattr(team, "drivers", None) or []) if d]
+    driver_names = [name for name in driver_names if name]
+    if not driver_names:
+        return []
+
+    team_name = getattr(team, "name", "")
+    results_by_driver: Dict[str, List[Dict[str, Any]]] = {name: [] for name in driver_names}
+    seen_keys: Set[str] = set()
+
+    def _is_full() -> bool:
+        return all(len(rows) >= per_driver for rows in results_by_driver.values())
+
+    def _append_result(driver: str, row: Dict[str, Any], uniq_key: str) -> None:
+        if driver not in results_by_driver:
+            return
+        if len(results_by_driver[driver]) >= per_driver:
+            return
+        if uniq_key in seen_keys:
+            return
+        seen_keys.add(uniq_key)
+        results_by_driver[driver].append(row)
+
+    # 1) Primary source: full in-memory event history.
+    for evt in reversed(getattr(state, "event_history", []) or []):
+        category = getattr(evt, "category", "") or getattr(evt, "event_type", "")
+        if category != "race_result":
+            continue
+
+        data = getattr(evt, "data", {}) or {}
+        event_team = str(data.get("team") or data.get("team_name") or data.get("player_team_name") or "")
+        driver = str(data.get("driver") or "")
+        if event_team != team_name or driver not in results_by_driver:
+            continue
+
+        tick = int(getattr(evt, "ts", 0) or 0)
+        round_number = int(data.get("round_number", 0) or 0)
+        track_name = str(data.get("track_name") or "")
+        position = int(data.get("position", 0) or 0)
+        points = float(data.get("points", 0) or 0)
+        status = str(data.get("status") or "finished")
+        uniq = f"evt:{driver}:{tick}:{round_number}:{track_name}:{position}:{status}"
+
+        _append_result(
+            driver,
+            {
+                "tick": tick,
+                "season": int(getattr(state, "season_number", 0) or 0),
+                "round": round_number,
+                "driver": driver,
+                "position": position,
+                "points": points,
+                "status": status,
+                "track_name": track_name,
+                "league_id": str(data.get("league_id") or ""),
+                "league_name": str(data.get("league_name") or ""),
+            },
+            uniq,
+        )
+        if _is_full():
+            break
+
+    # 2) Fallback: archived race results DB (helps older saves with trimmed event history).
+    if not _is_full():
+        db_path = getattr(state, "state_db_path", None)
+        if db_path:
+            try:
+                from plugins import ftb_state_db
+
+                archive_rows = ftb_state_db.query_race_results(
+                    db_path=db_path,
+                    limit=max(80, per_driver * 16)
+                )
+                for race in archive_rows:
+                    if str(race.get("player_team_name", "")) != team_name:
+                        continue
+                    finish_positions = race.get("finish_positions", []) or []
+                    for finish in finish_positions:
+                        if str(finish.get("team", "")) != team_name:
+                            continue
+                        driver = str(finish.get("driver", ""))
+                        if driver not in results_by_driver:
+                            continue
+                        if len(results_by_driver[driver]) >= per_driver:
+                            continue
+                        round_number = int(race.get("round_number", 0) or 0)
+                        season = int(race.get("season", 0) or 0)
+                        track_name = str(race.get("track_name") or "")
+                        tick = int(race.get("tick", 0) or 0)
+                        position = int(finish.get("position", 0) or 0)
+                        status = str(finish.get("status") or "finished")
+                        uniq = f"db:{race.get('race_id', '')}:{driver}:{position}:{status}"
+                        _append_result(
+                            driver,
+                            {
+                                "tick": tick,
+                                "season": season,
+                                "round": round_number,
+                                "driver": driver,
+                                "position": position,
+                                "points": 0.0,
+                                "status": status,
+                                "track_name": track_name,
+                                "league_id": str(race.get("league_id") or ""),
+                                "league_name": "",
+                            },
+                            uniq,
+                        )
+                    if _is_full():
+                        break
+            except Exception:
+                pass
+
+    return [{"name": name, "results": results_by_driver.get(name, [])} for name in driver_names]
+
+
+def _serialize_promotion_opportunities(state) -> List[Dict[str, Any]]:
+    """Return player-team promotion opportunities in a stable JSON shape."""
+    team = getattr(state, "player_team", None)
+    if not team:
+        return []
+    team_name = getattr(team, "name", "")
+    now_tick = int(getattr(state, "tick", 0) or 0)
+
+    out: List[Dict[str, Any]] = []
+    for opp in (getattr(state, "promotion_opportunities", None) or []):
+        if not isinstance(opp, dict):
+            continue
+        if str(opp.get("team", "")) != team_name:
+            continue
+        row = _json_safe(opp)
+        status = str(row.get("status", "open")).lower()
+        expires_tick = int(row.get("expires_tick", 0) or 0)
+        if status == "open" and expires_tick and now_tick > expires_tick:
+            status = "expired"
+        row["status"] = status
+        out.append(row)
+
+    out.sort(key=lambda r: int(r.get("created_tick", 0) or 0), reverse=True)
+    return out
+
+
+def _build_play_by_play_history(state, limit: int = 20) -> List[Dict[str, Any]]:
+    """Return recent race history entries for Play-by-Play tab."""
+    team = getattr(state, "player_team", None)
+    if not team:
+        return []
+    team_name = getattr(team, "name", "")
+    rows: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+
+    def _append(row: Dict[str, Any], uniq: str) -> None:
+        if uniq in seen:
+            return
+        seen.add(uniq)
+        rows.append(row)
+
+    # 1) Primary source: race archive DB (stable across long saves).
+    db_path = getattr(state, "state_db_path", None)
+    if db_path:
+        try:
+            from plugins import ftb_state_db
+
+            archived = ftb_state_db.query_race_results(
+                db_path=db_path,
+                limit=max(40, limit * 4)
+            )
+            for race in archived:
+                finish_positions = race.get("finish_positions", []) or []
+                winner_row = next(
+                    (p for p in finish_positions if int(p.get("position", 99) or 99) == 1),
+                    None
+                )
+                player_rows = [p for p in finish_positions if str(p.get("team", "")) == team_name]
+                race_player_team = str(race.get("player_team_name", ""))
+                if not player_rows and race_player_team != team_name:
+                    continue
+                player_best = min(
+                    player_rows,
+                    key=lambda p: int(p.get("position", 999) or 999),
+                    default=None,
+                )
+
+                winner_driver = str(winner_row.get("driver", "—")) if winner_row else "—"
+                winner_team = str(winner_row.get("team", "—")) if winner_row else "—"
+                race_id = str(race.get("race_id") or "")
+                season = int(race.get("season", 0) or 0)
+                round_no = int(race.get("round_number", 0) or 0)
+                track_name = str(race.get("track_name") or "Unknown Circuit")
+
+                _append(
+                    {
+                        "race_id": race_id,
+                        "name": f"S{season} R{round_no} • {track_name}",
+                        "season": season,
+                        "round": round_no,
+                        "track_name": track_name,
+                        "league_id": str(race.get("league_id") or ""),
+                        "tick": int(race.get("tick", 0) or 0),
+                        "winner": f"{winner_driver} ({winner_team})" if winner_driver != "—" else "—",
+                        "winner_driver": winner_driver,
+                        "winner_team": winner_team,
+                        "player_finish": int(player_best.get("position", 0) or 0) if player_best else None,
+                        "player_driver": str(player_best.get("driver", "")) if player_best else "",
+                        "player_status": str(player_best.get("status", "finished")) if player_best else "",
+                    },
+                    race_id or f"db:{season}:{round_no}:{track_name}:{race.get('tick', 0)}",
+                )
+                if len(rows) >= limit:
+                    return rows[:limit]
+        except Exception:
+            pass
+
+    # 2) Fallback: in-memory event history (group per race).
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for evt in reversed(getattr(state, "event_history", []) or []):
+        category = getattr(evt, "category", "") or getattr(evt, "event_type", "")
+        if category != "race_result":
+            continue
+        data = getattr(evt, "data", {}) or {}
+        tick = int(getattr(evt, "ts", 0) or 0)
+        league_id = str(data.get("league_id") or "")
+        season = int(getattr(state, "season_number", 0) or 0)
+        round_no = int(data.get("round_number", 0) or 0)
+        track_name = str(data.get("track_name") or "Unknown Circuit")
+        key = f"mem:{tick}:{league_id}:{round_no}:{track_name}"
+        slot = grouped.setdefault(
+            key,
+            {
+                "race_id": "",
+                "name": f"S{season} R{round_no} • {track_name}",
+                "season": season,
+                "round": round_no,
+                "track_name": track_name,
+                "league_id": league_id,
+                "tick": tick,
+                "entries": [],
+            },
+        )
+        slot["entries"].append(
+            {
+                "driver": str(data.get("driver") or ""),
+                "team": str(data.get("team") or ""),
+                "position": int(data.get("position", 999) or 999),
+                "status": str(data.get("status") or "finished"),
+            }
+        )
+
+    for key in sorted(grouped.keys(), key=lambda k: grouped[k].get("tick", 0), reverse=True):
+        slot = grouped[key]
+        entries = slot.get("entries", []) or []
+        if not entries:
+            continue
+        winner = min(entries, key=lambda e: int(e.get("position", 999) or 999), default=None)
+        player_rows = [e for e in entries if str(e.get("team", "")) == team_name]
+        if not player_rows:
+            continue
+        player_best = min(player_rows, key=lambda e: int(e.get("position", 999) or 999), default=None)
+
+        _append(
+            {
+                "race_id": str(slot.get("race_id", "")),
+                "name": str(slot.get("name", "Race")),
+                "season": int(slot.get("season", 0) or 0),
+                "round": int(slot.get("round", 0) or 0),
+                "track_name": str(slot.get("track_name", "Unknown Circuit")),
+                "league_id": str(slot.get("league_id", "")),
+                "tick": int(slot.get("tick", 0) or 0),
+                "winner": (
+                    f"{winner.get('driver', '—')} ({winner.get('team', '—')})"
+                    if winner else "—"
+                ),
+                "winner_driver": str(winner.get("driver", "—")) if winner else "—",
+                "winner_team": str(winner.get("team", "—")) if winner else "—",
+                "player_finish": int(player_best.get("position", 0) or 0) if player_best else None,
+                "player_driver": str(player_best.get("driver", "")) if player_best else "",
+                "player_status": str(player_best.get("status", "finished")) if player_best else "",
+            },
+            key,
+        )
+        if len(rows) >= limit:
+            break
+
+    return rows[:limit]
+
+
+def _build_play_by_play_telemetry(state, rds, standings: List[Dict[str, Any]], live_events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build flat telemetry fields for the Play-by-Play web tab."""
+    telemetry: Dict[str, Any] = {}
+    phase_obj = getattr(rds, "phase", None)
+    phase_val = getattr(phase_obj, "value", phase_obj) if rds else "idle"
+    telemetry["phase"] = str(phase_val or "idle")
+    telemetry["is_live"] = bool(getattr(rds, "live_race_active", False)) if rds else False
+    telemetry["current_lap"] = int(getattr(rds, "current_lap", 0) or 0) if rds else 0
+    telemetry["total_laps"] = int(getattr(rds, "total_laps", 0) or 0) if rds else 0
+    telemetry["events_logged"] = len(live_events or [])
+    telemetry["cars_in_classification"] = len(standings or [])
+
+    if rds and getattr(rds, "live_race_speed", None):
+        telemetry["race_speed_sec_per_lap"] = round(float(getattr(rds, "live_race_speed", 0) or 0), 2)
+    if rds and getattr(rds, "broadcast_active", None) is not None:
+        telemetry["broadcast_active"] = bool(getattr(rds, "broadcast_active", False))
+
+    leader = standings[0] if standings else None
+    if isinstance(leader, dict):
+        telemetry["leader_driver"] = str(leader.get("driver", ""))
+        telemetry["leader_team"] = str(leader.get("team", ""))
+
+    player_row = next((s for s in (standings or []) if isinstance(s, dict) and s.get("is_player")), None)
+    if isinstance(player_row, dict):
+        telemetry["player_position"] = int(player_row.get("position", 0) or 0)
+        telemetry["player_gap"] = round(float(player_row.get("gap", 0) or 0), 3)
+        telemetry["player_status"] = str(player_row.get("status", "racing"))
+
+    # Pull lap telemetry for player drivers if available in current race result.
+    race_result = getattr(rds, "race_result", None) if rds else None
+    race_tel = getattr(race_result, "telemetry", {}) or {}
+    if isinstance(race_tel, dict) and race_tel:
+        player_drivers = [
+            getattr(d, "name", "")
+            for d in (getattr(getattr(state, "player_team", None), "drivers", None) or [])
+            if d
+        ]
+        player_rows = [race_tel.get(name, {}) for name in player_drivers if isinstance(race_tel.get(name, {}), dict)]
+        if player_rows:
+            fastest = [float(r.get("fastest_lap", 0) or 0) for r in player_rows if r.get("fastest_lap")]
+            avg_laps = [float(r.get("avg_lap_time", 0) or 0) for r in player_rows if r.get("avg_lap_time")]
+            consistency = [float(r.get("consistency_rating", 0) or 0) for r in player_rows if r.get("consistency_rating")]
+            if fastest:
+                telemetry["player_fastest_lap"] = round(min(fastest), 3)
+            if avg_laps:
+                telemetry["player_avg_lap_time"] = round(sum(avg_laps) / len(avg_laps), 3)
+            if consistency:
+                telemetry["player_consistency"] = round(sum(consistency) / len(consistency), 1)
+
+    return telemetry
+
+
+def _build_history_payload(state, race_history: Optional[List[Dict[str, Any]]] = None, limit_each: int = 80) -> Dict[str, Any]:
+    """Return structured history feed for the web History tab."""
+    out: Dict[str, Any] = {
+        "decisions": [],
+        "results": [],
+        "transactions": [],
+    }
+
+    db_path = getattr(state, "state_db_path", None)
+    if db_path:
+        try:
+            from plugins import ftb_state_db
+
+            decisions = ftb_state_db.query_decision_history(db_path=db_path, limit=limit_each)
+            for d in decisions:
+                cost_val = float(d.get("immediate_cost", 0) or 0)
+                detail = str(d.get("chosen_option_label") or "")
+                if cost_val > 0:
+                    detail = f"{detail} • Cost ${cost_val:,.0f}" if detail else f"Cost ${cost_val:,.0f}"
+                out["decisions"].append({
+                    "id": d.get("decision_id"),
+                    "tick": int(d.get("tick", 0) or 0),
+                    "season": int(d.get("season", 0) or 0),
+                    "game_day": int(d.get("game_day", 0) or 0),
+                    "label": str(d.get("category") or "decision").replace("_", " "),
+                    "description": str(d.get("decision_text") or ""),
+                    "detail": detail,
+                    "resolved_by": str(d.get("resolved_by") or ""),
+                })
+
+            txns = ftb_state_db.query_financial_transactions(db_path=db_path, limit=limit_each)
+            for t in txns:
+                amount = float(t.get("amount", 0) or 0)
+                ttype = str(t.get("type") or "").lower()
+                sign = "+" if ttype == "income" else "-"
+                out["transactions"].append({
+                    "id": t.get("transaction_id"),
+                    "tick": int(t.get("tick", 0) or 0),
+                    "season": int(t.get("season", 0) or 0),
+                    "game_day": int(t.get("game_day", 0) or 0),
+                    "label": f"{ttype or 'transaction'} • {str(t.get('category') or '').replace('_', ' ')}",
+                    "description": str(t.get("description") or ""),
+                    "detail": f"{sign}${abs(amount):,.0f} • Balance ${float(t.get('balance_after', 0) or 0):,.0f}",
+                    "amount": amount,
+                    "type": ttype,
+                    "category": str(t.get("category") or ""),
+                })
+        except Exception:
+            pass
+
+    # Race history is available either from caller or fresh build.
+    history_rows = race_history if isinstance(race_history, list) else _build_play_by_play_history(state, limit=limit_each)
+    for r in history_rows[:limit_each]:
+        pf = r.get("player_finish")
+        pf_text = f"P{pf}" if isinstance(pf, int) and pf > 0 else "—"
+        detail = f"Your finish: {pf_text}"
+        if r.get("player_driver"):
+            detail += f" ({r.get('player_driver')})"
+        out["results"].append({
+            "id": r.get("race_id") or f"{r.get('tick', 0)}:{r.get('track_name', '')}",
+            "tick": int(r.get("tick", 0) or 0),
+            "season": int(r.get("season", 0) or 0),
+            "game_day": None,
+            "label": r.get("name") or f"S{r.get('season', 0)} R{r.get('round', 0)}",
+            "description": f"Winner: {r.get('winner', '—')}",
+            "detail": detail,
+            "player_finish": r.get("player_finish"),
+        })
+
+    # Event-history fallback for decisions/results if DB isn't available yet.
+    if not out["decisions"] or not out["results"]:
+        player_team = getattr(state, "player_team", None)
+        player_team_name = str(getattr(player_team, "name", "") or "")
+        for evt in reversed(getattr(state, "event_history", []) or []):
+            tick = int(getattr(evt, "ts", 0) or 0)
+            category = str(getattr(evt, "category", "") or "").lower()
+            event_type = str(getattr(evt, "event_type", "") or "").lower()
+            desc = str(getattr(evt, "description", "") or str(evt))
+            data = getattr(evt, "data", {}) or {}
+            key = f"{event_type}:{category}"
+
+            if (not out["results"]) and (category == "race_result" or "race" in key):
+                event_team = str(data.get("team") or data.get("team_name") or data.get("player_team_name") or "")
+                if player_team_name and event_team != player_team_name:
+                    continue
+                out["results"].append({
+                    "id": f"evt:{tick}:{category}",
+                    "tick": tick,
+                    "season": int(getattr(state, "season_number", 0) or 0),
+                    "game_day": None,
+                    "label": category or event_type or "race",
+                    "description": desc,
+                    "detail": "",
+                })
+
+            if not out["decisions"]:
+                if any(tok in key for tok in ("decision", "hire", "fire", "contract", "focus", "budget")):
+                    out["decisions"].append({
+                        "id": f"evt:{tick}:{category}",
+                        "tick": tick,
+                        "season": int(getattr(state, "season_number", 0) or 0),
+                        "game_day": None,
+                        "label": category or event_type or "decision",
+                        "description": desc,
+                        "detail": "",
+                    })
+            if len(out["results"]) >= limit_each and len(out["decisions"]) >= limit_each:
+                break
+
+    return out
 
 
 def serialize_team(team, state=None) -> Dict[str, Any]:
@@ -351,21 +847,49 @@ def serialize_team(team, state=None) -> Dict[str, Any]:
         elif hasattr(car, "stats") and isinstance(car.stats, dict):
             d["car"]["stats"] = {k: round(float(v), 1) for k, v in car.stats.items() if isinstance(v, (int, float))}
 
+        def _resolve_part_ref(part_ref: Any):
+            """Resolve a part object or legacy part-id string to a Part."""
+            if part_ref is None:
+                return None
+            if isinstance(part_ref, str):
+                catalog = getattr(state, "parts_catalog", None) if state else None
+                if isinstance(catalog, dict):
+                    return catalog.get(part_ref)
+                return None
+            if hasattr(part_ref, "part_id") or hasattr(part_ref, "part_type"):
+                return part_ref
+            return None
+
+        def _serialize_part_refs(raw_parts: Any) -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+            for part_ref in (raw_parts or []):
+                part_obj = _resolve_part_ref(part_ref)
+                if not part_obj:
+                    continue
+                row = serialize_part(part_obj)
+                if row:
+                    rows.append(row)
+            return rows
+
         # Equipped parts live on the team, not the car: team.equipped_parts is Dict[str, Part]
         equipped = getattr(team, "equipped_parts", None)
-        if equipped and isinstance(equipped, dict):
-            d["car"]["equipped_parts"] = [serialize_part(p) for p in equipped.values() if p]
-        elif equipped and isinstance(equipped, list):
-            d["car"]["equipped_parts"] = [serialize_part(p) for p in equipped if p]
+        if isinstance(equipped, dict):
+            equipped_items = list(equipped.values())
+        elif isinstance(equipped, (list, tuple, set)):
+            equipped_items = list(equipped)
         else:
-            d["car"]["equipped_parts"] = []
+            equipped_items = []
+        d["car"]["equipped_parts"] = _serialize_part_refs(equipped_items)
 
-        # Parts inventory lives on the team: team.parts_inventory is List[Part]
+        # Parts inventory lives on the team but older saves can carry ID strings.
         inventory = getattr(team, "parts_inventory", None)
-        if inventory and isinstance(inventory, list):
-            d["car"]["parts_inventory"] = [serialize_part(p) for p in inventory if p]
+        if isinstance(inventory, (list, tuple, set)):
+            inventory_items = list(inventory)
+        elif isinstance(inventory, dict):
+            inventory_items = list(inventory.values())
         else:
-            d["car"]["parts_inventory"] = []
+            inventory_items = []
+        d["car"]["parts_inventory"] = _serialize_part_refs(inventory_items)
     # Infrastructure (filter out boolean unlock flags — only show numeric facility levels)
     infra = getattr(team, "infrastructure", None)
     if infra:
@@ -379,6 +903,14 @@ def serialize_team(team, state=None) -> Dict[str, Any]:
                 k: float(v) for k, v in vars(infra).items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool) and not k.endswith("_unlocked")
             }
+    # Standing metrics (morale, reputation, legitimacy, etc.)
+    sm = getattr(team, "standing_metrics", None)
+    if isinstance(sm, dict):
+        d["standing_metrics"] = {
+            str(k): round(float(v), 1)
+            for k, v in sm.items()
+            if isinstance(v, (int, float))
+        }
     # R&D projects
     rd = getattr(team, "rd_projects", None) or getattr(team, "active_rd_projects", None) or []
     for proj in rd:
@@ -431,6 +963,7 @@ def serialize_game_state(controller) -> Dict[str, Any]:
         "in_offseason": state.in_offseason,
         "race_day_active": state.race_day_active,
         "races_completed_this_season": state.races_completed_this_season,
+        "state_db_path": getattr(state, "state_db_path", None) or getattr(controller, "state_db_path", None),
     }
 
     # Player team
@@ -478,14 +1011,47 @@ def serialize_game_state(controller) -> Dict[str, Any]:
         sched = getattr(league, "schedule", None)
         if sched and isinstance(sched, list):
             out["leagues"][lname]["schedule"] = []
-            for race in sched:
+            races_done = int(getattr(league, "races_this_season", 0) or 0)
+            tracks_map = getattr(state, "tracks", {}) or {}
+            for idx, race in enumerate(sched):
+                completed_default = idx < races_done
                 if isinstance(race, dict):
-                    out["leagues"][lname]["schedule"].append(race)
+                    tick_val = race.get("tick", race.get("race_tick", 0))
+                    track_id = str(race.get("track_id", ""))
+                    track_name = str(race.get("track_name", ""))
+                    if not track_name and track_id and track_id in tracks_map:
+                        track_name = str(getattr(tracks_map[track_id], "name", track_id))
+                    out["leagues"][lname]["schedule"].append({
+                        "track_name": track_name,
+                        "track_id": track_id,
+                        "tick": int(tick_val or 0),
+                        "completed": bool(race.get("completed", completed_default)),
+                    })
+                elif isinstance(race, (tuple, list)):
+                    tick_val = int(race[0]) if len(race) > 0 and race[0] is not None else 0
+                    track_id = str(race[1]) if len(race) > 1 and race[1] is not None else ""
+                    track_name = ""
+                    if track_id and track_id in tracks_map:
+                        track_name = str(getattr(tracks_map[track_id], "name", track_id))
+                    out["leagues"][lname]["schedule"].append({
+                        "track_name": track_name,
+                        "track_id": track_id,
+                        "tick": tick_val,
+                        "completed": completed_default,
+                    })
+                elif isinstance(race, (int, float)):
+                    out["leagues"][lname]["schedule"].append({
+                        "track_name": "",
+                        "track_id": "",
+                        "tick": int(race),
+                        "completed": completed_default,
+                    })
                 elif hasattr(race, "__dict__"):
                     out["leagues"][lname]["schedule"].append({
                         "track_name": getattr(race, "track_name", ""),
+                        "track_id": getattr(race, "track_id", ""),
                         "tick": getattr(race, "tick", 0),
-                        "completed": getattr(race, "completed", False),
+                        "completed": getattr(race, "completed", completed_default),
                     })
 
     # Free agents (summary for job market)
@@ -504,24 +1070,95 @@ def serialize_game_state(controller) -> Dict[str, Any]:
     if jb:
         listings = getattr(jb, "listings", None) or getattr(jb, "vacancies", [])
         out["job_board"] = []
+        teams_by_name = {
+            getattr(t, "name", ""): t
+            for t in (([state.player_team] if state.player_team else []) + (state.ai_teams or []))
+            if t
+        }
+
+        def _job_field(row: Any, key: str, default: Any = None) -> Any:
+            if isinstance(row, dict):
+                return row.get(key, default)
+            return getattr(row, key, default)
+
+        def _job_role_pool(team_obj: Any, role_text: str) -> List[Any]:
+            if not team_obj:
+                return []
+            role_key = str(role_text or "").strip().lower().replace(" ", "_")
+            if role_key in ("driver", "drivers"):
+                return [d for d in (getattr(team_obj, "drivers", None) or []) if d]
+            if role_key in ("engineer", "engineers"):
+                return [e for e in (getattr(team_obj, "engineers", None) or []) if e]
+            if role_key in ("mechanic", "mechanics"):
+                return [m for m in (getattr(team_obj, "mechanics", None) or []) if m]
+            if role_key in ("strategist",):
+                s = getattr(team_obj, "strategist", None)
+                return [s] if s else []
+            if role_key in ("team_principal", "team principal", "principal", "ai_principal", "aiprincipal"):
+                p = getattr(team_obj, "principal", None)
+                return [p] if p else []
+            return []
+
         for idx, listing in enumerate(listings or []):
+            team_name = str(_job_field(listing, "team_name", "") or "")
+            role = str(_job_field(listing, "role", "") or "")
+            team_obj = teams_by_name.get(team_name)
+            role_pool = _job_role_pool(team_obj, role)
+
+            overall_values = [
+                float(getattr(entity, "overall_rating", 0.0))
+                for entity in role_pool
+                if isinstance(getattr(entity, "overall_rating", None), (int, float))
+            ]
+            age_values = [
+                float(getattr(entity, "age", 0.0))
+                for entity in role_pool
+                if isinstance(getattr(entity, "age", None), (int, float))
+            ]
+
+            listing_overall = round(sum(overall_values) / len(overall_values), 1) if overall_values else 0.0
+            listing_age = round(sum(age_values) / len(age_values), 1) if age_values else 0.0
+
+            salary = _job_field(listing, "salary", None)
+            if salary is None:
+                salary_range = _job_field(listing, "salary_range", [0, 0])
+                if isinstance(salary_range, (list, tuple)) and len(salary_range) >= 2:
+                    salary = (float(salary_range[0] or 0) + float(salary_range[1] or 0)) / 2.0
+                elif isinstance(salary_range, (int, float)):
+                    salary = float(salary_range)
+                else:
+                    salary = 0.0
+
             out["job_board"].append({
                 "id": idx,
-                "team_name": getattr(listing, "team_name", ""),
-                "role": getattr(listing, "role", ""),
-                "salary_range": getattr(listing, "salary_range", [0, 0]),
-                "requirements": getattr(listing, "requirements", ""),
+                "team_name": team_name,
+                "role": role,
+                "salary": int(float(salary or 0)),
+                "overall": listing_overall,
+                "age": listing_age,
+                "created_tick": int(_job_field(listing, "created_tick", 0) or 0),
+                "tier": str(_job_field(listing, "tier", "") or ""),
+                "expectation_band": str(_job_field(listing, "expectation_band", "") or ""),
             })
 
     # Recent events
     out["recent_events"] = []
     for evt in (state.event_history or [])[-30:]:
+        evt_data = getattr(evt, "data", {}) or {}
         out["recent_events"].append({
             "type": getattr(evt, "event_type", ""),
             "description": getattr(evt, "description", str(evt)),
-            "tick": getattr(evt, "tick", 0),
+            "tick": getattr(evt, "tick", getattr(evt, "ts", 0)),
             "category": getattr(evt, "category", ""),
+            "severity": getattr(evt, "severity", "info"),
+            "priority": getattr(evt, "priority", 0),
+            "event_id": getattr(evt, "event_id", 0),
+            "data": _json_safe(evt_data),
         })
+
+    # Stable dashboard feeds (not limited to recent_events window).
+    out["player_driver_recent_results"] = _build_player_driver_recent_results(state, per_driver=6)
+    out["promotion_opportunities"] = _serialize_promotion_opportunities(state)
 
     # Pending decisions
     out["pending_decisions"] = []
@@ -562,16 +1199,21 @@ def serialize_game_state(controller) -> Dict[str, Any]:
             "tick": getattr(p, "tick", 0),
         })
 
-    # Parts marketplace – ensure all part types are represented
-    # Group by part_type, take top N per type sorted by performance, then flatten
+    # Parts marketplace – show only parts compatible with the player's tier.
+    # Group by part_type, take top N per type sorted by performance, then flatten.
     _parts_by_type: Dict[str, list] = defaultdict(list)
     for pid, part in state.parts_catalog.items():
         pt = getattr(part, "part_type", "unknown")
         _parts_by_type[pt].append(part)
     out["parts_marketplace"] = []
+    player_tier = getattr(getattr(state, "player_team", None), "tier", None)
     _per_type_limit = max(8, 60 // max(len(_parts_by_type), 1))
     for ptype in sorted(_parts_by_type.keys()):
         bucket = _parts_by_type[ptype]
+        if player_tier is not None:
+            bucket = [p for p in bucket if _part_is_tier_compatible(p, player_tier)]
+        if not bucket:
+            continue
         # Sort by performance_score descending so best parts show first
         bucket.sort(key=lambda p: getattr(p, "performance_score", 0), reverse=True)
         for part in bucket[:_per_type_limit]:
@@ -762,6 +1404,13 @@ def serialize_game_state(controller) -> Dict[str, Any]:
             })
 
     # ─── Play-by-Play data (built from race_day_state) ────────────
+    pbp_history = _build_play_by_play_history(state, limit=24)
+    pbp_telemetry = _build_play_by_play_telemetry(
+        state=state,
+        rds=rds,
+        standings=out.get("race_day", {}).get("standings", []),
+        live_events=out.get("race_day", {}).get("events", []),
+    )
     out["play_by_play"] = {
         "is_live": rds is not None and getattr(rds, "live_race_active", False),
         "lap_info": {
@@ -770,7 +1419,12 @@ def serialize_game_state(controller) -> Dict[str, Any]:
         },
         "standings": out.get("race_day", {}).get("standings", []),
         "live_events": out.get("race_day", {}).get("events", []),
+        "telemetry": pbp_telemetry,
+        "history": pbp_history,
     }
+
+    # ─── History tab payload ───────────────────────────────────────
+    out["history"] = _build_history_payload(state, race_history=pbp_history, limit_each=80)
 
     # ─── Tracks for marketplace reference ─────────────────────────
     out["tracks"] = {}
@@ -808,6 +1462,47 @@ def _serialize_with_lock(controller) -> Dict[str, Any]:
             controller.state_lock.release()
     except Exception as e:
         return {"status": "no_game", "error": str(e)}
+
+def _build_full_state_payload(state_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand /api/state payload with stable top-level aliases for global refresh."""
+    if not isinstance(state_data, dict):
+        return {"status": "no_game"}
+    if state_data.get("status") != "running":
+        return state_data
+
+    full = dict(state_data)
+    full["current_date"] = state_data.get("date_str", "")
+    full["race_state"] = state_data.get("race_day", {"phase": "idle"})
+    full["team_state"] = state_data.get("player_team")
+
+    leagues = state_data.get("leagues", {})
+    standings: Dict[str, Any] = {}
+    if isinstance(leagues, dict):
+        for lname, league in leagues.items():
+            if not isinstance(league, dict):
+                continue
+            standings[lname] = {
+                "championship_table": league.get("championship_table", {}),
+                "driver_championship": league.get("driver_championship", {}),
+                "races_this_season": league.get("races_this_season", 0),
+            }
+    full["standings"] = standings
+
+    player_team = state_data.get("player_team", {})
+    budget = player_team.get("budget", {}) if isinstance(player_team, dict) else {}
+    full["finances"] = {
+        "cash": budget.get("cash", 0),
+        "weekly_expenses": budget.get("weekly_expenses", 0),
+        "weekly_income": budget.get("weekly_income", 0),
+        "income_streams": state_data.get("income_streams", []),
+    }
+    full["staff"] = {
+        "roster": player_team.get("roster", {}) if isinstance(player_team, dict) else {},
+        "contracts": state_data.get("contracts", {}),
+        "job_board": state_data.get("job_board", []),
+    }
+    full.setdefault("active_decisions", [])
+    return full
 
 def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
     """Build the FastAPI app with all routes."""
@@ -884,6 +1579,19 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         except Exception as e:
             log_fn("web", f"serialize_game_state error: {e}")
             # Return no_game rather than a bare error so the frontend keeps polling
+            return JSONResponse({"status": "no_game", "error": str(e)}, 200)
+
+    @app.get("/api/full_state")
+    async def get_full_state():
+        controller = shared_runtime.get("ftb_controller")
+        if not controller:
+            return JSONResponse({"status": "no_controller"}, 503)
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: _serialize_with_lock(controller))
+            return _build_full_state_payload(data)
+        except Exception as e:
+            log_fn("web", f"full_state error: {e}")
             return JSONResponse({"status": "no_game", "error": str(e)}, 200)
 
     # ──── REST: Current subtitle ────
@@ -1024,6 +1732,7 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
                 {"id": "ai", "label": "🤖 AI"},
                 {"id": "penalties", "label": "⚠️ Penalties"},
                 {"id": "history", "label": "📜 History"},
+                {"id": "help", "label": "❓ Help"},
                 {"id": "data", "label": "🗄️ Data"},
             ]
             screen_info["buttons"] = [
@@ -1088,12 +1797,14 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
             "play_by_play": "pbp", "playbyplay": "pbp", "broadcast": "pbp",
             "money": "finance", "budget": "finance",
             "sponsor": "sponsors", "sponsorships": "sponsors",
+            "promotion": "promotion", "promotions": "promotion",
             "statistics": "stats", "racing_stats": "stats",
             "manager": "career", "manager_career": "career",
             "schedule": "calendar", "dates": "calendar",
             "assistant": "ai", "ai_assistant": "ai", "chat": "ai",
             "penalty": "penalties", "infractions": "penalties",
             "logs": "history", "event_log": "history",
+            "help": "help", "docs": "help", "manual": "help", "guide": "help",
             "explorer": "data", "ftb_data": "data", "database": "data",
         }
         resolved_tab = tab_aliases.get(tab_target, tab_target)
@@ -1359,14 +2070,57 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
         ftb_cmd_q.put({"cmd": "ftb_action", "action": "reject_sponsor", "target": idx})
         return {"status": "queued", "offer_index": idx}
 
-    # ──── REST: Parts Marketplace Actions ────
-    @app.post("/api/parts/buy")
-    async def buy_part(payload: Dict[str, Any]):
+    # ──── REST: Promotion Actions ────
+    @app.post("/api/promotion/apply")
+    async def apply_promotion(payload: Dict[str, Any]):
         ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
         if not ftb_cmd_q:
             return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
-        ftb_cmd_q.put({"cmd": "ftb_purchase_part", "part_id": payload.get("part_id", ""), "cost": payload.get("cost", 0)})
-        return {"status": "queued"}
+        opportunity_id = str(payload.get("opportunity_id", "") or "")
+        ftb_cmd_q.put({"cmd": "ftb_apply_promotion", "opportunity_id": opportunity_id})
+        return {"status": "queued", "opportunity_id": opportunity_id}
+
+    @app.post("/api/promotion/decline")
+    async def decline_promotion(payload: Dict[str, Any]):
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+        opportunity_id = str(payload.get("opportunity_id", "") or "")
+        ftb_cmd_q.put({"cmd": "ftb_decline_promotion", "opportunity_id": opportunity_id})
+        return {"status": "queued", "opportunity_id": opportunity_id}
+
+    # ──── REST: Parts Marketplace Actions ────
+    @app.post("/api/parts/buy")
+    async def buy_part(payload: Dict[str, Any]):
+        controller = shared_runtime.get("ftb_controller")
+        ftb_cmd_q = shared_runtime.get("ftb_cmd_q")
+        if not ftb_cmd_q or not controller or not controller.state:
+            return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
+
+        part_id = str(payload.get("part_id", "") or "").strip()
+        if not part_id:
+            return JSONResponse({"error": "part_id is required"}, 400)
+
+        with controller.state_lock:
+            state = controller.state
+            team = state.player_team if state else None
+            if not team:
+                return JSONResponse({"error": "No player team loaded"}, 409)
+
+            part = state.parts_catalog.get(part_id)
+            if not part:
+                return JSONResponse({"error": f"Part not found: {part_id}"}, 404)
+
+            if not _part_is_tier_compatible(part, getattr(team, "tier", None)):
+                return JSONResponse({"error": "Part is not compatible with your league tier"}, 400)
+
+            # Use authoritative server-side pricing.
+            cost = _part_cost(part)
+            if team.budget.cash < cost:
+                return JSONResponse({"error": "Insufficient funds"}, 400)
+
+        ftb_cmd_q.put({"cmd": "ftb_purchase_part", "part_id": part_id, "cost": cost})
+        return {"status": "queued", "part_id": part_id, "cost": cost}
 
     @app.post("/api/parts/sell")
     async def sell_part(payload: Dict[str, Any]):
@@ -1495,6 +2249,213 @@ def create_app(shared_runtime: Dict[str, Any], bridge: WebBridge):
             return JSONResponse({"error": "ftb_cmd_q not available"}, 503)
         ftb_cmd_q.put({"cmd": "ftb_apply_job", "listing_id": payload.get("listing_id", 0)})
         return {"status": "queued"}
+
+    def _is_entity_on_player_team(player_team: Any, entity: Any) -> bool:
+        """Return True if the entity is currently on the player's roster."""
+        if not player_team or not entity:
+            return False
+
+        contains = getattr(player_team, "_roster_contains", None)
+        if callable(contains):
+            try:
+                return bool(contains(entity))
+            except Exception:
+                pass
+
+        target_id = getattr(entity, "entity_id", None)
+        if target_id is None:
+            return False
+
+        for role in ("drivers", "engineers", "mechanics", "strategist", "principal"):
+            roster_value = getattr(player_team, role, None)
+            if roster_value is None:
+                continue
+            if isinstance(roster_value, list):
+                for member in roster_value:
+                    if getattr(member, "entity_id", None) == target_id:
+                        return True
+            else:
+                if getattr(roster_value, "entity_id", None) == target_id:
+                    return True
+        return False
+
+    @app.post("/api/staff/contract/offer")
+    async def submit_staff_contract_offer(payload: Dict[str, Any]):
+        """Evaluate a contract offer for a member of the player's own team."""
+        controller = shared_runtime.get("ftb_controller")
+        if not controller or not getattr(controller, "state", None):
+            return JSONResponse({"error": "Contract system unavailable"}, 503)
+
+        try:
+            entity_id = int(payload.get("entity_id"))
+        except Exception:
+            return JSONResponse({"error": "entity_id is required"}, 400)
+
+        try:
+            seasons = max(1, min(5, int(payload.get("seasons_duration", 2))))
+        except Exception:
+            seasons = 2
+
+        try:
+            salary_annual = max(0.0, float(payload.get("salary_annual", 0)))
+        except Exception:
+            return JSONResponse({"error": "salary_annual must be numeric"}, 400)
+
+        try:
+            signing_bonus_annual = max(0.0, float(payload.get("signing_bonus_annual", 0)))
+        except Exception:
+            return JSONResponse({"error": "signing_bonus_annual must be numeric"}, 400)
+
+        performance_clauses = payload.get("performance_clauses", {})
+        if not isinstance(performance_clauses, dict):
+            performance_clauses = {}
+        exit_clauses = payload.get("exit_clauses", {})
+        if not isinstance(exit_clauses, dict):
+            exit_clauses = {}
+
+        try:
+            negotiation_round = max(0, int(payload.get("negotiation_round", 0)))
+        except Exception:
+            negotiation_round = 0
+
+        with controller.state_lock:
+            state = controller.state
+            player_team = getattr(state, "player_team", None)
+            if not player_team:
+                return JSONResponse({"error": "No player team loaded"}, 409)
+
+            find_entity = getattr(state, "_find_entity_by_id", None)
+            entity = find_entity(entity_id) if callable(find_entity) else None
+            if not entity:
+                return JSONResponse({"error": "Entity not found"}, 404)
+
+            if not _is_entity_on_player_team(player_team, entity):
+                return JSONResponse({"error": "Can only negotiate with your own team members"}, 403)
+
+            existing_contract = (getattr(state, "contracts", {}) or {}).get(entity_id)
+            existing_team_name = str(getattr(existing_contract, "team_name", "") or "")
+            player_team_name = str(getattr(player_team, "name", "") or "")
+            if existing_contract and existing_team_name and existing_team_name != player_team_name:
+                return JSONResponse({"error": "Entity is not contracted to player team"}, 403)
+
+            role = str(
+                payload.get("role")
+                or (getattr(existing_contract, "role", None) if existing_contract else None)
+                or getattr(entity, "entity_type", type(entity).__name__)
+            ).lower()
+
+            offer_terms = {
+                "entity_id": entity_id,
+                "seasons_duration": seasons,
+                # Match tkinter negotiation flow: UI edits annual values, sim stores per-tick.
+                "base_salary": salary_annual / 365.0,
+                "signing_bonus": signing_bonus_annual / 365.0,
+                "performance_clauses": performance_clauses,
+                "exit_clauses": exit_clauses,
+                "role": role,
+                "negotiation_round": negotiation_round,
+            }
+
+            rng = state.get_rng("contracts", entity_id)
+            result = state.evaluate_contract_offer(entity_id, offer_terms, rng)
+
+        counter_offer = result.get("counter_offer") if isinstance(result, dict) else None
+        counter_offer_annual = None
+        if isinstance(counter_offer, dict):
+            counter_offer_annual = dict(counter_offer)
+            try:
+                counter_offer_annual["base_salary_annual"] = int(max(0, round(float(counter_offer.get("base_salary", 0)) * 365)))
+            except Exception:
+                counter_offer_annual["base_salary_annual"] = 0
+            try:
+                counter_offer_annual["signing_bonus_annual"] = int(max(0, round(float(counter_offer.get("signing_bonus", 0)) * 365)))
+            except Exception:
+                counter_offer_annual["signing_bonus_annual"] = 0
+
+        return {
+            "status": "ok",
+            "entity_id": entity_id,
+            "result": result,
+            "counter_offer_annual": counter_offer_annual,
+        }
+
+    @app.post("/api/staff/contract/finalize")
+    async def finalize_staff_contract(payload: Dict[str, Any]):
+        """Finalize a contract for a member of the player's own team."""
+        controller = shared_runtime.get("ftb_controller")
+        if not controller or not getattr(controller, "state", None):
+            return JSONResponse({"error": "Contract system unavailable"}, 503)
+
+        try:
+            entity_id = int(payload.get("entity_id"))
+        except Exception:
+            return JSONResponse({"error": "entity_id is required"}, 400)
+
+        try:
+            seasons = max(1, min(5, int(payload.get("seasons_duration", 2))))
+        except Exception:
+            seasons = 2
+
+        try:
+            salary_annual = max(0.0, float(payload.get("salary_annual", 0)))
+        except Exception:
+            return JSONResponse({"error": "salary_annual must be numeric"}, 400)
+
+        try:
+            signing_bonus_annual = max(0.0, float(payload.get("signing_bonus_annual", 0)))
+        except Exception:
+            return JSONResponse({"error": "signing_bonus_annual must be numeric"}, 400)
+
+        performance_clauses = payload.get("performance_clauses", {})
+        if not isinstance(performance_clauses, dict):
+            performance_clauses = {}
+        exit_clauses = payload.get("exit_clauses", {})
+        if not isinstance(exit_clauses, dict):
+            exit_clauses = {}
+
+        with controller.state_lock:
+            state = controller.state
+            player_team = getattr(state, "player_team", None)
+            if not player_team:
+                return JSONResponse({"error": "No player team loaded"}, 409)
+
+            find_entity = getattr(state, "_find_entity_by_id", None)
+            entity = find_entity(entity_id) if callable(find_entity) else None
+            if not entity:
+                return JSONResponse({"error": "Entity not found"}, 404)
+
+            if not _is_entity_on_player_team(player_team, entity):
+                return JSONResponse({"error": "Can only negotiate with your own team members"}, 403)
+
+            existing_contract = (getattr(state, "contracts", {}) or {}).get(entity_id)
+            role = str(
+                payload.get("role")
+                or (getattr(existing_contract, "role", None) if existing_contract else None)
+                or getattr(entity, "entity_type", type(entity).__name__)
+            ).lower()
+
+            contract_terms = {
+                "entity_id": entity_id,
+                "team_name": getattr(player_team, "name", ""),
+                "role": role,
+                "seasons_duration": seasons,
+                # Match tkinter negotiation flow: UI edits annual values, sim stores per-tick.
+                "base_salary": salary_annual / 365.0,
+                "signing_bonus": signing_bonus_annual / 365.0,
+                "performance_clauses": performance_clauses,
+                "exit_clauses": exit_clauses,
+            }
+
+            success = bool(state.finalize_contract(entity_id, contract_terms))
+            if success:
+                try:
+                    state.mark_dirty("all")
+                except Exception:
+                    pass
+
+        if not success:
+            return JSONResponse({"error": "Unable to finalize contract"}, 400)
+        return {"status": "ok", "success": True, "entity_id": entity_id}
 
     # ──── REST: New Game (creates the save — called from wizard confirmation) ────
     @app.post("/api/new_game")

@@ -4,6 +4,8 @@
   export let show: boolean = false
   export let title: string = ''
   export let size: 'sm' | 'md' | 'lg' = 'md'
+  export let closeOnBackdrop: boolean = true
+  export let showCloseButton: boolean = true
 
   const dispatch = createEventDispatcher()
 
@@ -13,7 +15,7 @@
   }
 
   function handleBackdrop(e: MouseEvent) {
-    if ((e.target as HTMLElement).classList.contains('modal-backdrop')) close()
+    if ((e.target as HTMLElement).classList.contains('modal-backdrop') && closeOnBackdrop) close()
   }
 </script>
 
@@ -24,7 +26,9 @@
       {#if title}
         <div class="modal-header">
           <h3>{title}</h3>
-          <button class="modal-close" on:click={close}>✕</button>
+          {#if showCloseButton}
+            <button class="modal-close" on:click={close}>✕</button>
+          {/if}
         </div>
       {/if}
       <div class="modal-body">

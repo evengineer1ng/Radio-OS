@@ -67,7 +67,12 @@ voices/kokoro/
 **/ftb_autosave.json
 ftb_autosave.json
 
-# Large save files excluded from repo
+# Large save files excluded from repo — ignore all .db saves
+saves/*.db
+saves/calebandlucca.json
+saves/p1p2firstrace.json
+saves/vladdyandjan.json
+saves/save - Year 3, Day 1.json
 saves/yearlongsaveweird.db
 saves/yt2.db
 saves/championshiprun.db

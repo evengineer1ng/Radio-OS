@@ -626,8 +626,8 @@ class LumaSpiBackend(DisplayBackend):
         driver_name = (driver or "ssd1306").strip().lower()
         cls = getattr(oled_device, driver_name, None)
         if cls is None:
-            cls = oled_device.ssd1306
-            print(f"[oled] unknown driver '{driver_name}', falling back to ssd1306")
+            cls = oled_device.ssd1309
+            print(f"[oled] unknown driver '{driver_name}', falling back to ssd1309")
 
         self.device = cls(serial, width=width, height=height, rotate=rotate_quadrants)
         self.mode = getattr(self.device, "mode", "1")
@@ -672,7 +672,7 @@ class SoulConfig:
     boot_ritual: bool = True
     simulate: bool = False
     preview_path: Optional[str] = None
-    driver: str = "ssd1306"
+    driver: str = "ssd1309"
     spi_port: int = 0
     spi_device: int = 0
     spi_speed_hz: int = 8_000_000
@@ -960,7 +960,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--simulate", action="store_true", help="Run without SPI hardware")
     p.add_argument("--preview-path", default="", help="Optional PNG output path in simulation mode")
 
-    p.add_argument("--driver", default="ssd1306", help="luma.oled driver name")
+    p.add_argument("--driver", default="ssd1309", help="luma.oled driver name")
     p.add_argument("--spi-port", type=int, default=0, help="SPI bus index")
     p.add_argument("--spi-device", type=int, default=0, help="SPI device index")
     p.add_argument("--spi-speed-hz", type=_positive_int, default=8000000, help="SPI bus speed")

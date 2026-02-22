@@ -8,7 +8,7 @@ User=airfryer
 WorkingDirectory=/home/airfryer/Radio-OS-1.03
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/airfryer/Radio-OS-1.03/radioenv/bin/python -u tools/oled_soul_daemon.py \
-    --driver ssd1306 \
+    --driver ssd1309 \
     --spi-port 0 \
     --spi-device 0 \
     --dc-pin 25 \

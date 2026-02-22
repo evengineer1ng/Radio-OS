@@ -870,10 +870,13 @@ class OledSoulDaemon:
                 )
                 print(f"[oled] SPI backend ready: driver={cfg.driver} {cfg.width}x{cfg.height}")
             except Exception as exc:
-                print(f"[oled] SPI backend failed ({exc}); switching to simulation mode")
+                import traceback as _tb
+                print(f"[oled] SPI backend failed ({type(exc).__name__}: {exc})")
+                _tb.print_exc()
                 self.backend = HeadlessBackend(preview_path=cfg.preview_path)
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((cfg.udp_host, cfg.udp_port))
         self.sock.setblocking(False)
         print(f"[oled] listening for UDP events on {cfg.udp_host}:{cfg.udp_port}")

@@ -675,7 +675,7 @@ class SoulConfig:
     driver: str = "ssd1306"
     spi_port: int = 0
     spi_device: int = 0
-    spi_speed_hz: int = 12_000_000
+    spi_speed_hz: int = 8_000_000
     dc_pin: int = 24
     rst_pin: int = 25
     rotate_degrees: int = 0

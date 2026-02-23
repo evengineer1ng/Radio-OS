@@ -131,16 +131,22 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
   Future<void> _launch() async {
     if (_launching) return;
     setState(() => _launching = true);
+    // Capture ref-dependent values before the async gap so we never touch
+    // ref after an await (widget may be disposed by then).
+    final api = ref.read(shellApiProvider);
+    final toasts = ref.read(toastsProvider.notifier);
+    final stations = ref.read(stationsProvider.notifier);
+    final name = _focused.name;
     try {
-      final api = ref.read(shellApiProvider);
       final result = await api.launchStation(_focused.id);
+      if (!mounted) return;
       final ok = result['status'] == 'launched' ||
           result['status'] == 'already_running';
-      ref.read(toastsProvider.notifier).show(
-            ok ? '${_focused.name} launched' : 'Launch failed',
-            type: ok ? 'success' : 'error',
-          );
-      if (ok) ref.read(stationsProvider.notifier).refresh();
+      toasts.show(
+        ok ? '$name launched' : 'Launch failed',
+        type: ok ? 'success' : 'error',
+      );
+      if (ok) stations.refresh();
     } finally {
       if (mounted) setState(() => _launching = false);
     }
@@ -148,9 +154,13 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
 
   Future<void> _stop() async {
     final api = ref.read(shellApiProvider);
+    final toasts = ref.read(toastsProvider.notifier);
+    final stations = ref.read(stationsProvider.notifier);
+    final name = _focused.name;
     await api.stopStation(_focused.id);
-    ref.read(toastsProvider.notifier).show('${_focused.name} stopped');
-    ref.read(stationsProvider.notifier).refresh();
+    if (!mounted) return;
+    toasts.show('$name stopped');
+    stations.refresh();
   }
 
   @override

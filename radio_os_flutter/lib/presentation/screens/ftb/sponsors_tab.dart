@@ -168,8 +168,9 @@ class _SponsorCard extends ConsumerWidget {
                   child: ElevatedButton(
                     onPressed: () async {
                       final api = ref.read(gameApiProvider);
+                      final gs = ref.read(gameStateProvider.notifier);
                       await api.acceptSponsor(offerIndex!);
-                      ref.read(gameStateProvider.notifier).refresh();
+                      gs.refresh();
                     },
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -184,8 +185,9 @@ class _SponsorCard extends ConsumerWidget {
                   child: OutlinedButton(
                     onPressed: () async {
                       final api = ref.read(gameApiProvider);
+                      final gs = ref.read(gameStateProvider.notifier);
                       await api.declineSponsor(offerIndex!);
-                      ref.read(gameStateProvider.notifier).refresh();
+                      gs.refresh();
                     },
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 12),

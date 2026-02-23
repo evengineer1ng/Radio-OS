@@ -24,16 +24,22 @@ class StationShell extends ConsumerStatefulWidget {
 }
 
 class _StationShellState extends ConsumerState<StationShell> {
+  // Held so we can safely call disconnect() in dispose() after ref is gone.
+  Object? _wsManager;
+
   @override
   void initState() {
     super.initState();
     // Connect WebSocket streams when entering a station
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final station = ref.read(activeStationProvider);
       if (station != null) {
         final ws = ref.read(wsManagerProvider);
+        _wsManager = ws;
         ws.connectToStation(station.id);
         ws.onEventMessage = (msg) {
+          if (!mounted) return;
           dispatchWsEventFromContainer(
               ProviderScope.containerOf(context), msg);
         };
@@ -43,7 +49,9 @@ class _StationShellState extends ConsumerState<StationShell> {
 
   @override
   void dispose() {
-    ref.read(wsManagerProvider).disconnect();
+    // Use the stored reference — do NOT call ref.read() here; ref is already
+    // invalidated by the time dispose() runs in Riverpod.
+    (_wsManager as dynamic)?.disconnect();
     super.dispose();
   }
 

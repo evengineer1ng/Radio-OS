@@ -161,8 +161,9 @@ class RaceOpsTab extends ConsumerWidget {
 
   Future<void> _respond(WidgetRef ref, bool watchLive) async {
     final api = ref.read(gameApiProvider);
+    final gs = ref.read(gameStateProvider.notifier);
     await api.raceDayRespond(watchLive);
-    ref.read(gameStateProvider.notifier).refresh();
+    gs.refresh();
   }
 
   Color _phaseColor(String phase) {

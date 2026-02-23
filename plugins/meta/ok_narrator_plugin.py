@@ -3556,6 +3556,16 @@ META_PLUGIN_CLASS = OracleKingdomMetaPlugin
 PLUGIN_NAME = "Oracle Kingdom Narrator"
 PLUGIN_DESC = "Boundary guardian between Oracle Kingdom simulation and lived audio experience"
 
+# ── Transparent OLED motion-profile contract ─────────────────────────────────
+# The OLED soul daemon reads this dict (via register_station_motion_profile)
+# to apply the Oracle Kingdom personality motif on Tier-2 of the display.
+OLED_MOTION_PROFILE = {
+    "station_id":     "oracle_kingdom",
+    "motion_profile": "radial",          # sacred-geometry sigil morph
+    "intensity":      0.65,              # 0.0–1.0
+    "color_palette":  [],                # reserved for colour OLED
+}
+
 
 # ============================================================
 # AUDIO PERSONA (for audio_cli.py persona contract)

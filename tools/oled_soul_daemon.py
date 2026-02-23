@@ -1,9 +1,36 @@
 #!/usr/bin/env python3
 """
-Transparent OLED "Soul Display" daemon.
+Transparent OLED "Soul Display" daemon — v2 State Machine Edition.
 
-Renders abstract motion glyphs on a 128x64 OLED and reacts to UDP JSON events.
-Designed for SPI-connected displays on Raspberry Pi, with headless fallback.
+Renders deterministic motion glyphs on a 128x64 OLED reacting to UDP JSON
+events from the RadioOS runtime.
+
+Architecture
+────────────
+  Tier 0 — Power/System state  (OFF · BOOTING · IDLE · ACTIVE · MUTED · ERROR)
+  Tier 1 — Interaction mode    (HOME · STATION_SELECTED · SIMULATION · LISTENING
+                                SPEAKING · PROCESSING)
+  Tier 2 — Station personality (FTB · ORACLE · HOCKEY · AMBIENT)
+
+Rendered frame = base_motion(T0) + interaction_pulse(T1) + station_motif(T2)
+
+Motion design rules
+───────────────────
+  • 0.1–0.5 Hz slow drift baseline
+  • 1–2 Hz interaction pulses
+  • Bezier (ease-in-out / ease-out-cubic) easing — never linear transitions
+  • Max perceived 4–6 Hz  — no jitter, no toy-speed flicker
+  • State transitions morph — they never cut
+
+Plugin motion-profile contract
+───────────────────────────────
+  Meta-plugins may expose an ``OLED_MOTION_PROFILE`` dict:
+      {
+        "motion_profile": "orbital" | "radial" | "fracture" | "linear",
+        "intensity": 0.0 – 1.0,
+        "color_palette": [...]   # reserved for future colour OLED support
+      }
+  The scheduler picks it up via the ``station_id`` field in event payloads.
 """
 
 from __future__ import annotations
@@ -14,7 +41,7 @@ import math
 import random
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from collections import deque
@@ -571,6 +598,485 @@ class Ping(Animation):
         draw_ring(draw, cx, cy, r, brightness=int(240 * (1.0 - t)), width=1)
 
 
+# ===========================================================================
+# Tier 0 — Power / System state loops
+# ===========================================================================
+
+
+class FieldDriftLoop(Animation):
+    """IDLE — 3–5 thin orbital lines, very low opacity, slow parallax drift.
+
+    Target frequency: 0.1–0.3 Hz perceived motion. Never static.
+    """
+    duration_ms = 22000
+    priority = 0
+    loop = True
+
+    def __init__(self, rng: random.Random) -> None:
+        super().__init__()
+        self._lines: List[Dict[str, float]] = []
+        for i in range(4):
+            self._lines.append({
+                "radius": 10.0 + i * 4.5,
+                "speed":  0.06 + i * 0.018,         # rev/s — very slow
+                "phase":  rng.uniform(0.0, math.tau),
+                "arc":    rng.uniform(55.0, 100.0),  # degrees
+                "bright": 55 + i * 18,
+            })
+        self._drift: List[Dict[str, float]] = []
+        for _ in range(5):
+            self._drift.append({
+                "x":      rng.uniform(0.15, 0.85),
+                "y":      rng.uniform(0.15, 0.85),
+                "vx":     rng.uniform(-0.002, 0.002),
+                "vy":     rng.uniform(-0.001, 0.001),
+                "bright": rng.randint(18, 38),
+            })
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        seconds = now_ms / 1000.0
+        cx, cy = width / 2.0, height / 2.0
+
+        # Slow parallax drift particles
+        for p in self._drift:
+            px = (p["x"] + seconds * p["vx"]) % 1.0
+            py = (p["y"] + seconds * p["vy"]) % 1.0
+            draw_spark(draw, px * width, py * height, brightness=p["bright"], size=1)
+
+        # Thin orbital arcs — different angular speeds → parallax feel
+        for ln in self._lines:
+            angle_rad = (seconds * ln["speed"] * math.tau) + ln["phase"]
+            start_deg = math.degrees(angle_rad)
+            end_deg   = start_deg + ln["arc"]
+            draw_arc(draw, cx, cy, ln["radius"], start_deg, end_deg,
+                     brightness=ln["bright"], width=1)
+
+
+class MutedPulse(Animation):
+    """MUTED — very slow, low-brightness single ring breath. Barely alive."""
+    duration_ms = 8000
+    priority = 0
+    loop = True
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        cx, cy = width / 2.0, height / 2.0
+        breath = 0.5 + 0.5 * math.sin(t * math.tau)
+        r = lerp(6.0, 9.0, ease_in_out(breath))
+        draw_ring(draw, cx, cy, r, brightness=int(35 + 30 * breath), width=1)
+
+
+# ===========================================================================
+# Tier 1 — Interaction-mode transitions
+# ===========================================================================
+
+
+class WakeCollapse(Animation):
+    """IDLE → WAKE: lines converge inward, then lock into focused ring.
+
+    Phase 0–0.45  : parallax lines radially contract toward center
+    Phase 0.45–0.75: ring nucleates and brightens
+    Phase 0.75–1.0 : slow rotational-lock arc sweep
+    """
+    duration_ms = 1400
+    priority = 3
+
+    def __init__(self, rng: random.Random) -> None:
+        super().__init__()
+        self._shards: List[Dict[str, float]] = []
+        for _ in range(8):
+            angle = rng.uniform(0.0, math.tau)
+            self._shards.append({
+                "angle":  angle,
+                "r_start": rng.uniform(22.0, 30.0),
+                "bright": rng.randint(90, 160),
+            })
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        cx, cy = width / 2.0, height / 2.0
+
+        if t < 0.45:
+            p = ease_in_out(t / 0.45)
+            for sh in self._shards:
+                r = lerp(sh["r_start"], 3.0, p)
+                x, y = polar_point(cx, cy, r, sh["angle"])
+                draw_spark(draw, x, y, brightness=int(sh["bright"] * (1.0 - p * 0.4)), size=1)
+            return
+
+        if t < 0.75:
+            p = ease_out_cubic((t - 0.45) / 0.30)
+            r_ring = lerp(3.0, 11.0, p)
+            draw_ring(draw, cx, cy, r_ring, brightness=int(160 + 60 * p), width=1)
+            return
+
+        # Rotational lock sweep
+        p = ease_in_out((t - 0.75) / 0.25)
+        draw_ring(draw, cx, cy, 11.5, brightness=220, width=1)
+        lock_arc = lerp(0.0, 300.0, p)
+        draw_arc(draw, cx, cy, 13.0, -90.0, -90.0 + lock_arc, brightness=255, width=2)
+
+
+class WaveformRingLoop(Animation):
+    """LISTENING — pulsing waveform ring; amplitude maps to mic energy input.
+
+    Outer ring stays stable. Inner modulation represents collected energy.
+    """
+    duration_ms = 1800
+    priority = 3
+    loop = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mic_amplitude: float = 0.5   # 0..1 — set externally by runtime
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        cx, cy = width / 2.0, height / 2.0
+        seconds = now_ms / 1000.0
+
+        base_r = 12.0
+        amp = lerp(1.5, 5.5, ease_in_out(self.mic_amplitude))
+
+        # Waveform modulated ring — sample radii at discrete angles
+        N = 36
+        points_outer: List[Tuple[float, float]] = []
+        points_inner: List[Tuple[float, float]] = []
+        for i in range(N + 1):
+            a = (i / N) * math.tau
+            wave = math.sin(a * 3 + seconds * math.tau * 1.4) * amp
+            ro = base_r + wave
+            ri = base_r - wave * 0.4
+            points_outer.append(polar_point(cx, cy, max(1.0, ro), a))
+            points_inner.append(polar_point(cx, cy, max(1.0, ri), a))
+
+        if len(points_outer) > 1:
+            draw.line(points_outer, fill=200, width=1)
+        if len(points_inner) > 1:
+            draw.line(points_inner, fill=100, width=1)
+
+        # Rotating stabilisation arc — "energy collecting at center"
+        draw_arc(draw, cx, cy, base_r + 2.0,
+                 (seconds * 90.0) % 360.0,
+                 (seconds * 90.0) % 360.0 + 55.0,
+                 brightness=255, width=2)
+
+        # Centre spark pulse on beat
+        beat = triangle_wave((seconds * 1.5) % 1.0)
+        if beat > 0.75:
+            draw_spark(draw, cx, cy, brightness=int(140 + 80 * beat), size=1)
+
+
+class FractureRecombineLoop(Animation):
+    """PROCESSING — shards splinter and recombine. Controlled chaos.
+
+    Visually communicates «thinking» — distinct from listening.
+    Never still. Converges back when done thinking.
+    """
+    duration_ms = 3400
+    priority = 2
+    loop = True
+
+    _SEGMENTS: List[Tuple[float, float, float, float]] = [
+        (-11, -5,  -3, -1),
+        ( -3, -1,   2,  1),
+        (  2,  1,   9,  4),
+        ( 10, -7,   3, -2),
+        ( -8,  8,  -2,  2),
+        (  9,  8,   2,  2),
+    ]
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        seconds = now_ms / 1000.0
+        cx, cy = width / 2.0, height / 2.0
+
+        # Convergence score — shards drift apart then pull back
+        phase = math.sin(t * math.tau)      # -1..+1  cycle per loop
+        scatter = ease_in_out(abs(phase))    # 0..1 max scatter at t=0.25, 0.75
+
+        jitter_amp = scatter * 3.5
+        for idx, (x1, y1, x2, y2) in enumerate(self._SEGMENTS):
+            jx = math.sin(seconds * (1.7 + idx * 0.31)) * jitter_amp
+            jy = math.cos(seconds * (1.3 + idx * 0.27)) * jitter_amp
+            b  = int(160 + scatter * 60)
+            draw_shard(draw,
+                       cx + x1 + jx, cy + y1 + jy,
+                       cx + x2 + jx, cy + y2 + jy,
+                       brightness=b, width=1)
+
+        # Convergence ring — brightens as shards pull together
+        if scatter < 0.35:
+            cv_b = int((0.35 - scatter) / 0.35 * 180)
+            draw_ring(draw, cx, cy, 4.0 + scatter * 8.0, brightness=cv_b, width=1)
+
+
+class RippleEmissionLoop(Animation):
+    """SPEAKING — concentric ripples radiate outward with syllable envelope.
+
+    Represents projection / outward energy.
+    """
+    duration_ms = 900
+    priority = 3
+    loop = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.speech_amplitude: float = 0.5   # 0..1 — syllable envelope
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        cx, cy = width / 2.0, height / 2.0
+
+        # Three staggered ripples per cycle
+        for offset in (0.0, 0.33, 0.66):
+            pt = (t + offset) % 1.0
+            r  = lerp(2.0, 30.0, ease_out_cubic(pt))
+            b  = int((1.0 - pt) * lerp(100, 220, ease_in_out(self.speech_amplitude)))
+            if b > 4:
+                draw_ring(draw, cx, cy, r, brightness=b, width=1)
+
+        # Central brightness pulse with syllable amplitude
+        core_b = int(lerp(60, 200, ease_in_out(self.speech_amplitude))
+                     * (0.7 + 0.3 * math.sin(t * math.tau * 4)))
+        draw_spark(draw, cx, cy, brightness=max(0, min(255, core_b)), size=2)
+
+
+# ===========================================================================
+# Tier 2 — Station personality motifs
+# ===========================================================================
+
+
+class FTBMotif(Animation):
+    """From The Backmarker — rotating telemetry arcs + RPM-style sweep.
+
+    Rotating arc pair (telemetry), speedometer sweep, thin racing lines.
+    """
+    duration_ms = 6000
+    priority = 0
+    loop = True
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        seconds = now_ms / 1000.0
+        cx, cy = width / 2.0, height / 2.0
+
+        # Outer telemetry arc pair — counter-rotating
+        r_outer = 20.0
+        for sign, bright in ((1, 110), (-1, 70)):
+            start = math.degrees(seconds * sign * 0.55)
+            draw_arc(draw, cx, cy, r_outer, start % 360, (start + 55.0) % 360,
+                     brightness=bright, width=1)
+
+        # RPM sweep — fills arc then resets, mimicking rev-limiter
+        rpm_t = (t * 2.3) % 1.0          # faster than base loop
+        rpm_arc = ease_out_cubic(rpm_t if rpm_t < 0.82 else 1.0 - (rpm_t - 0.82) / 0.18) * 210.0
+        draw_arc(draw, cx, cy, 14.5, 200.0, 200.0 + rpm_arc, brightness=190, width=1)
+
+        # Thin racing lines — horizontal streaks low on display
+        for row, speed in enumerate((0.9, 1.1, 0.8)):
+            y_row = height * 0.62 + row * 5.0
+            x_phase = ((seconds * speed * 0.35) % 1.0)
+            x_start = x_phase * (width + 20) - 10
+            length = 14.0 + row * 4.0
+            if 0 < x_start + length < width + 20:
+                x0 = max(0.0, x_start)
+                x1 = min(float(width - 1), x_start + length)
+                draw_shard(draw, x0, y_row, x1, y_row, brightness=55 + row * 15, width=1)
+
+
+class OracleMotif(Animation):
+    """Oracle Kingdom — morphing sigil / sacred geometry.
+
+    Slow angular rotation, petal-like arcs morphing, subtle glow convergence.
+    """
+    duration_ms = 18000
+    priority = 0
+    loop = True
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        seconds = now_ms / 1000.0
+        cx, cy = width / 2.0, height / 2.0
+
+        # Sacred geometry: 6-fold symmetry slowly rotating
+        base_angle = seconds * 0.04 * math.tau      # 0.04 rev/s
+        N = 6
+        r_inner = 7.0
+        r_outer = 16.0
+
+        # Morphing between two sigil shapes via sine wave
+        morph = 0.5 + 0.5 * math.sin(seconds * 0.12 * math.tau)
+
+        for i in range(N):
+            a0 = base_angle + (i / N) * math.tau
+            a1 = base_angle + ((i + morph) / N) * math.tau
+            p0 = polar_point(cx, cy, r_inner, a0)
+            p1 = polar_point(cx, cy, r_outer, a1)
+            draw_shard(draw, p0[0], p0[1], p1[0], p1[1],
+                       brightness=int(80 + 60 * morph), width=1)
+
+        # Outer halo — opacity breathes very slowly
+        halo_b = int(40 + 30 * math.sin(seconds * 0.08 * math.tau))
+        draw_ring(draw, cx, cy, r_outer + 2.5, brightness=max(10, halo_b), width=1)
+
+        # Inner pivot point
+        draw_spark(draw, cx, cy, brightness=int(90 + 50 * morph), size=1)
+
+        # Slow arc fragment orbiting — adds life
+        orbit_a = math.degrees(base_angle * 0.7)
+        draw_arc(draw, cx, cy, r_inner + 2.5, orbit_a % 360,
+                 (orbit_a + 40.0) % 360, brightness=130, width=1)
+
+
+class HockeyMotif(Animation):
+    """Hockey FM — puck arc trajectories, sharp angular sweeps.
+
+    Clean, minimal, sharp. Not organic.
+    """
+    duration_ms = 5000
+    priority = 0
+    loop = True
+
+    def __init__(self, rng: random.Random) -> None:
+        super().__init__()
+        self._pucks: List[Dict[str, float]] = []
+        for _ in range(3):
+            self._pucks.append({
+                "angle":  rng.uniform(0.0, math.tau),
+                "speed":  rng.uniform(0.18, 0.38),
+                "radius": rng.uniform(8.0, 20.0),
+                "phase":  rng.random(),
+            })
+
+    def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
+        t = self.progress(now_ms)
+        seconds = now_ms / 1000.0
+        cx, cy = width / 2.0, height / 2.0
+
+        for puck in self._pucks:
+            # Puck follows arc trajectory — sharp angular bounce feel
+            progress_p = ((seconds * puck["speed"]) + puck["phase"]) % 1.0
+            arc_phase = ease_in_out(progress_p if progress_p < 0.5 else 1.0 - progress_p)
+            a = puck["angle"] + arc_phase * math.pi
+            x, y = polar_point(cx, cy, puck["radius"] * (0.7 + 0.3 * arc_phase), a)
+            draw_spark(draw, x, y, brightness=int(180 + 60 * arc_phase), size=1)
+
+            # Trail — sharp line behind puck
+            trail_a = a - 0.25
+            tx, ty = polar_point(cx, cy, puck["radius"] * 0.6, trail_a)
+            draw_shard(draw, tx, ty, x, y, brightness=int(80 + 40 * arc_phase), width=1)
+
+        # Minimal sweep — clean geometry
+        sweep = (t * 1.5 % 1.0)
+        sweep_deg = ease_out_cubic(sweep) * 180.0
+        draw_arc(draw, cx, cy, 12.5, 180.0, 180.0 + sweep_deg, brightness=100, width=1)
+
+
+# ===========================================================================
+# Cross-fade compositor: smoothly blends two Animation renderers
+# ===========================================================================
+
+
+class MorphBlend:
+    """Holds two Animation instances and composites them with a bezier cross-fade.
+
+    Used for all state transitions — nothing ever cuts.
+
+    blend_ms: total duration of the cross-fade in milliseconds.
+    """
+
+    def __init__(self, from_anim: Animation, to_anim: Animation, blend_ms: int = 500) -> None:
+        self.from_anim  = from_anim
+        self.to_anim    = to_anim
+        self.blend_ms   = max(50, blend_ms)
+        self._start_ms: Optional[int] = None
+
+    def start(self, now_ms: int) -> None:
+        self._start_ms = now_ms
+        self.to_anim.start(now_ms)
+
+    def progress(self, now_ms: int) -> float:
+        if self._start_ms is None:
+            return 1.0
+        elapsed = now_ms - self._start_ms
+        return ease_in_out(clamp(elapsed / self.blend_ms, 0.0, 1.0))
+
+    def done(self, now_ms: int) -> bool:
+        return self.progress(now_ms) >= 1.0
+
+    def render(
+        self,
+        draw: ImageDraw.ImageDraw,
+        now_ms: int,
+        width: int,
+        height: int,
+    ) -> None:
+        if not HAS_PIL:
+            self.to_anim.render(draw, now_ms, width, height)
+            return
+
+        t = self.progress(now_ms)
+
+        if t <= 0.0:
+            self.from_anim.render(draw, now_ms, width, height)
+            return
+        if t >= 1.0:
+            self.to_anim.render(draw, now_ms, width, height)
+            return
+
+        # Render both into separate L-mode frames then blend pixel-by-pixel
+        from PIL import Image as _Image, ImageDraw as _IDraw
+
+        f_from = _Image.new("L", (width, height), 0)
+        d_from = _IDraw.Draw(f_from)
+        self.from_anim.render(d_from, now_ms, width, height)
+
+        f_to = _Image.new("L", (width, height), 0)
+        d_to = _IDraw.Draw(f_to)
+        self.to_anim.render(d_to, now_ms, width, height)
+
+        blended = _Image.blend(f_from, f_to, alpha=t)
+        draw._image.paste(blended)  # type: ignore[attr-defined]
+
+
+# ===========================================================================
+# Tier-2 station registry: station_id → motif factory
+# ===========================================================================
+
+
+# Plugin motion-profile contract — populated at runtime by station registration
+_STATION_MOTION_PROFILES: Dict[str, Dict[str, Any]] = {}
+
+
+def register_station_motion_profile(station_id: str, profile: Dict[str, Any]) -> None:
+    """Called by meta-plugins at load time to register their OLED motion profile."""
+    _STATION_MOTION_PROFILES[station_id.lower().strip()] = profile
+
+
+def _motif_for_station(station_id: str, rng: random.Random) -> Optional[Animation]:
+    sid = (station_id or "").lower().strip()
+
+    # Check registered plugin profiles first
+    if sid in _STATION_MOTION_PROFILES:
+        mp = _STATION_MOTION_PROFILES[sid].get("motion_profile", "orbital")
+        if mp == "radial":
+            return OracleMotif()
+        if mp == "fracture":
+            return FractureRecombineLoop()
+        if mp == "orbital":
+            return FTBMotif()
+
+    # Hard-coded well-known station IDs
+    if sid in ("ftb", "from_the_backmarker", "algotradingfm", "algofm"):
+        return FTBMotif()
+    if sid in ("oracle", "oracle_kingdom", "ok"):
+        return OracleMotif()
+    if sid in ("hockey", "hockeyfm", "hockey_fm"):
+        return HockeyMotif(rng)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Display backends
 # ---------------------------------------------------------------------------
@@ -652,13 +1158,11 @@ class LumaSpiBackend(DisplayBackend):
 # ---------------------------------------------------------------------------
 
 
-STATE_PRIORITY = {
-    "ambient": 0,
-    "transition": 1,
-    "thinking": 2,
-    "listening": 3,
-    "error": 4,
-}
+# Tier-0 power states
+T0_STATES = frozenset({"off", "booting", "idle", "active", "muted", "error"})
+# Tier-1 interaction modes
+T1_MODES  = frozenset({"home", "station_selected", "simulation",
+                        "listening", "speaking", "processing"})
 
 
 @dataclass
@@ -668,7 +1172,7 @@ class SoulConfig:
     fps: int = 20
     udp_host: str = DEFAULT_UDP_HOST
     udp_port: int = DEFAULT_UDP_PORT
-    ambient_style: str = "breathing_halo"
+    ambient_style: str = "field_drift"
     boot_ritual: bool = True
     simulate: bool = False
     preview_path: Optional[str] = None
@@ -683,44 +1187,140 @@ class SoulConfig:
 
 
 class SoulScheduler:
-    def __init__(self, cfg: SoulConfig) -> None:
-        self.cfg = cfg
-        self.rng = random.Random(cfg.seed)
-        self.state = "ambient"
-        self.state_loop: Animation = self._make_state_loop("ambient")
-        self.state_loop.start(self._now_ms())
+    """3-tier state machine for the transparent OLED soul display.
 
+    Frame composition:
+        base_motion  (Tier-0 loop)         — always rendered at full brightness
+        station_motif (Tier-2 loop)        — blended at low alpha beneath base
+        interaction_layer (Tier-1 ritual)  — rendered on top when active
+        active_ritual (one-shot overlay)   — highest priority, rendered last
+    """
+
+    def __init__(self, cfg: SoulConfig) -> None:
+        self.cfg  = cfg
+        self.rng  = random.Random(cfg.seed)
+
+        # Tier-0
+        self._t0: str = "idle"
+        self._base_loop: Animation = self._make_base_loop()
+        self._base_loop.start(self._now_ms())
+
+        # Tier-1
+        self._t1: str = "home"
+        self._t1_loop: Optional[Animation] = None   # active while T1 != "home"
+
+        # Tier-2
+        self._station_id: str = ""
+        self._station_motif: Optional[Animation] = None
+        self._motif_morph: Optional[MorphBlend] = None  # cross-fade in/out
+
+        # One-shot ritual queue
         self.active_ritual: Optional[Animation] = None
         self.pending: Deque[Animation] = deque()
 
-        self._volume_acc = 0
+        # Coalescing accumulators
+        self._volume_acc     = 0
         self._volume_last_ms = 0
         self._scroll_last_ms = 0
         self._scroll_last_dir = 0
 
+        # Live amplitude feeds for reactive loops
+        self._mic_amp:    float = 0.0
+        self._speech_amp: float = 0.0
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
     def _now_ms(self) -> int:
         return int(time.monotonic() * 1000.0)
 
-    def _make_state_loop(self, state: str) -> Animation:
-        if state == "listening":
-            return ListeningLoop()
-        if state == "thinking":
-            return ThinkingLoop()
-        if state == "error":
+    def _make_base_loop(self) -> Animation:
+        style = getattr(self.cfg, "ambient_style", "field_drift")
+        if self._t0 == "muted":
+            return MutedPulse()
+        if self._t0 == "error":
             return ErrorLoop()
-        if self.cfg.ambient_style == "orbit_calm":
+        if style == "orbit_calm":
             return OrbitCalmLoop()
-        return BreathingHaloLoop(self.rng)
+        if style == "breathing_halo":
+            return BreathingHaloLoop(self.rng)
+        return FieldDriftLoop(self.rng)   # default
+
+    def _make_t1_loop(self, mode: str) -> Optional[Animation]:
+        if mode == "listening":
+            loop = WaveformRingLoop()
+            loop.mic_amplitude = self._mic_amp
+            return loop
+        if mode == "processing":
+            return FractureRecombineLoop()
+        if mode == "speaking":
+            loop = RippleEmissionLoop()
+            loop.speech_amplitude = self._speech_amp
+            return loop
+        return None
+
+    # ── tier setters ─────────────────────────────────────────────────────────
+
+    def set_power_state(self, state: str, now_ms: Optional[int] = None) -> None:
+        """Set Tier-0 power state. Morphs the base loop."""
+        state = state.strip().lower()
+        if state not in T0_STATES:
+            state = "idle"
+        if state == self._t0:
+            return
+        now = now_ms or self._now_ms()
+        self._t0 = state
+        new_loop = self._make_base_loop()
+        new_loop.start(now)
+        # Morph — 600 ms cross-fade for power state changes
+        self._base_loop = new_loop   # no pixel-blend for loops (perf); swap directly
+
+    def set_mode(self, mode: str, now_ms: Optional[int] = None) -> None:
+        """Set Tier-1 interaction mode."""
+        mode = mode.strip().lower()
+        if mode not in T1_MODES:
+            mode = "home"
+        if mode == self._t1:
+            return
+        now = now_ms or self._now_ms()
+        self._t1 = mode
+        new_t1 = self._make_t1_loop(mode)
+        if new_t1 is not None:
+            new_t1.start(now)
+        self._t1_loop = new_t1
+
+    def set_station(self, station_id: str, now_ms: Optional[int] = None) -> None:
+        """Set Tier-2 station personality motif with morph cross-fade."""
+        sid = (station_id or "").strip().lower()
+        if sid == self._station_id:
+            return
+        now = now_ms or self._now_ms()
+        self._station_id = sid
+        old_motif = self._station_motif
+        new_motif = _motif_for_station(sid, self.rng)
+        if new_motif is not None:
+            new_motif.start(now)
+        self._station_motif = new_motif
+        if old_motif is not None and new_motif is not None:
+            self._motif_morph = MorphBlend(old_motif, new_motif, blend_ms=800)
+            self._motif_morph.start(now)
+        else:
+            self._motif_morph = None
+
+    # ── legacy one-arg set_state (backward compat) ───────────────────────────
 
     def set_state(self, state: str, now_ms: Optional[int] = None) -> None:
-        state = (state or "ambient").strip().lower()
-        if state not in ("ambient", "listening", "thinking", "error"):
-            state = "ambient"
-        if state == self.state:
-            return
-        self.state = state
-        self.state_loop = self._make_state_loop(state)
-        self.state_loop.start(now_ms if now_ms is not None else self._now_ms())
+        """Backward-compat: maps old state strings to Tier-0/Tier-1 calls."""
+        s = (state or "ambient").strip().lower()
+        _t0_map = {"ambient": "idle", "idle": "idle", "error": "error", "muted": "muted"}
+        _t1_map = {"listening": "listening", "thinking": "processing", "speaking": "speaking"}
+        if s in _t0_map:
+            self.set_power_state(_t0_map[s], now_ms)
+        if s in _t1_map:
+            self.set_mode(_t1_map[s], now_ms)
+        elif s not in _t1_map and s not in ("listening", "thinking"):
+            self.set_mode("home", now_ms)
+
+    # ── ritual queue ──────────────────────────────────────────────────────────
 
     def _enqueue_or_preempt(self, anim: Animation, now_ms: int) -> None:
         anim.start(now_ms)
@@ -740,54 +1340,110 @@ class SoulScheduler:
             self._enqueue_or_preempt(VolumeTilt(direction=direction, intensity=intensity), now_ms)
             self._volume_acc = 0
 
+    # ── event router ─────────────────────────────────────────────────────────
+
     def handle_event(self, payload: Dict[str, Any], now_ms: Optional[int] = None) -> None:
         now = now_ms if now_ms is not None else self._now_ms()
         etype_raw = str(payload.get("type", "")).strip().lower()
         etype = etype_raw.replace("-", "_").replace(" ", "_")
+        station_id = str(payload.get("station_id", "")).strip()
 
-        if etype in ("boot", "wake", "startup"):
-            self.set_state("ambient", now)
+        # ── Tier-0: power / system ────────────────────────────────────────
+        if etype in ("boot", "startup"):
+            self.set_power_state("booting", now)
             self._enqueue_or_preempt(BootIgnition(), now)
             return
+        if etype in ("wake",):
+            self.set_power_state("active", now)
+            self._enqueue_or_preempt(WakeCollapse(self.rng), now)
+            return
         if etype in ("sleep", "shutdown"):
+            self.set_power_state("off", now)
             self._enqueue_or_preempt(PortalClose(self.rng), now)
             return
-
-        if etype in ("enter_station", "station_launch", "station_start", "play", "station_launch_requested"):
-            self._enqueue_or_preempt(PortalOpen(), now)
+        if etype in ("mute", "muted"):
+            self.set_power_state("muted", now)
+            self._enqueue_or_preempt(DampenOff(), now)
             return
-        if etype in ("exit_station", "station_stop", "stop", "station_stopped"):
-            self._enqueue_or_preempt(PortalClose(self.rng), now)
+        if etype in ("unmute",):
+            self.set_power_state("active", now)
+            self._enqueue_or_preempt(RipplesOn(), now)
+            return
+        if etype in ("error", "fatal_error", "backend_error"):
+            self.set_power_state("error", now)
+            self._enqueue_or_preempt(Fracture(), now)
+            return
+        if etype in ("clear_error", "error_clear", "recover"):
+            self.set_power_state("active", now)
+            self._enqueue_or_preempt(Ping(), now)
             return
 
-        if etype in ("loading_in", "loading_out", "loading_start", "loading_switch", "transition"):
-            self._enqueue_or_preempt(ScanLock(), now)
-            return
-
+        # ── Tier-1: interaction mode ──────────────────────────────────────
         if etype in ("audio_cli_on", "listening_start", "mic_on", "wake_word_detected"):
-            self.set_state("listening", now)
+            self.set_mode("listening", now)
             self._enqueue_or_preempt(RipplesOn(), now)
             return
         if etype in ("audio_cli_off", "listening_stop", "mic_off"):
-            self.set_state("ambient", now)
+            self.set_mode("home", now)
             self._enqueue_or_preempt(DampenOff(), now)
             return
 
         if etype in ("thinking_start", "llm_busy_start", "busy_start"):
-            self.set_state("thinking", now)
+            self.set_mode("processing", now)
             return
         if etype in ("thinking_end", "llm_busy_end", "busy_end"):
-            self.set_state("ambient", now)
+            self.set_mode("home", now)
             self._enqueue_or_preempt(ResolvePulse(), now)
             return
 
-        if etype in ("error", "fatal_error", "backend_error"):
-            self.set_state("error", now)
-            self._enqueue_or_preempt(Fracture(), now)
+        if etype in ("tts_start", "speaking_start", "speech_start"):
+            self.set_mode("speaking", now)
             return
-        if etype in ("clear_error", "error_clear", "recover"):
-            self.set_state("ambient", now)
-            self._enqueue_or_preempt(Ping(), now)
+        if etype in ("tts_end", "speaking_end", "speech_end", "tts_done"):
+            self.set_mode("home", now)
+            self._enqueue_or_preempt(ResolvePulse(), now)
+            return
+
+        # Live amplitude feeds
+        if etype == "mic_amplitude":
+            try:
+                self._mic_amp = float(clamp(float(payload.get("value", 0.5)), 0.0, 1.0))
+                if isinstance(self._t1_loop, WaveformRingLoop):
+                    self._t1_loop.mic_amplitude = self._mic_amp
+            except Exception:
+                pass
+            return
+        if etype == "speech_amplitude":
+            try:
+                self._speech_amp = float(clamp(float(payload.get("value", 0.5)), 0.0, 1.0))
+                if isinstance(self._t1_loop, RippleEmissionLoop):
+                    self._t1_loop.speech_amplitude = self._speech_amp
+            except Exception:
+                pass
+            return
+
+        # ── Tier-2: station selection ─────────────────────────────────────
+        if etype in ("enter_station", "station_launch", "station_start", "play",
+                     "station_launch_requested", "station_selected"):
+            self.set_power_state("active", now)
+            self.set_mode("station_selected", now)
+            if station_id:
+                self.set_station(station_id, now)
+            self._enqueue_or_preempt(PortalOpen(), now)
+            return
+        if etype in ("simulation_start", "sim_start"):
+            self.set_mode("simulation", now)
+            self._enqueue_or_preempt(ScanLock(), now)
+            return
+        if etype in ("exit_station", "station_stop", "stop", "station_stopped"):
+            self.set_mode("home", now)
+            self.set_station("", now)
+            self._enqueue_or_preempt(PortalClose(self.rng), now)
+            return
+
+        # ── Navigation ────────────────────────────────────────────────────
+        if etype in ("loading_in", "loading_out", "loading_start", "loading_switch", "transition"):
+            self._enqueue_or_preempt(ScanLock(), now)
             return
 
         if etype in ("confirm", "tap", "select", "ok"):
@@ -819,26 +1475,52 @@ class SoulScheduler:
                 self._scroll_last_dir = 1
             return
 
-    def render_frame(self, now_ms: Optional[int] = None) -> Image.Image:
+    # ── frame renderer ────────────────────────────────────────────────────────
+
+    def render_frame(self, now_ms: Optional[int] = None) -> "Image.Image":  # type: ignore[name-defined]
         now = now_ms if now_ms is not None else self._now_ms()
         self._flush_coalesced(now)
 
         frame = Image.new("L", (self.cfg.width, self.cfg.height), 0)
-        draw = ImageDraw.Draw(frame)
+        draw  = ImageDraw.Draw(frame)
 
+        # ── Layer 1: Tier-2 station motif (background, dimmed) ────────────
+        if self._motif_morph is not None:
+            self._motif_morph.render(draw, now, self.cfg.width, self.cfg.height)
+            if self._motif_morph.done(now):
+                self._motif_morph = None
+        elif self._station_motif is not None:
+            # Render motif at ~35% brightness by compositing on frame
+            if HAS_PIL:
+                from PIL import Image as _I, ImageDraw as _ID
+                f2 = _I.new("L", (self.cfg.width, self.cfg.height), 0)
+                d2 = _ID.Draw(f2)
+                self._station_motif.render(d2, now, self.cfg.width, self.cfg.height)
+                # Darken the motif layer
+                blended = _I.blend(frame, f2, alpha=0.35)
+                frame.paste(blended)
+                draw = ImageDraw.Draw(frame)
+            else:
+                self._station_motif.render(draw, now, self.cfg.width, self.cfg.height)
+
+        # ── Layer 2: Tier-0 base motion loop ──────────────────────────────
+        self._base_loop.render(draw, now, self.cfg.width, self.cfg.height)
+
+        # ── Layer 3: Tier-1 interaction loop (on top of base) ─────────────
+        if self._t1_loop is not None:
+            self._t1_loop.render(draw, now, self.cfg.width, self.cfg.height)
+
+        # ── Layer 4: One-shot ritual (highest priority overlay) ───────────
         if self.active_ritual is not None:
             self.active_ritual.render(draw, now, self.cfg.width, self.cfg.height)
             if self.active_ritual.done(now):
                 self.active_ritual = None
 
-        if self.active_ritual is None:
-            if self.pending:
-                nxt = self.pending.popleft()
-                nxt.start(now)
-                self.active_ritual = nxt
-                self.active_ritual.render(draw, now, self.cfg.width, self.cfg.height)
-            else:
-                self.state_loop.render(draw, now, self.cfg.width, self.cfg.height)
+        if self.active_ritual is None and self.pending:
+            nxt = self.pending.popleft()
+            nxt.start(now)
+            self.active_ritual = nxt
+            self.active_ritual.render(draw, now, self.cfg.width, self.cfg.height)
 
         return frame
 
@@ -955,7 +1637,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=_positive_int, default=20, help="Target render fps")
     p.add_argument("--width", type=_positive_int, default=128, help="Display width")
     p.add_argument("--height", type=_positive_int, default=64, help="Display height")
-    p.add_argument("--ambient", choices=("breathing_halo", "orbit_calm"), default="breathing_halo", help="Ambient style")
+    p.add_argument("--ambient",
+                   choices=("field_drift", "breathing_halo", "orbit_calm"),
+                   default="field_drift",
+                   help="Ambient base-motion style (default: field_drift)")
 
     p.add_argument("--simulate", action="store_true", help="Run without SPI hardware")
     p.add_argument("--preview-path", default="", help="Optional PNG output path in simulation mode")

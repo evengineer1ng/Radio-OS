@@ -1096,3 +1096,17 @@ Generate a concise Formula Z news headline (15 words max):"""
     
     def shutdown(self):
         pass
+
+
+# ── Module-level metadata ─────────────────────────────────────────────────────
+PLUGIN_NAME = "From The Backmarker"
+PLUGIN_DESC = "LLM narration + delegate AI for the From The Backmarker racing simulation"
+
+# ── Transparent OLED motion-profile contract ──────────────────────────────────
+# The OLED soul daemon reads this dict to apply the FTB personality motif.
+OLED_MOTION_PROFILE = {
+    "station_id":     "ftb",
+    "motion_profile": "orbital",         # rotating telemetry arcs + RPM sweep
+    "intensity":      0.80,              # 0.0–1.0
+    "color_palette":  [],                # reserved for colour OLED
+}

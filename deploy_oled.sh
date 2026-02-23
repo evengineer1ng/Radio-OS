@@ -19,6 +19,7 @@ rsync -avz --progress \
     tools/oled_soul_daemon.py \
     tools/oled_event_client.py \
     tools/oled_event_send.py \
+    tools/oled_broadcast.py \
     "${TARGET}:${REMOTE_DIR}/tools/"
 
 # ── 2. Sync service file ──────────────────────────────────────────────────────

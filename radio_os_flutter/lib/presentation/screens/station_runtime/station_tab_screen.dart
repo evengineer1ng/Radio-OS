@@ -1,5 +1,6 @@
-/// Station Tab Screen — routes to the correct tab widget based on the
-/// current station type and active tab ID.
+/// Station Tab Screen — resolves a tab ID to the correct widget.
+/// Used as the page builder inside StationShell's PageView.
+/// Tab/station-type routing lives here; navigation lives in StationShell.
 library;
 
 import 'package:flutter/material.dart';
@@ -30,26 +31,19 @@ class StationTabScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Update active tab provider
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(activeTabProvider.notifier).state = tab;
-    });
-
     final station = ref.watch(activeStationProvider);
     final moduleType = station?.moduleType ?? StationModuleType.radio;
 
-    // Radio and any other non-game stations get the radio dashboard
-    if (moduleType == StationModuleType.radio) {
-      return _radioTab(tab);
+    switch (moduleType) {
+      case StationModuleType.ftb:
+        return _ftbTab(tab);
+      case StationModuleType.oracleKingdom:
+        // OK tabs not yet implemented — fall through to generic.
+        return GenericTab(tabId: tab);
+      case StationModuleType.radio:
+      case StationModuleType.neikos:
+        return _radioTab(tab);
     }
-
-    // Game stations (FTB, Oracle Kingdom, Neikos) keep their full tab routing
-    if (moduleType == StationModuleType.ftb) {
-      return _ftbTab(tab);
-    }
-
-    // Oracle Kingdom and Neikos fall through to generic for now
-    return GenericTab(tabId: tab);
   }
 
   Widget _radioTab(String tab) {
@@ -84,3 +78,4 @@ class StationTabScreen extends ConsumerWidget {
     }
   }
 }
+

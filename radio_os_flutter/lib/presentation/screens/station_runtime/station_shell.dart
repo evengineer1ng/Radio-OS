@@ -1,7 +1,6 @@
-/// Station Shell — persistent wrapper with nav bar + subtitle overlay.
-/// This is the ShellRoute builder for all station/* routes.
-/// Designed for 1920×480: the tab bar runs horizontally at the bottom,
-/// the subtitle floats above it, and the content fills the remaining area.
+/// Station Shell — persistent wrapper with swipeable PageView + tab bar.
+/// Each tab is a full-width card. Swipe to navigate; bottom tab bar stays
+/// in sync and can also be tapped. Designed for 1920×480 ultra-wide displays.
 library;
 
 import 'package:flutter/material.dart';
@@ -14,8 +13,10 @@ import '../../widgets/connection_banner.dart';
 import '../../widgets/now_playing_banner.dart';
 import '../../widgets/subtitle_overlay.dart';
 import '../../widgets/toast_overlay.dart';
+import 'station_tab_screen.dart';
 
 class StationShell extends ConsumerStatefulWidget {
+  // child is kept for ShellRoute compat but we drive navigation via PageView.
   final Widget child;
   const StationShell({super.key, required this.child});
 
@@ -24,13 +25,14 @@ class StationShell extends ConsumerStatefulWidget {
 }
 
 class _StationShellState extends ConsumerState<StationShell> {
-  // Held so we can safely call disconnect() in dispose() after ref is gone.
   Object? _wsManager;
+  late PageController _pageCtrl;
+  String? _lastStationId;
 
   @override
   void initState() {
     super.initState();
-    // Connect WebSocket streams when entering a station
+    _pageCtrl = PageController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final station = ref.read(activeStationProvider);
@@ -49,10 +51,18 @@ class _StationShellState extends ConsumerState<StationShell> {
 
   @override
   void dispose() {
-    // Use the stored reference — do NOT call ref.read() here; ref is already
-    // invalidated by the time dispose() runs in Riverpod.
+    _pageCtrl.dispose();
     (_wsManager as dynamic)?.disconnect();
     super.dispose();
+  }
+
+  void _jumpToTab(int index, List<_TabDef> tabs) {
+    _pageCtrl.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+    ref.read(activeTabProvider.notifier).state = tabs[index].id;
   }
 
   @override
@@ -63,15 +73,32 @@ class _StationShellState extends ConsumerState<StationShell> {
     final size = MediaQuery.of(context).size;
     final isUltraWide = size.width > 1200 && size.height < 600;
 
-    // Determine tabs based on station module type
     final tabs = _tabsForStation(station);
+
+    // If station changed, rebuild page controller at page 0.
+    if (station?.id != _lastStationId) {
+      _lastStationId = station?.id;
+      // Can't call jumpToPage during build — schedule it.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_pageCtrl.hasClients) {
+          _pageCtrl.jumpToPage(0);
+          if (mounted) {
+            ref.read(activeTabProvider.notifier).state =
+                tabs.isNotEmpty ? tabs[0].id : 'dashboard';
+          }
+        }
+      });
+    }
+
+    final activeIndex =
+        tabs.indexWhere((t) => t.id == activeTab).clamp(0, tabs.length - 1);
 
     return Scaffold(
       body: Column(
         children: [
           const ConnectionBanner(),
 
-          // Top toolbar
+          // ── Top toolbar ───────────────────────────────────────────────
           Container(
             height: isUltraWide ? 36 : 44,
             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -81,27 +108,25 @@ class _StationShellState extends ConsumerState<StationShell> {
             ),
             child: Row(
               children: [
-                // Back to browser
                 IconButton(
                   icon: const Icon(Icons.arrow_back, size: 18),
                   onPressed: () => context.go('/'),
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                      minWidth: 32, minHeight: 32),
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
                   tooltip: 'Back to stations',
                 ),
                 const SizedBox(width: 8),
-                Icon(Icons.radio, color: theme.colorScheme.primary, size: 16),
+                Icon(Icons.radio,
+                    color: theme.colorScheme.primary, size: 16),
                 const SizedBox(width: 6),
-                Text(
-                  station?.name ?? 'Station',
-                  style: theme.textTheme.labelLarge,
-                ),
+                Text(station?.name ?? 'Station',
+                    style: theme.textTheme.labelLarge),
                 const SizedBox(width: 8),
                 if (station?.status == StationStatus.running)
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 1),
                     decoration: BoxDecoration(
                       color: const Color(0xFF34d399).withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(4),
@@ -117,28 +142,42 @@ class _StationShellState extends ConsumerState<StationShell> {
                   icon: const Icon(Icons.settings, size: 18),
                   onPressed: () => context.go('/settings/general'),
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                      minWidth: 32, minHeight: 32),
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
                 ),
               ],
             ),
           ),
 
-          // Main content
+          // ── Swipeable page content ────────────────────────────────────
           Expanded(
             child: Stack(
               children: [
-                widget.child,
+                PageView.builder(
+                  controller: _pageCtrl,
+                  itemCount: tabs.length,
+                  onPageChanged: (index) {
+                    if (!mounted) return;
+                    ref.read(activeTabProvider.notifier).state =
+                        tabs[index].id;
+                  },
+                  itemBuilder: (context, index) {
+                    final tabId = tabs[index].id;
+                    return StationTabScreen(
+                      stationId: station?.id ?? '',
+                      tab: tabId,
+                    );
+                  },
+                ),
                 const SubtitleOverlay(),
                 const ToastOverlay(),
               ],
             ),
           ),
 
-          // Now playing
           const NowPlayingBanner(),
 
-          // Tab bar — scrollable horizontal for ultra-wide
+          // ── Bottom tab strip — scrollable, stays in sync with PageView ─
           Container(
             height: isUltraWide ? 40 : 48,
             decoration: BoxDecoration(
@@ -151,16 +190,12 @@ class _StationShellState extends ConsumerState<StationShell> {
               itemCount: tabs.length,
               itemBuilder: (context, index) {
                 final tab = tabs[index];
-                final isActive = tab.id == activeTab;
+                final isActive = index == activeIndex;
                 return GestureDetector(
-                  onTap: () {
-                    ref.read(activeTabProvider.notifier).state = tab.id;
-                    if (station != null) {
-                      context.go('/station/${station.id}/${tab.id}');
-                    }
-                  },
+                  onTap: () => _jumpToTab(index, tabs),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(
                       border: Border(
                         bottom: BorderSide(
@@ -204,7 +239,8 @@ class _StationShellState extends ConsumerState<StationShell> {
   }
 
   List<_TabDef> _tabsForStation(Station? station) {
-    if (station == null) return _ftbTabs;
+    // Default to radio tabs — never fall through to FTB for unknown stations.
+    if (station == null) return _radioTabs;
 
     switch (station.moduleType) {
       case StationModuleType.ftb:
@@ -235,16 +271,6 @@ const _ftbTabs = [
   _TabDef('pbp', '📡', 'PBP'),
   _TabDef('finance', '💰', 'Finance'),
   _TabDef('sponsors', '🤝', 'Sponsors'),
-  _TabDef('promotion', '📈', 'Promo'),
-  _TabDef('stats', '📊', 'Stats'),
-  _TabDef('analytics', '📈', 'Analytics'),
-  _TabDef('career', '🏆', 'Career'),
-  _TabDef('calendar', '📅', 'Calendar'),
-  _TabDef('ai', '🤖', 'AI'),
-  _TabDef('penalties', '⚠️', 'Penalties'),
-  _TabDef('history', '📜', 'History'),
-  _TabDef('help', '❓', 'Help'),
-  _TabDef('data', '🗄️', 'Data'),
 ];
 
 const _okTabs = [
@@ -257,15 +283,10 @@ const _okTabs = [
 ];
 
 const _radioTabs = [
-  _TabDef('dashboard', '🏠', 'Home'),
+  _TabDef('dashboard', '🏠', 'On Air'),
   _TabDef('feeds', '📡', 'Feeds'),
   _TabDef('events', '📋', 'Events'),
 ];
 
-const _neikosTabs = [
-  _TabDef('dashboard', '🏠', 'Home'),
-  _TabDef('islands', '🏝️', 'Islands'),
-  _TabDef('species', '🐾', 'Species'),
-  _TabDef('league', '🏆', 'League'),
-  _TabDef('ecology', '🌿', 'Ecology'),
-];
+// Neikos uses the same basic radio layout until its tabs are built out.
+const _neikosTabs = _radioTabs;

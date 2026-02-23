@@ -12,7 +12,7 @@ ExecStart=/home/airfryer/Radio-OS-1.03/radioenv/bin/python -u tools/oled_soul_da
     --spi-port 0 \
     --spi-device 0 \
     --dc-pin 25 \
-    --rst-pin 24 \
+    --rst-pin 27 \
     --fps 20 \
     --width 128 \
     --height 64

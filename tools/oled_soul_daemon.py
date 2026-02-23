@@ -676,8 +676,8 @@ class SoulConfig:
     spi_port: int = 0
     spi_device: int = 0
     spi_speed_hz: int = 8_000_000
-    dc_pin: int = 24
-    rst_pin: int = 25
+    dc_pin: int = 25
+    rst_pin: int = 27
     rotate_degrees: int = 0
     seed: int = 1337
 
@@ -965,7 +965,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--spi-device", type=int, default=0, help="SPI device index")
     p.add_argument("--spi-speed-hz", type=_positive_int, default=8000000, help="SPI bus speed")
     p.add_argument("--dc-pin", type=int, default=24, help="GPIO DC pin")
-    p.add_argument("--rst-pin", type=int, default=25, help="GPIO RST pin")
+    p.add_argument("--rst-pin", type=int, default=27, help="GPIO RST pin")
     p.add_argument("--rotate", type=int, default=0, help="Rotation degrees (0/90/180/270)")
     p.add_argument("--no-boot", action="store_true", help="Disable boot ritual at daemon startup")
     return p

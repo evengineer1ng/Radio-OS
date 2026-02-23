@@ -604,52 +604,139 @@ class Ping(Animation):
 
 
 class FieldDriftLoop(Animation):
-    """IDLE — 3–5 thin orbital lines, very low opacity, slow parallax drift.
+    """IDLE — layered organic motion: orbital arcs, drifting sparks, lazy
+    constellation lines, and a slow-morphing ring breath.
 
-    Target frequency: 0.1–0.3 Hz perceived motion. Never static.
+    Four independently-timed layers keep things perpetually mutating without
+    ever feeling frantic:
+      L0  slow-breath ring  (0.07 Hz)       — barely-there heartbeat
+      L1  orbital arc pack  (3–5 arcs, 0.05–0.14 rev/s) — parallax drift
+      L2  constellation     (6 nodes, sub-Hz wander, connecting lines)
+      L3  deep-field sparks (8 particles, very slow traverse)
+
+    Every parameter is seeded from rng so two daemon restarts look different.
     """
-    duration_ms = 22000
+    duration_ms = 28000
     priority = 0
     loop = True
 
     def __init__(self, rng: random.Random) -> None:
         super().__init__()
-        self._lines: List[Dict[str, float]] = []
-        for i in range(4):
-            self._lines.append({
-                "radius": 10.0 + i * 4.5,
-                "speed":  0.06 + i * 0.018,         # rev/s — very slow
-                "phase":  rng.uniform(0.0, math.tau),
-                "arc":    rng.uniform(55.0, 100.0),  # degrees
-                "bright": 55 + i * 18,
+
+        # L0 — breath ring params
+        self._breath_r_min = rng.uniform(8.0, 10.0)
+        self._breath_r_max = rng.uniform(14.0, 18.0)
+        self._breath_period = rng.uniform(11.0, 16.0)   # seconds per cycle
+        self._breath_bright_base = rng.randint(28, 42)
+
+        # L1 — orbital arcs
+        self._arcs: List[Dict[str, float]] = []
+        n_arcs = rng.randint(4, 6)
+        for i in range(n_arcs):
+            self._arcs.append({
+                "radius":   8.0 + i * 3.8 + rng.uniform(-1.0, 1.0),
+                "speed":    rng.uniform(0.042, 0.13),    # rev/s
+                "phase":    rng.uniform(0.0, math.tau),
+                "arc_base": rng.uniform(40.0, 90.0),     # deg — base arc length
+                "arc_var":  rng.uniform(15.0, 40.0),     # deg — variation amplitude
+                "arc_rate": rng.uniform(0.07, 0.22),     # Hz — how fast arc length morphs
+                "bright":   rng.randint(38, 75),
             })
-        self._drift: List[Dict[str, float]] = []
-        for _ in range(5):
-            self._drift.append({
-                "x":      rng.uniform(0.15, 0.85),
-                "y":      rng.uniform(0.15, 0.85),
-                "vx":     rng.uniform(-0.002, 0.002),
-                "vy":     rng.uniform(-0.001, 0.001),
-                "bright": rng.randint(18, 38),
+
+        # L2 — constellation: nodes wander slowly, draw lines between close pairs
+        self._nodes: List[Dict[str, float]] = []
+        for _ in range(6):
+            # Anchor to a soft zone so nodes don't leave display edge
+            ax = rng.uniform(0.18, 0.82)
+            ay = rng.uniform(0.18, 0.82)
+            self._nodes.append({
+                "ax": ax, "ay": ay,
+                "px": ax, "py": ay,
+                "vx": rng.uniform(-0.0008, 0.0008),
+                "vy": rng.uniform(-0.0006, 0.0006),
+                "wander_r":  rng.uniform(0.06, 0.14),   # fraction of screen
+                "wander_sp": rng.uniform(0.04, 0.10),   # Hz
+                "wander_ph": rng.uniform(0.0, math.tau),
+                "bright": rng.randint(22, 45),
+            })
+        self._connect_dist_sq = (0.28 * 128) ** 2   # px² — max connect distance
+
+        # L3 — deep-field sparks
+        self._sparks: List[Dict[str, float]] = []
+        for _ in range(8):
+            self._sparks.append({
+                "x":   rng.uniform(0.0, 1.0),
+                "y":   rng.uniform(0.0, 1.0),
+                "vx":  rng.uniform(-0.0015, 0.0015),
+                "vy":  rng.uniform(-0.0010, 0.0010),
+                "bright": rng.randint(14, 30),
+                "twinkle_rate": rng.uniform(0.08, 0.25),  # Hz
+                "twinkle_ph":   rng.uniform(0.0, math.tau),
             })
 
     def render(self, draw: ImageDraw.ImageDraw, now_ms: int, width: int, height: int) -> None:
         seconds = now_ms / 1000.0
         cx, cy = width / 2.0, height / 2.0
 
-        # Slow parallax drift particles
-        for p in self._drift:
-            px = (p["x"] + seconds * p["vx"]) % 1.0
-            py = (p["y"] + seconds * p["vy"]) % 1.0
-            draw_spark(draw, px * width, py * height, brightness=p["bright"], size=1)
+        # ── L0: slow-breath ring ──────────────────────────────────────────
+        breath_t = 0.5 + 0.5 * math.sin(seconds / self._breath_period * math.tau)
+        breath_t = ease_in_out(breath_t)
+        r_breath = lerp(self._breath_r_min, self._breath_r_max, breath_t)
+        b_breath = int(self._breath_bright_base + 18 * breath_t)
+        draw_ring(draw, cx, cy, r_breath, brightness=b_breath, width=1)
 
-        # Thin orbital arcs — different angular speeds → parallax feel
-        for ln in self._lines:
-            angle_rad = (seconds * ln["speed"] * math.tau) + ln["phase"]
+        # ── L1: orbital arcs ─────────────────────────────────────────────
+        for arc in self._arcs:
+            angle_rad = (seconds * arc["speed"] * math.tau) + arc["phase"]
+            # Arc length morphs slowly → feels organic, never locked
+            arc_len = arc["arc_base"] + arc["arc_var"] * math.sin(
+                seconds * arc["arc_rate"] * math.tau
+            )
             start_deg = math.degrees(angle_rad)
-            end_deg   = start_deg + ln["arc"]
-            draw_arc(draw, cx, cy, ln["radius"], start_deg, end_deg,
-                     brightness=ln["bright"], width=1)
+            draw_arc(draw, cx, cy, arc["radius"],
+                     start_deg, start_deg + arc_len,
+                     brightness=int(arc["bright"]), width=1)
+
+        # ── L2: constellation nodes ───────────────────────────────────────
+        pos: List[Tuple[float, float]] = []
+        for nd in self._nodes:
+            # Nodes orbit slowly around their anchor point
+            wx = nd["ax"] + nd["wander_r"] * 0.5 * math.cos(
+                seconds * nd["wander_sp"] * math.tau + nd["wander_ph"]
+            )
+            wy = nd["ay"] + nd["wander_r"] * 0.3 * math.sin(
+                seconds * nd["wander_sp"] * math.tau + nd["wander_ph"] + 1.1
+            )
+            # Soft-clamp inside screen
+            wx = clamp(wx, 0.05, 0.95)
+            wy = clamp(wy, 0.05, 0.95)
+            px, py = wx * width, wy * height
+            pos.append((px, py))
+            draw_spark(draw, px, py, brightness=nd["bright"], size=1)
+
+        # Draw lines between close-enough node pairs
+        for i in range(len(pos)):
+            for j in range(i + 1, len(pos)):
+                dx = pos[i][0] - pos[j][0]
+                dy = pos[i][1] - pos[j][1]
+                dist_sq = dx * dx + dy * dy
+                if dist_sq < self._connect_dist_sq and dist_sq > 0:
+                    # Fade line by distance
+                    fade = 1.0 - (dist_sq / self._connect_dist_sq)
+                    b_line = int(18 + 26 * fade * fade)
+                    draw.line((pos[i][0], pos[i][1], pos[j][0], pos[j][1]),
+                              fill=b_line, width=1)
+
+        # ── L3: deep-field sparks (twinkle) ──────────────────────────────
+        for sp in self._sparks:
+            px = (sp["x"] + seconds * sp["vx"]) % 1.0
+            py = (sp["y"] + seconds * sp["vy"]) % 1.0
+            twinkle = 0.5 + 0.5 * math.sin(
+                seconds * sp["twinkle_rate"] * math.tau + sp["twinkle_ph"]
+            )
+            b = int(sp["bright"] * twinkle)
+            if b > 4:
+                draw_spark(draw, px * width, py * height, brightness=b, size=1)
 
 
 class MutedPulse(Animation):

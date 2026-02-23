@@ -47,6 +47,34 @@ except ImportError:
     HAS_SF = False
 
 # ---------------------------------------------------------------------------
+# USB mic auto-discovery (for Pi / headless setups)
+# ---------------------------------------------------------------------------
+def _find_usb_mic_device() -> Optional[int]:
+    """Return the sounddevice index of the first USB microphone found.
+
+    Scans PortAudio device names for keywords that identify USB audio input
+    devices (USB, Condenser, Microphone).  Returns None if sounddevice is
+    unavailable or no matching device is found.
+
+    Card numbers can shift across reboots when other USB devices are present,
+    so name-based discovery is more reliable than hardcoding an index.
+    """
+    if not HAS_SD:
+        return None
+    try:
+        keywords = ("usb", "condenser", "microphone", "webcam")
+        for i, dev in enumerate(sd.query_devices()):
+            if dev.get("max_input_channels", 0) < 1:
+                continue
+            name_lc = dev.get("name", "").lower()
+            if any(kw in name_lc for kw in keywords):
+                _log(f"USB mic auto-discovered: index={i} name='{dev['name']}'")
+                return i
+    except Exception as e:
+        _log(f"USB mic discovery error: {e}")
+    return None
+
+# ---------------------------------------------------------------------------
 # Global config loader (reads from ~/.radioOS/config.json)
 # ---------------------------------------------------------------------------
 def _load_audio_cli_config() -> dict:
@@ -2651,7 +2679,7 @@ class MicStream:
 
     def __init__(self, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS,
                  buffer_sec: float = MIC_RING_BUFFER_SEC):
-        # Allow config override for mic device (e.g. INMP441 on Pi 5)
+        # Resolve mic device: config → USB auto-discovery → system default
         _acfg: dict = {}
         try:
             _acfg = _load_audio_cli_config() or {}
@@ -2663,6 +2691,11 @@ class MicStream:
                 _dev_idx = int(_dev_idx)
             except Exception:
                 _dev_idx = None
+        # If no device configured, try to find a USB mic automatically.
+        # This keeps things working across reboots where the card number
+        # may shift (e.g. Pi with USB condenser mic).
+        if _dev_idx is None:
+            _dev_idx = _find_usb_mic_device()  # returns None if not found
         _cfg_ch = _acfg.get("mic_channels", None)
         if _cfg_ch is not None:
             try:
@@ -2670,8 +2703,10 @@ class MicStream:
             except Exception:
                 pass
         self._device_index: Optional[int] = _dev_idx
+        if _dev_idx is not None:
+            _log(f"MicStream: using device index {_dev_idx} (channels={channels})")
 
-        self._sr = sample_rate
+        self._sr = sample_rate          # target STT sample rate (16000 Hz)
         self._ch = channels
         self._buf_len = int(buffer_sec * sample_rate)
         self._ring = np.zeros(self._buf_len, dtype=np.float32)
@@ -2686,6 +2721,12 @@ class MicStream:
         # Live (un-gated) RMS — always reflects real mic energy even when
         # muted, so barge-in detection can still sense the user speaking.
         self._live_rms = 0.0
+        # Native capture rate — may differ from self._sr when the hardware
+        # doesn't support 16 kHz natively (e.g. USB condenser at 48 kHz).
+        # Downsampling is applied in the callback when these differ.
+        self._native_sr: int = sample_rate
+        # Accumulator for fractional downsampling across callbacks
+        self._ds_buf: np.ndarray = np.empty(0, dtype=np.float32)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -2696,16 +2737,63 @@ class MicStream:
         if not HAS_SD:
             _log("sounddevice not available — MicStream disabled.")
             return
-        self._stream = sd.InputStream(
-            device=self._device_index,        # None = system default; int = specific device
-            samplerate=self._sr,
-            channels=self._ch,
-            dtype="float32",
-            callback=self._callback,
-            blocksize=int(0.1 * self._sr),   # 100 ms blocks
-        )
-        self._stream.start()
-        _log("MicStream opened (persistent).")
+        # Try configured/discovered device first; fall back to USB discovery
+        # then system default if PortAudio rejects the device (e.g. after
+        # a reboot where the card number changed).
+        devices_to_try: list = []
+        if self._device_index is not None:
+            devices_to_try.append(self._device_index)
+        # Always include USB auto-discovery and system default as fallbacks
+        _usb = _find_usb_mic_device()
+        if _usb is not None and _usb != self._device_index:
+            devices_to_try.append(_usb)
+        devices_to_try.append(None)  # system default last resort
+
+        last_err: Optional[Exception] = None
+        for dev in devices_to_try:
+            # Determine channel count and native sample rate for this device
+            _ch = self._ch
+            _native_sr = self._sr
+            if dev is not None and HAS_SD:
+                try:
+                    info = sd.query_devices(dev)
+                    _ch = min(self._ch, int(info["max_input_channels"]))
+                    _ch = max(_ch, 1)
+                    _native_sr = int(info["default_samplerate"])
+                except Exception:
+                    pass
+
+            # Try the device's native rate first; if the device is the
+            # system default (dev=None) also try 16000 directly.
+            rates_to_try = [_native_sr]
+            if _native_sr != self._sr:
+                rates_to_try.append(self._sr)
+
+            for rate in rates_to_try:
+                try:
+                    _blocksize = int(0.1 * rate)   # 100 ms blocks
+                    stream = sd.InputStream(
+                        device=dev,
+                        samplerate=rate,
+                        channels=_ch,
+                        dtype="float32",
+                        callback=self._callback,
+                        blocksize=_blocksize,
+                    )
+                    stream.start()
+                    self._stream = stream
+                    self._ch = _ch
+                    self._native_sr = rate
+                    self._ds_buf = np.empty(0, dtype=np.float32)
+                    _log(f"MicStream opened (device={dev}, native_sr={rate}, target_sr={self._sr}, channels={_ch}).")
+                    return
+                except Exception as e:
+                    last_err = e
+                    _log(f"MicStream: device={dev} rate={rate} failed: {e}")
+                last_err = e
+                _log(f"MicStream: device={dev} failed: {e}")
+
+        _log(f"MicStream: all devices failed — mic unavailable. Last error: {last_err}")
 
     def close(self) -> None:
         """Close the mic stream."""
@@ -2751,12 +2839,30 @@ class MicStream:
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         mono = indata[:, 0] if indata.ndim > 1 else indata.flatten()
-        n = len(mono)
         # Always track real mic energy for barge-in even when muted
         self._live_rms = float(np.sqrt(np.mean(mono ** 2)))
+        # Downsample if the hardware runs at a different rate than the STT
+        # target (e.g. USB condenser at 48 kHz → 16 kHz).
+        if self._native_sr != self._sr:
+            # Prepend any leftover samples from the previous callback, then
+            # decimate by the exact rational ratio using linear interpolation.
+            combined = np.concatenate([self._ds_buf, mono]) if len(self._ds_buf) else mono
+            ratio = self._native_sr / self._sr
+            new_len = int(len(combined) / ratio)
+            if new_len > 0:
+                old_idx = np.linspace(0, len(combined) - 1, new_len)
+                mono = np.interp(old_idx, np.arange(len(combined)), combined).astype(np.float32)
+                # Keep the fractional tail for the next callback
+                used = int(new_len * ratio)
+                self._ds_buf = combined[used:] if used < len(combined) else np.empty(0, dtype=np.float32)
+            else:
+                # Not enough samples yet — accumulate and return
+                self._ds_buf = combined
+                return
         # When muted, write silence so TTS speaker output can't enter buffer
         if self._muted:
-            mono = np.zeros(n, dtype=np.float32)
+            mono = np.zeros(len(mono), dtype=np.float32)
+        n = len(mono)
         with self._lock:
             space = self._buf_len - self._write_pos
             if n <= space:

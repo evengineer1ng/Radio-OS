@@ -1,0 +1,18 @@
+[Unit]
+Description=Radio OS Web Shell
+After=network.target oled-soul.service
+
+[Service]
+Type=simple
+User=airfryer
+WorkingDirectory=/home/airfryer/Radio-OS-1.03
+Environment=PYTHONUNBUFFERED=1
+Environment=RADIO_OS_ROOT=/home/airfryer/Radio-OS-1.03
+ExecStart=/home/airfryer/Radio-OS-1.03/radioenv/bin/python -u web_server.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/airfryer/radioos_web.log
+StandardError=append:/home/airfryer/radioos_web.log
+
+[Install]
+WantedBy=multi-user.target

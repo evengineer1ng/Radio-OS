@@ -5,6 +5,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../data/models/station.dart';
 import '../../../domain/providers.dart';
 import '../ftb/dashboard_tab.dart';
 import '../ftb/team_tab.dart';
@@ -15,6 +16,7 @@ import '../ftb/play_by_play_tab.dart';
 import '../ftb/finance_tab.dart';
 import '../ftb/sponsors_tab.dart';
 import '../ftb/generic_tab.dart';
+import 'radio_dashboard_tab.dart';
 
 class StationTabScreen extends ConsumerWidget {
   final String stationId;
@@ -33,7 +35,33 @@ class StationTabScreen extends ConsumerWidget {
       ref.read(activeTabProvider.notifier).state = tab;
     });
 
-    // Route to the correct tab widget
+    final station = ref.watch(activeStationProvider);
+    final moduleType = station?.moduleType ?? StationModuleType.radio;
+
+    // Radio and any other non-game stations get the radio dashboard
+    if (moduleType == StationModuleType.radio) {
+      return _radioTab(tab);
+    }
+
+    // Game stations (FTB, Oracle Kingdom, Neikos) keep their full tab routing
+    if (moduleType == StationModuleType.ftb) {
+      return _ftbTab(tab);
+    }
+
+    // Oracle Kingdom and Neikos fall through to generic for now
+    return GenericTab(tabId: tab);
+  }
+
+  Widget _radioTab(String tab) {
+    switch (tab) {
+      case 'dashboard':
+        return const RadioDashboardTab();
+      default:
+        return GenericTab(tabId: tab);
+    }
+  }
+
+  Widget _ftbTab(String tab) {
     switch (tab) {
       case 'dashboard':
         return const FTBDashboardTab();

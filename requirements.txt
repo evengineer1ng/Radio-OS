@@ -35,6 +35,7 @@ pygetwindow>=0.0.9; sys_platform == 'win32'  # Robust window enumeration (Window
 pydub>=0.25.1                       # Audio manipulation/editing (requires ffmpeg)
 imageio>=2.31.0                     # Image/video I/O (video_timeline, etc.)
 SpeechRecognition>=3.10.0           # Speech-to-text (if using audio input plugins)
+faster-whisper>=1.2.0               # Priority-0 STT engine; pure-Python CTranslate2 (ARM64-compatible)
 matplotlib>=3.7.0                   # Visualization/plotting (analysis widgets)
 
 # Web Server (Radio OS Web Shell — optional, for Tailscale/LAN access)

@@ -2651,6 +2651,26 @@ class MicStream:
 
     def __init__(self, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS,
                  buffer_sec: float = MIC_RING_BUFFER_SEC):
+        # Allow config override for mic device (e.g. INMP441 on Pi 5)
+        _acfg: dict = {}
+        try:
+            _acfg = _load_audio_cli_config() or {}
+        except Exception:
+            pass
+        _dev_idx = _acfg.get("mic_device_index", None)
+        if _dev_idx is not None:
+            try:
+                _dev_idx = int(_dev_idx)
+            except Exception:
+                _dev_idx = None
+        _cfg_ch = _acfg.get("mic_channels", None)
+        if _cfg_ch is not None:
+            try:
+                channels = int(_cfg_ch)
+            except Exception:
+                pass
+        self._device_index: Optional[int] = _dev_idx
+
         self._sr = sample_rate
         self._ch = channels
         self._buf_len = int(buffer_sec * sample_rate)
@@ -2677,6 +2697,7 @@ class MicStream:
             _log("sounddevice not available — MicStream disabled.")
             return
         self._stream = sd.InputStream(
+            device=self._device_index,        # None = system default; int = specific device
             samplerate=self._sr,
             channels=self._ch,
             dtype="float32",
@@ -2834,6 +2855,25 @@ class STTEngine:
         except Exception:
             pass
 
+        # ── faster-whisper (priority 0 — pure Python, works on ARM64/Pi 5) ──
+        self._fw_model: Optional[Any] = None
+        self._fw_model_size: str = acli_cfg.get("faster_whisper_model", "").strip() \
+            or os.environ.get("FASTER_WHISPER_MODEL", "tiny")
+        self._fw_model_dir: str = acli_cfg.get("faster_whisper_model_dir", "").strip() \
+            or os.environ.get("FASTER_WHISPER_MODEL_DIR", "")
+        try:
+            from faster_whisper import WhisperModel as _FW  # type: ignore
+            _fw_kwargs: dict = dict(
+                device="cpu",
+                compute_type="int8",
+            )
+            if self._fw_model_dir:
+                _fw_kwargs["download_root"] = os.path.expanduser(self._fw_model_dir)
+            self._fw_model = _FW(self._fw_model_size, **_fw_kwargs)
+            _log(f"STT: faster-whisper ready (model={self._fw_model_size})")
+        except Exception as _fw_err:
+            _log(f"STT: faster-whisper not available: {_fw_err}")
+
         # Whisper.cpp — check config first, then env vars
         self.whisper_bin = (
             acli_cfg.get("whisper_cpp_bin", "").strip()
@@ -2886,7 +2926,9 @@ class STTEngine:
         self._language: str = acli_cfg.get("stt_language", "en-US")
 
         # Log STT availability at init so problems are obvious immediately
-        if self._has_whisper:
+        if self._fw_model is not None:
+            _log(f"STT: faster-whisper ready — model={self._fw_model_size} (priority 0)")
+        elif self._has_whisper:
             _log(f"STT: whisper.cpp ready ({self.whisper_bin})")
         elif self._google_cloud_creds:
             _log("STT: using Google Cloud Speech-to-Text (high quality)")
@@ -3081,7 +3123,36 @@ class STTEngine:
         3. Google free web API via SpeechRecognition (enhanced with phrase
            hints, language tag, and retry-on-transient-error)
         """
-        # ── 1. Try whisper.cpp first ──────────────────────────────
+        # ── 0. faster-whisper (local, no network, best for Pi 5) ─
+        if self._fw_model is not None:
+            try:
+                import numpy as _np
+                import soundfile as _sf
+
+                # Read the wav, convert to float32 mono at 16 kHz
+                data, sr = _sf.read(wav_path, dtype="float32", always_2d=True)
+                mono = data[:, 0]  # left channel
+                if sr != 16000:
+                    # Simple decimation via numpy if rate differs
+                    import math as _math
+                    factor = sr / 16000
+                    new_len = int(len(mono) / factor)
+                    mono = _np.interp(
+                        _np.linspace(0, len(mono) - 1, new_len),
+                        _np.arange(len(mono)),
+                        mono,
+                    ).astype(_np.float32)
+
+                segs, _info = self._fw_model.transcribe(
+                    mono, language="en", vad_filter=True,
+                )
+                text = " ".join(s.text.strip() for s in segs).strip()
+                if text:
+                    return text
+            except Exception as _e:
+                _log(f"STT: faster-whisper transcribe error: {_e}")
+
+        # ── 1. Try whisper.cpp ────────────────────────────────────
         if self._has_whisper:
             try:
                 out_txt = wav_path + ".txt"

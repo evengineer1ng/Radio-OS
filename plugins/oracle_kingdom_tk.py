@@ -479,6 +479,170 @@ class DecreePanel(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
+# INSPECTION PANEL  (Causal Ledger viewer)
+# ═══════════════════════════════════════════════════════════════
+
+# Mapping from the display label in stat_bars to the internal variable name
+STAT_BAR_VARIABLES = {
+    "Food":           "food_stores",
+    "Trade":          "trade_volume",
+    "Infrastructure": "infrastructure",
+    "Cohesion":       "cohesion",
+    "Hope":           "hope_level",
+    "Fear":           "fear_level",
+    "Tension":        "class_tension",
+    "Legitimacy":     "legitimacy",
+    "Corruption":     "corruption",
+    "Enforcement":    "enforcement_capacity",
+    "Threat":         "external_threat",
+    "Faith":          "public_faith",
+    "Divergence":     "interpretation_divergence",
+}
+
+
+class InspectionPanel(ctk.CTkToplevel):
+    """
+    Floating causal-ledger inspection window.
+
+    Click any variable button to see a timeline of every change to that
+    variable — what caused each shift and when.  'Why did legitimacy
+    collapse?' — this answers it.
+    """
+
+    def __init__(self, master, cmd_q: queue.Queue, **kw):
+        super().__init__(master, **kw)
+        self.cmd_q = cmd_q
+        self.title("Kingdom Inspection")
+        self.geometry("560x520")
+        self.configure(fg_color=COLORS["bg"])
+        self.resizable(True, True)
+
+        # Allow the window to stay open while playing
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)
+
+        self._build()
+
+    def _build(self):
+        # ── Header ──
+        hdr = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"], height=36, corner_radius=0)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(
+            hdr, text="🔍 Causal Ledger — Why did this happen?",
+            font=("Helvetica", 12, "bold"),
+            text_color=COLORS["accent"],
+        ).pack(side="left", padx=12, pady=6)
+
+        # ── Variable picker ──
+        picker = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0)
+        picker.pack(fill="x", padx=8, pady=(8, 0))
+
+        ctk.CTkLabel(
+            picker, text="Select a variable to trace:",
+            font=("Helvetica", 10),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+
+        btn_grid = ctk.CTkFrame(picker, fg_color="transparent")
+        btn_grid.pack(fill="x", padx=8, pady=(0, 6))
+
+        self._var_buttons: Dict[str, ctk.CTkButton] = {}
+        vars_ordered = list(STAT_BAR_VARIABLES.items())
+        for i, (label, var) in enumerate(vars_ordered):
+            r, c = divmod(i, 4)
+            btn = ctk.CTkButton(
+                btn_grid,
+                text=label,
+                font=("Helvetica", 9),
+                width=90, height=22,
+                fg_color=COLORS["bg_panel"],
+                hover_color=COLORS["bg_hover"],
+                border_color=COLORS["border"],
+                border_width=1,
+                text_color=COLORS["text_muted"],
+                command=lambda v=var, lbl=label: self._request_trace(v, lbl),
+            )
+            btn.grid(row=r, column=c, padx=2, pady=2, sticky="ew")
+            btn_grid.columnconfigure(c, weight=1)
+            self._var_buttons[label] = btn
+
+        # ── Current variable label ──
+        self._active_var_lbl = ctk.CTkLabel(
+            self, text="No variable selected.",
+            font=("Helvetica", 11, "italic"),
+            text_color=COLORS["text_muted"],
+        )
+        self._active_var_lbl.pack(anchor="w", padx=12, pady=(8, 0))
+
+        # ── Causal history text ──
+        self._trace_box = ctk.CTkTextbox(
+            self,
+            font=("Menlo", 10),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text"],
+            state="disabled",
+        )
+        self._trace_box.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _request_trace(self, variable: str, label: str):
+        """Ask the controller for causal history of this variable."""
+        self._active_var_lbl.configure(
+            text=f"Tracing: {label}  ({variable})",
+            text_color=COLORS["accent"],
+        )
+        # Highlight active button
+        for lbl, btn in self._var_buttons.items():
+            if lbl == label:
+                btn.configure(border_color=COLORS["accent"], text_color=COLORS["accent"])
+            else:
+                btn.configure(border_color=COLORS["border"], text_color=COLORS["text_muted"])
+
+        self._set_text("Loading…")
+        self.cmd_q.put({"action": "causal_trace", "variable": variable, "last_n": 60})
+        self.cmd_q.put({"action": "causal_explain", "variable": variable})
+
+    def show_trace(self, variable: str, history: list, total_edges: int):
+        """Render a variable_history list into the text box."""
+        if not history:
+            self._set_text(f"No causal history recorded for '{variable}' yet.\n"
+                           "Play a few ticks and then inspect again.")
+            return
+
+        lines = [
+            f"Variable: {variable}",
+            f"Ledger size: {total_edges} total edges | showing last {len(history)}",
+            "",
+            f"{'Tick':>6}  {'Delta':>8}  {'Source Type':14}  {'Source ID'}",
+            "─" * 60,
+        ]
+        cumulative = 0.0
+        for e in history:
+            delta = e.get("delta", 0.0)
+            cumulative += delta
+            sign = "+" if delta >= 0 else ""
+            source_type = e.get("source_type", "?")[:14]
+            source_id = e.get("source_id", "?")[:30]
+            tick = e.get("tick", 0)
+            lines.append(f"{tick:>6}  {sign}{delta:>7.2f}  {source_type:<14}  {source_id}")
+
+        lines += ["─" * 60, f"{'Net (shown):':>30}  {'+' if cumulative >= 0 else ''}{cumulative:.2f}"]
+        self._set_text("\n".join(lines))
+
+    def show_explanation(self, variable: str, explanation: str):
+        """Append a human-readable explanation below the trace."""
+        current = self._trace_box.get("1.0", "end").rstrip()
+        if "EXPLANATION" not in current:
+            full = current + "\n\n── EXPLANATION ──\n" + explanation
+            self._set_text(full)
+
+    def _set_text(self, text: str):
+        self._trace_box.configure(state="normal")
+        self._trace_box.delete("1.0", "end")
+        self._trace_box.insert("end", text)
+        self._trace_box.configure(state="disabled")
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN APPLICATION
 # ═══════════════════════════════════════════════════════════════
 
@@ -511,6 +675,9 @@ class OracleKingdomApp(ctk.CTk):
         self._build_title_screen()
         self._build_game_screen()
         self._show_screen("title")
+
+        # ── Inspection panel (lazy — created on first open) ──
+        self._inspection_panel: Optional[InspectionPanel] = None
 
         # ── UI poll timer ──
         self._poll_ui()
@@ -672,6 +839,14 @@ class OracleKingdomApp(ctk.CTk):
             command=self._save_game,
         ).pack(side="left", padx=2)
 
+        ctk.CTkButton(
+            btn_frame, text="🔍 Inspect", width=80, height=26,
+            font=("Helvetica", 10),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["info"],
+            command=self._open_inspection_panel,
+        ).pack(side="left", padx=2)
+
         # ── Subtitle bar (shows TTS narration from bookmark.py) ──
         sub_bar = ctk.CTkFrame(frame, fg_color="#0a0a10", height=24, corner_radius=0)
         sub_bar.pack(fill="x")
@@ -768,6 +943,11 @@ class OracleKingdomApp(ctk.CTk):
             bar = StatBar(right, label=name, invert=inv)
             bar.pack(fill="x", padx=4, pady=1)
             self.stat_bars[name] = bar
+            # Click the label to open inspection panel for that variable
+            var = STAT_BAR_VARIABLES.get(name)
+            if var:
+                bar.lbl.configure(cursor="hand2")
+                bar.lbl.bind("<Button-1>", lambda e, v=var, n=name: self._inspect_var(v, n))
 
         ctk.CTkLabel(
             right, text="ORACLE MIND",
@@ -819,7 +999,140 @@ class OracleKingdomApp(ctk.CTk):
         self.controller = _ok.OKController(self.runtime_stub, {})
         self.controller.start()
         self.runtime_stub["ok_cmd_q"].put({"action": "load"})
-        self.after(600, self._try_load_court)
+        # Give the controller thread time to load and compute absence ticks,
+        # then check if reconstruction is needed before entering the game.
+        self.after(600, self._check_reconstruction_after_load)
+
+    def _check_reconstruction_after_load(self):
+        """After loading, fast-forward any absence ticks silently then enter game."""
+        if not self.controller or not self.controller.state:
+            self.after(200, self._check_reconstruction_after_load)
+            return
+
+        if self.controller._reconstruction_machine:
+            # Run all phases instantly (no ritual blocking) and show a brief summary
+            self._show_reconstruction_summary()
+        else:
+            self._try_load_court()
+
+    def _show_reconstruction_summary(self):
+        """
+        Show a dismissible dialog summarising what happened during absence.
+        Runs reconstruction in background; 'Enter Kingdom' or 'Skip' closes it.
+        """
+        if not self.controller or not self.controller._reconstruction_machine:
+            self._try_load_court()
+            return
+
+        # ── Build the dialog ──
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("The Oracle Returns")
+        dlg.geometry("520x420")
+        dlg.configure(fg_color=COLORS["bg"])
+        dlg.grab_set()
+        dlg.transient(self)
+
+        ctk.CTkLabel(
+            dlg, text="While You Were Gone…",
+            font=("Helvetica", 20, "bold"),
+            text_color=COLORS["accent"],
+        ).pack(pady=(20, 4))
+
+        years_lbl = ctk.CTkLabel(
+            dlg, text="Calculating absence…",
+            font=("Helvetica", 12, "italic"),
+            text_color=COLORS["text_muted"],
+        )
+        years_lbl.pack()
+
+        summary_box = ctk.CTkTextbox(
+            dlg, height=220,
+            font=("Helvetica", 11),
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text"],
+            state="disabled",
+        )
+        summary_box.pack(fill="x", padx=20, pady=10)
+
+        enter_btn = ctk.CTkButton(
+            dlg, text="Enter Kingdom",
+            font=("Helvetica", 13, "bold"),
+            fg_color=COLORS["accent"],
+            text_color="#111",
+            width=160, height=36,
+            state="disabled",
+            command=lambda: self._finish_load(dlg),
+        )
+        enter_btn.pack(pady=4)
+
+        ctk.CTkButton(
+            dlg, text="Skip",
+            font=("Helvetica", 11),
+            fg_color="transparent",
+            text_color=COLORS["text_muted"],
+            command=lambda: self._finish_load(dlg),
+        ).pack()
+
+        # ── Run reconstruction in a background thread ──
+        def _run():
+            if not self.controller or not self.controller._reconstruction_machine:
+                return
+            machine = self.controller._reconstruction_machine
+            results = machine.run_all_phases()
+            # Finalize so last_session_ts is stamped and reconstruction won't re-fire
+            _ok.AbsenceReconstructor.finalize_reconstruction(
+                self.controller.state, machine
+            )
+            self.controller._reconstruction_machine = None
+            self.controller._reconstruction_pending = 0
+
+            summary = machine.summary()
+            total_years = summary.get("total_years", 0)
+            total_events = summary.get("total_events", 0)
+            agg = summary.get("aggregate_changes", {})
+            crossings = summary.get("threshold_crossings", [])
+
+            lines: list = [
+                f"The kingdom advanced {total_years:.1f} years in your absence.",
+                f"{total_events} events unfolded without an Oracle.",
+                "",
+            ]
+
+            if agg:
+                notable = sorted(agg.items(), key=lambda x: abs(x[1]), reverse=True)[:6]
+                lines.append("Notable changes:")
+                for var, delta in notable:
+                    sign = "+" if delta > 0 else ""
+                    lines.append(f"  {var.replace('_', ' ').title():22s}  {sign}{delta:.1f}")
+                lines.append("")
+
+            if crossings:
+                lines.append("Thresholds crossed:")
+                for c in crossings[:4]:
+                    lines.append(f"  • {c}")
+
+            text = "\n".join(lines)
+            # Update UI from main thread
+            self.after(0, lambda: _update_ui(total_years, text))
+
+        def _update_ui(total_years: float, text: str):
+            years_lbl.configure(text=f"{total_years:.1f} in-game years elapsed since last session")
+            summary_box.configure(state="normal")
+            summary_box.delete("1.0", "end")
+            summary_box.insert("end", text)
+            summary_box.configure(state="disabled")
+            enter_btn.configure(state="normal")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_load(self, dlg: ctk.CTkToplevel):
+        """Close the reconstruction dialog and enter the game."""
+        try:
+            dlg.grab_release()
+            dlg.destroy()
+        except Exception:
+            pass
+        self._try_load_court()
 
     def _try_load_court(self):
         if self.controller and self.controller.state:
@@ -842,6 +1155,21 @@ class OracleKingdomApp(ctk.CTk):
         else:
             self.runtime_stub["ok_cmd_q"].put({"action": "pause"})
             self.pause_btn.configure(text="▶ Resume")
+
+    def _open_inspection_panel(self):
+        """Open (or focus) the causal ledger inspection window."""
+        if self._inspection_panel is None or not self._inspection_panel.winfo_exists():
+            self._inspection_panel = InspectionPanel(
+                self, cmd_q=self.runtime_stub["ok_cmd_q"]
+            )
+        else:
+            self._inspection_panel.deiconify()
+            self._inspection_panel.lift()
+
+    def _inspect_var(self, variable: str, label: str):
+        """Open inspection panel and immediately trace a specific variable."""
+        self._open_inspection_panel()
+        self._inspection_panel._request_trace(variable, label)
 
     def _manual_tick(self):
         if not self.controller:
@@ -1022,6 +1350,25 @@ class OracleKingdomApp(ctk.CTk):
             self.event_text.configure(state="disabled")
         elif msg_type == "state_update":
             self._refresh_display()
+        elif msg_type == "causal_trace":
+            if self._inspection_panel and self._inspection_panel.winfo_exists():
+                self._inspection_panel.show_trace(
+                    variable=msg.get("variable", ""),
+                    history=msg.get("history", []),
+                    total_edges=msg.get("total_edges", 0),
+                )
+        elif msg_type == "causal_explanation":
+            if self._inspection_panel and self._inspection_panel.winfo_exists():
+                self._inspection_panel.show_explanation(
+                    variable=msg.get("variable", ""),
+                    explanation=msg.get("explanation", ""),
+                )
+        elif msg_type in ("reconstruction_start", "reconstruction_phase",
+                          "reconstruction_complete", "load_error",
+                          "speech_options", "inner_monologue"):
+            # These are handled elsewhere or silently consumed here to
+            # prevent queue build-up.
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -66,6 +66,15 @@ voices/kokoro/
 **/ftb_autosave.db
 **/ftb_autosave.json
 ftb_autosave.json
+**/ok_autosave.json
+
+# Station runtime files (generated at runtime, not source)
+stations/**/station.sqlite
+stations/**/station.sqlite-shm
+stations/**/station.sqlite-wal
+stations/**/station_memory.json
+stations/**/status.json
+stations/**/.audio_pipe/
 
 # Large save files excluded from repo — ignore all .db saves
 saves/*.db

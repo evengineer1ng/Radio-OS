@@ -1,5 +1,5 @@
-/// Settings Screen — general, models, voices, environment, connection.
-/// Ultra-wide: horizontal section nav + content panel.
+/// Settings Screen — general, models, voices, environment, connection, appearance.
+/// Ultra-wide: horizontal section nav on left + scrollable content panel on right.
 library;
 
 import 'package:flutter/material.dart';
@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../config/host_config.dart';
 import '../../../config/themes.dart';
 import '../../../domain/providers.dart';
 
@@ -23,20 +22,30 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  Map<String, dynamic>? _settings;
+  Map<String, dynamic>? _storageInfo;
+  Map<String, dynamic>? _pluginsInfo;
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
+    _load();
   }
 
-  Future<void> _loadSettings() async {
+  Future<void> _load() async {
     try {
       final api = ref.read(shellApiProvider);
-      final res = await api.getSettings();
-      if (mounted) setState(() { _settings = res; _loading = false; });
+      final results = await Future.wait([
+        api.getStorageInfo(),
+        api.listPlugins(),
+      ]);
+      if (mounted) {
+        setState(() {
+          _storageInfo = results[0];
+          _pluginsInfo = results[1];
+          _loading = false;
+        });
+      }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
@@ -60,21 +69,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return Scaffold(
       body: Row(
         children: [
-          // Left nav
+          // ── Left nav ──────────────────────────────────────────────────
           Container(
-            width: isUltraWide ? 200 : 240,
+            width: isUltraWide ? 180 : 220,
             color: theme.colorScheme.surface,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Back button header
+                // Back button — pop if possible, else go home
                 InkWell(
-                  onTap: () => context.go('/'),
+                  onTap: () {
+                    if (context.canPop()) {
+                      context.pop();
+                    } else {
+                      context.go('/');
+                    }
+                  },
                   child: Padding(
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.all(isUltraWide ? 10 : 14),
                     child: Row(
                       children: [
-                        Icon(Icons.arrow_back, size: 22,
+                        Icon(Icons.arrow_back,
+                            size: isUltraWide ? 18 : 22,
                             color: theme.textTheme.bodySmall?.color),
                         const SizedBox(width: 6),
                         Text('Back', style: theme.textTheme.labelLarge),
@@ -83,23 +99,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ),
                 ),
                 Divider(height: 1, color: theme.dividerColor),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
                 ...sections.map((s) {
                   final isActive = s.id == widget.section;
                   return InkWell(
                     onTap: () => context.go('/settings/${s.id}'),
                     child: Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                      padding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: isUltraWide ? 8 : 11),
                       color: isActive
-                          ? theme.colorScheme.primary
-                              .withValues(alpha: 0.1)
+                          ? theme.colorScheme.primary.withValues(alpha: 0.12)
                           : Colors.transparent,
                       child: Row(
                         children: [
                           Icon(s.icon,
-                              size: 22,
+                              size: isUltraWide ? 18 : 20,
                               color: isActive
                                   ? theme.colorScheme.primary
                                   : theme.textTheme.bodySmall?.color),
@@ -107,7 +123,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           Text(
                             s.label,
                             style: TextStyle(
-                              fontSize: 16,
+                              fontSize: isUltraWide ? 13 : 15,
                               fontWeight: isActive
                                   ? FontWeight.w600
                                   : FontWeight.normal,
@@ -125,7 +141,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           Container(width: 1, color: theme.dividerColor),
-          // Content area
+          // ── Content ───────────────────────────────────────────────────
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -141,15 +157,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       case 'connection':
         return const _ConnectionSection();
       case 'general':
-        return _GeneralSection(settings: _settings);
+        return _GeneralSection(
+            storageInfo: _storageInfo, pluginsInfo: _pluginsInfo);
       case 'models':
-        return _ModelsSection(settings: _settings);
+        return const _ModelsSection();
       case 'voices':
-        return _VoicesSection(settings: _settings);
+        return const _VoicesSection();
       case 'environment':
-        return _EnvironmentSection(settings: _settings);
+        return const _EnvironmentSection();
       case 'appearance':
-        return _AppearanceSection();
+        return const _AppearanceSection();
       default:
         return Center(child: Text('Unknown section: ${widget.section}'));
     }
@@ -163,13 +180,12 @@ class _SectionDef {
   const _SectionDef(this.id, this.label, this.icon);
 }
 
-// ---------------------------------------------------------------------------
-// Connection — configure backend host
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Connection
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _ConnectionSection extends ConsumerStatefulWidget {
   const _ConnectionSection();
-
   @override
   ConsumerState<_ConnectionSection> createState() => _ConnectionSectionState();
 }
@@ -181,8 +197,9 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
   String? _testResult;
 
   static const _quickHosts = [
-    ('This Pi', '127.0.0.1'),
+    ('This Pi (localhost)', '127.0.0.1'),
     ('Mac (10.0.0.2)', '10.0.0.2'),
+    ('Pi (10.0.0.120)', '10.0.0.120'),
   ];
 
   @override
@@ -206,6 +223,7 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
     if (host.isEmpty) return;
     await ref.read(hostConfigProvider.notifier).setHost(host);
     await ref.read(hostConfigProvider.notifier).setShellPort(port);
+    if (!mounted) return;
     ref.read(toastsProvider.notifier)
         .show('Backend set to $host:$port', type: 'success');
   }
@@ -215,11 +233,13 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
     try {
       final api = ref.read(shellApiProvider);
       final ok = await api.healthCheck();
+      if (!mounted) return;
       setState(() {
-        _testResult = ok ? '✓ Connected' : '✗ Server responded but reported error';
+        _testResult = ok ? '✓ Connected' : '✗ Server responded with error';
         _testing = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _testResult = '✗ Could not reach server: $e';
         _testing = false;
@@ -237,16 +257,11 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Connection', style: theme.textTheme.headlineMedium),
-          const SizedBox(height: 4),
-          Text(
-            'Set the host where Radio OS backend (web_server.py) is running.',
-            style: theme.textTheme.bodySmall,
-          ),
+          _SectionHeader('Connection', Icons.wifi,
+              'Configure the Radio OS backend host.'),
           const SizedBox(height: 20),
 
-          // Quick presets
-          Text('Quick select', style: theme.textTheme.labelMedium),
+          Text('Quick presets', style: theme.textTheme.labelMedium),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
@@ -261,13 +276,12 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
                       ? theme.colorScheme.primary
                       : theme.textTheme.bodySmall?.color,
                   side: BorderSide(
-                    color: isActive
-                        ? theme.colorScheme.primary
-                        : theme.dividerColor,
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 10),
-                  textStyle: theme.textTheme.labelLarge,
+                      color: isActive
+                          ? theme.colorScheme.primary
+                          : theme.dividerColor),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  textStyle: const TextStyle(fontSize: 13),
                 ),
                 child: Text(label),
               );
@@ -275,28 +289,25 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
           ),
           const SizedBox(height: 20),
 
-          // Host field
           Text('Host / IP address', style: theme.textTheme.labelMedium),
           const SizedBox(height: 6),
           SizedBox(
-            width: 400,
+            width: 380,
             child: TextField(
               controller: _hostCtrl,
               style: theme.textTheme.bodyMedium,
               decoration: const InputDecoration(
                 hintText: '127.0.0.1 or hostname.local',
-                prefixIcon: Icon(Icons.dns, size: 24),
+                prefixIcon: Icon(Icons.dns, size: 20),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
 
-          // Port field
-          Text('Shell server port (default 7800)',
-              style: theme.textTheme.labelMedium),
+          Text('Shell server port', style: theme.textTheme.labelMedium),
           const SizedBox(height: 6),
           SizedBox(
-            width: 200,
+            width: 180,
             child: TextField(
               controller: _portCtrl,
               style: theme.textTheme.bodyMedium,
@@ -304,54 +315,51 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               decoration: const InputDecoration(
                 hintText: '7800',
-                prefixIcon: Icon(Icons.settings_ethernet, size: 24),
+                prefixIcon: Icon(Icons.settings_ethernet, size: 20),
               ),
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 22),
 
-          // Actions
           Row(
             children: [
               ElevatedButton.icon(
-                onPressed: () async {
-                  await _save();
-                  await _test();
-                },
-                icon: const Icon(Icons.save, size: 22),
+                onPressed: () async { await _save(); await _test(); },
+                icon: const Icon(Icons.save, size: 18),
                 label: const Text('Save & Test'),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               OutlinedButton.icon(
                 onPressed: _testing ? null : _test,
                 icon: _testing
                     ? const SizedBox(
-                        width: 18,
-                        height: 18,
+                        width: 16,
+                        height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.wifi_find, size: 22),
-                label: Text(_testing ? 'Testing...' : 'Test connection'),
+                    : const Icon(Icons.wifi_find, size: 18),
+                label: Text(_testing ? 'Testing…' : 'Test'),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               TextButton(
                 onPressed: () async {
+                  final toasts = ref.read(toastsProvider.notifier);
                   await ref.read(hostConfigProvider.notifier).reset();
-                  final cfg = ref.read(hostConfigProvider);
-                  _hostCtrl.text = cfg.host;
-                  _portCtrl.text = cfg.shellPort.toString();
-                  ref.read(toastsProvider.notifier)
-                      .show('Reset to defaults');
+                  if (!mounted) return;
+                  final c = ref.read(hostConfigProvider);
+                  _hostCtrl.text = c.host;
+                  _portCtrl.text = c.shellPort.toString();
+                  toasts.show('Reset to defaults');
                 },
                 child: const Text('Reset'),
               ),
             ],
           ),
 
-          // Test result
           if (_testResult != null) ...[
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
                 color: _testResult!.startsWith('✓')
                     ? const Color(0xFF34d399).withValues(alpha: 0.1)
@@ -367,31 +375,170 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
             ),
           ],
 
-          // Current config summary
-          const SizedBox(height: 24),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: theme.cardColor,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: theme.dividerColor),
+          const SizedBox(height: 22),
+          _InfoCard(children: [
+            _KV('Shell API', cfg.shellBaseUrl),
+            _KV('Game API', cfg.gameBaseUrl),
+            _KV('Audio WS',
+                'ws://${cfg.host}:${cfg.shellPort}/ws/audio/<id>'),
+            _KV('Event WS',
+                'ws://${cfg.host}:${cfg.shellPort}/ws/station/<id>'),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// General — system overview
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _GeneralSection extends ConsumerWidget {
+  final Map<String, dynamic>? storageInfo;
+  final Map<String, dynamic>? pluginsInfo;
+  const _GeneralSection(
+      {required this.storageInfo, required this.pluginsInfo});
+
+  String _fmtBytes(dynamic val) {
+    if (val == null) return '—';
+    final b = (val as num).toDouble();
+    if (b > 1e9) return '${(b / 1e9).toStringAsFixed(1)} GB';
+    if (b > 1e6) return '${(b / 1e6).toStringAsFixed(1)} MB';
+    if (b > 1e3) return '${(b / 1e3).toStringAsFixed(1)} KB';
+    return '${b.toInt()} B';
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final stationList = ref.watch(stationsProvider);
+    final pluginMap = (pluginsInfo?['plugins'] as Map?)?.cast<String, dynamic>();
+    final feedPlugins = pluginMap?.values
+        .where((p) => (p as Map)['is_feed'] == true)
+        .length ?? 0;
+    final allPlugins = pluginMap?.length ?? 0;
+    final stationSizes =
+        (storageInfo?['station_sizes'] as Map?)?.cast<String, dynamic>();
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionHeader('General', Icons.settings, 'System overview.'),
+          const SizedBox(height: 20),
+
+          // Runtime paths
+          _InfoCard(children: [
+            _KV('Stations directory',
+                storageInfo?['stations_dir'] as String? ?? '—'),
+            _KV('Config path',
+                storageInfo?['config_path'] as String? ?? '—'),
+          ]),
+          const SizedBox(height: 16),
+
+          // Plugin counts
+          Text('Plugins', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          _InfoCard(children: [
+            _KV('Total plugins', '$allPlugins'),
+            _KV('Feed plugins', '$feedPlugins'),
+            _KV('Non-feed (utility)', '${allPlugins - feedPlugins}'),
+          ]),
+          const SizedBox(height: 16),
+
+          // Station disk usage
+          if (stationSizes != null && stationSizes.isNotEmpty) ...[
+            Text('Station disk usage', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            _InfoCard(
+              children: stationSizes.entries
+                  .map((e) => _KV(e.key, _fmtBytes(e.value)))
+                  .toList(),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Active configuration',
-                    style: theme.textTheme.labelMedium),
-                const SizedBox(height: 8),
-                _SettingRow(label: 'Shell API', value: cfg.shellBaseUrl),
-                _SettingRow(label: 'Game API', value: cfg.gameBaseUrl),
-                _SettingRow(
-                    label: 'Audio WS',
-                    value: 'ws://${cfg.host}:${cfg.shellPort}/ws/audio/<id>'),
-                _SettingRow(
-                    label: 'Event WS',
-                    value: 'ws://${cfg.host}:${cfg.shellPort}/ws/station/<id>'),
-              ],
-            ),
+            const SizedBox(height: 16),
+          ],
+
+          // Station roster
+          Text('Stations (${stationList.length})',
+              style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          ...stationList.map((s) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    Icon(Icons.radio,
+                        size: 14,
+                        color: s.status.name == 'running'
+                            ? const Color(0xFF34d399)
+                            : theme.textTheme.bodySmall?.color),
+                    const SizedBox(width: 8),
+                    Expanded(
+                        child: Text(s.name,
+                            style: theme.textTheme.bodySmall)),
+                    Text(s.moduleType.name,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.primary
+                                .withValues(alpha: 0.7))),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Models — per-station model config
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ModelsSection extends ConsumerWidget {
+  const _ModelsSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final stationList = ref.watch(stationsProvider);
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionHeader('Models', Icons.psychology,
+              'LLM model assignments per station. Edit station manifests to change.'),
+          const SizedBox(height: 20),
+          if (stationList.isEmpty)
+            Text('No stations loaded', style: theme.textTheme.bodySmall)
+          else
+            ...stationList.map((s) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _InfoCard(
+                    header: Row(
+                      children: [
+                        Icon(Icons.radio,
+                            size: 14, color: theme.colorScheme.primary),
+                        const SizedBox(width: 6),
+                        Text(s.name,
+                            style: theme.textTheme.labelMedium?.copyWith(
+                                color: theme.colorScheme.primary)),
+                      ],
+                    ),
+                    children: [
+                      _KV('Type', s.moduleType.name),
+                      _KV('Host', s.host.isEmpty ? '—' : s.host),
+                      _KV('Status', s.status.name),
+                    ],
+                  ),
+                )),
+          const SizedBox(height: 8),
+          Text(
+            'To change model assignments, edit the station\'s manifest.yaml\n'
+            '(stations/<id>/manifest.yaml → models.host_model / models.producer_model)',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(fontStyle: FontStyle.italic),
           ),
         ],
       ),
@@ -399,111 +546,20 @@ class _ConnectionSectionState extends ConsumerState<_ConnectionSection> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// General
-// ---------------------------------------------------------------------------
-
-class _GeneralSection extends StatelessWidget {
-  final Map<String, dynamic>? settings;
-  const _GeneralSection({required this.settings});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('General Settings', style: theme.textTheme.headlineMedium),
-          const SizedBox(height: 16),
-          _SettingRow(
-              label: 'Version',
-              value: settings?['version'] as String? ?? '—'),
-          _SettingRow(
-              label: 'Station Directory',
-              value: settings?['station_dir'] as String? ?? '—'),
-          _SettingRow(
-              label: 'Plugin Directory',
-              value: settings?['plugin_dir'] as String? ?? '—'),
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
-
-class _ModelsSection extends ConsumerStatefulWidget {
-  final Map<String, dynamic>? settings;
-  const _ModelsSection({required this.settings});
-
-  @override
-  ConsumerState<_ModelsSection> createState() => _ModelsSectionState();
-}
-
-class _ModelsSectionState extends ConsumerState<_ModelsSection> {
-  Map<String, dynamic>? _models;
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final api = ref.read(shellApiProvider);
-      final res = await api.getModelSettings();
-      if (mounted) setState(() { _models = res; _loading = false; });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    if (_loading) return const Center(child: CircularProgressIndicator());
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Model Configuration', style: theme.textTheme.headlineMedium),
-          const SizedBox(height: 16),
-          if (_models != null)
-            ..._models!.entries.map((e) => _SettingRow(
-                label: e.key,
-                value: e.value?.toString() ?? '—')),
-          if (_models == null || _models!.isEmpty)
-            Text('No model settings found',
-                style: theme.textTheme.bodySmall),
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Voices
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Voices — list installed voice files
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _VoicesSection extends ConsumerStatefulWidget {
-  final Map<String, dynamic>? settings;
-  const _VoicesSection({required this.settings});
-
+  const _VoicesSection();
   @override
   ConsumerState<_VoicesSection> createState() => _VoicesSectionState();
 }
 
 class _VoicesSectionState extends ConsumerState<_VoicesSection> {
-  List<dynamic>? _voices;
+  List<String> _voices = [];
   bool _loading = true;
+  bool _hasKokoro = false;
 
   @override
   void initState() {
@@ -514,8 +570,16 @@ class _VoicesSectionState extends ConsumerState<_VoicesSection> {
   Future<void> _load() async {
     try {
       final api = ref.read(shellApiProvider);
-      final res = await api.listVoices();
-      if (mounted) setState(() { _voices = res; _loading = false; });
+      final voices = await api.listVoices();
+      if (mounted) {
+        setState(() {
+          _voices = voices;
+          _hasKokoro = voices.any((v) =>
+              v.toLowerCase().contains('kokoro') ||
+              v.toLowerCase().contains('.onnx'));
+          _loading = false;
+        });
+      }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
@@ -526,31 +590,206 @@ class _VoicesSectionState extends ConsumerState<_VoicesSection> {
     final theme = Theme.of(context);
     if (_loading) return const Center(child: CircularProgressIndicator());
 
-    return Padding(
-      padding: const EdgeInsets.all(16),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Available Voices', style: theme.textTheme.headlineMedium),
+          _SectionHeader(
+              'Voices', Icons.record_voice_over, 'Installed TTS voice models.'),
           const SizedBox(height: 16),
-          Expanded(
-            child: _voices == null || _voices!.isEmpty
-                ? Text('No voices found', style: theme.textTheme.bodySmall)
-                : ListView.builder(
-                    itemCount: _voices!.length,
-                    itemBuilder: (context, index) {
-                      final v = _voices![index];
-                      final name = v is Map
-                          ? (v['name'] as String? ?? v.toString())
-                          : v.toString();
-                      return ListTile(
-                        dense: true,
-                        leading: Icon(Icons.record_voice_over,
-                            size: 16, color: theme.colorScheme.primary),
-                        title: Text(name, style: theme.textTheme.bodySmall),
-                      );
-                    },
+
+          // Kokoro status card
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: _hasKokoro
+                  ? const Color(0xFF34d399).withValues(alpha: 0.08)
+                  : const Color(0xFFfbbf24).withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: _hasKokoro
+                    ? const Color(0xFF34d399)
+                    : const Color(0xFFfbbf24),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  _hasKokoro ? Icons.check_circle : Icons.warning,
+                  size: 18,
+                  color: _hasKokoro
+                      ? const Color(0xFF34d399)
+                      : const Color(0xFFfbbf24),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _hasKokoro
+                        ? 'Kokoro ONNX models detected'
+                        : 'Kokoro not found — voices/kokoro/ missing. Run:\n'
+                            'pip install kokoro-onnx  (in radioenv)\n'
+                            'Then download kokoro-v1.0.onnx + voices-v1.0.bin',
+                    style: theme.textTheme.bodySmall,
                   ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          if (_voices.isEmpty)
+            Text(
+              'No voices found via /api/voices.\n'
+              'Installed: kokoro (voices/kokoro/), piper (voices/*.onnx)',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(fontStyle: FontStyle.italic),
+            )
+          else ...[
+            Text('${_voices.length} voice(s) found',
+                style: theme.textTheme.labelMedium),
+            const SizedBox(height: 8),
+            ..._voices.map((v) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Row(
+                    children: [
+                      Icon(Icons.mic, size: 13,
+                          color: theme.colorScheme.primary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                          child: Text(v,
+                              style: theme.textTheme.bodySmall)),
+                    ],
+                  ),
+                )),
+          ],
+
+          const SizedBox(height: 16),
+          Text('Kokoro voices (built-in)',
+              style: theme.textTheme.labelMedium),
+          const SizedBox(height: 8),
+          _InfoCard(children: const [
+            _KV('af_alloy', 'American Female — neutral, clear'),
+            _KV('af_bella', 'American Female — warm'),
+            _KV('af_heart', 'American Female — expressive'),
+            _KV('af_jessica', 'American Female — energetic'),
+            _KV('am_adam', 'American Male — deep'),
+            _KV('am_michael', 'American Male — natural'),
+            _KV('bf_emma', 'British Female — polished'),
+            _KV('bm_george', 'British Male — authoritative'),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment — key env vars
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _EnvironmentSection extends ConsumerStatefulWidget {
+  const _EnvironmentSection();
+  @override
+  ConsumerState<_EnvironmentSection> createState() =>
+      _EnvironmentSectionState();
+}
+
+class _EnvironmentSectionState extends ConsumerState<_EnvironmentSection> {
+  Map<String, dynamic>? _env;
+  bool _loading = true;
+
+  static const _importantVars = [
+    'OPENAI_API_KEY',
+    'RADIO_OS_ROOT',
+    'RADIO_OS_PLUGINS',
+    'RADIO_OS_VOICES',
+    'STATION_DIR',
+    'CONTEXT_MODEL',
+    'HOST_MODEL',
+    'PYTHONPATH',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final api = ref.read(shellApiProvider);
+      final res = await api.getEnvironmentSettings();
+      if (mounted) setState(() { _env = res; _loading = false; });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String _mask(String key, String? val) {
+    if (val == null || val.isEmpty) return '(not set)';
+    if (key.toLowerCase().contains('key') ||
+        key.toLowerCase().contains('secret') ||
+        key.toLowerCase().contains('token')) {
+      if (val.length > 8) {
+        return '${val.substring(0, 8)}••••••••';
+      }
+      return '••••••••';
+    }
+    return val;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    if (_loading) return const Center(child: CircularProgressIndicator());
+
+    final envMap = (_env?['environment'] as Map?)?.cast<String, String?>() ??
+        (_env?.cast<String, String?>() ?? {});
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionHeader('Environment', Icons.computer,
+              'Runtime environment variables. Set in /etc/environment on Pi.'),
+          const SizedBox(height: 16),
+
+          Text('Key variables', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          _InfoCard(
+            children: _importantVars.map((key) {
+              final val = envMap[key];
+              final isSet = val != null && val.isNotEmpty;
+              return _KVStatus(
+                label: key,
+                value: _mask(key, val),
+                ok: isSet,
+              );
+            }).toList(),
+          ),
+
+          if (envMap.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text('All environment vars (${envMap.length})',
+                style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            _InfoCard(
+              children: envMap.entries
+                  .where((e) => !_importantVars.contains(e.key))
+                  .map((e) => _KV(e.key, _mask(e.key, e.value)))
+                  .toList(),
+            ),
+          ],
+
+          const SizedBox(height: 16),
+          Text(
+            'To set OPENAI_API_KEY permanently:\n'
+            "  echo 'OPENAI_API_KEY=sk-...' | sudo tee -a /etc/environment\n"
+            'Then add EnvironmentFile=/etc/environment to your systemd service.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(fontStyle: FontStyle.italic),
           ),
         ],
       ),
@@ -558,39 +797,9 @@ class _VoicesSectionState extends ConsumerState<_VoicesSection> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Environment
-// ---------------------------------------------------------------------------
-
-class _EnvironmentSection extends StatelessWidget {
-  final Map<String, dynamic>? settings;
-  const _EnvironmentSection({required this.settings});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final env = settings?['environment'] as Map<String, dynamic>? ?? {};
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Environment', style: theme.textTheme.headlineMedium),
-          const SizedBox(height: 16),
-          ...env.entries.map((e) => _SettingRow(
-              label: e.key, value: e.value?.toString() ?? '—')),
-          if (env.isEmpty)
-            Text('No environment settings', style: theme.textTheme.bodySmall),
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Appearance
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Appearance — theme picker
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _AppearanceSection extends ConsumerWidget {
   const _AppearanceSection();
@@ -601,18 +810,18 @@ class _AppearanceSection extends ConsumerWidget {
     final current = ref.watch(themeNameProvider);
     final themes = ['dark', 'nord', 'dracula', 'monokai', 'solarized'];
 
-    return Padding(
-      padding: const EdgeInsets.all(16),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Appearance', style: theme.textTheme.headlineMedium),
+          _SectionHeader('Appearance', Icons.palette, 'UI theme selection.'),
           const SizedBox(height: 16),
           Text('Theme', style: theme.textTheme.labelMedium),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           Wrap(
-            spacing: 8,
-            runSpacing: 8,
+            spacing: 10,
+            runSpacing: 10,
             children: themes.map((name) {
               final colors = RadioColors.forName(name);
               final isActive = name == current;
@@ -621,15 +830,13 @@ class _AppearanceSection extends ConsumerWidget {
                     ref.read(themeNameProvider.notifier).state = name,
                 borderRadius: BorderRadius.circular(8),
                 child: Container(
-                  width: 100,
+                  width: 90,
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
                     color: colors.bgPrimary,
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                      color: isActive
-                          ? colors.accent
-                          : colors.border,
+                      color: isActive ? colors.accent : colors.border,
                       width: isActive ? 2 : 1,
                     ),
                   ),
@@ -669,39 +876,129 @@ class _AppearanceSection extends ConsumerWidget {
     );
   }
 
-  Widget _dot(Color color) {
-    return Container(
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+  Widget _dot(Color color) => Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+      );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared widgets
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final String subtitle;
+  const _SectionHeader(this.title, this.icon, this.subtitle);
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 20, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Text(title, style: theme.textTheme.headlineMedium),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(subtitle, style: theme.textTheme.bodySmall),
+      ],
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shared setting row
-// ---------------------------------------------------------------------------
+class _InfoCard extends StatelessWidget {
+  final List<Widget> children;
+  final Widget? header;
+  const _InfoCard({required this.children, this.header});
 
-class _SettingRow extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.cardColor,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.dividerColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (header != null) ...[header!, const SizedBox(height: 8)],
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+class _KV extends StatelessWidget {
   final String label;
   final String value;
-  const _SettingRow({required this.label, required this.value});
+  const _KV(this.label, this.value);
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 7),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 220,
-            child: Text(label,
-                style: theme.textTheme.labelMedium),
+            width: 200,
+            child: Text(label, style: theme.textTheme.labelMedium),
           ),
           Expanded(
-            child: Text(value, style: theme.textTheme.bodySmall),
+            child: Text(value,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontFamily: 'monospace')),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KVStatus extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool ok;
+  const _KVStatus(
+      {required this.label, required this.value, required this.ok});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            ok ? Icons.check_circle_outline : Icons.cancel_outlined,
+            size: 14,
+            color: ok
+                ? const Color(0xFF34d399)
+                : const Color(0xFFf87171),
+          ),
+          const SizedBox(width: 6),
+          SizedBox(
+            width: 194,
+            child: Text(label, style: theme.textTheme.labelMedium),
+          ),
+          Expanded(
+            child: Text(value,
+                style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    color: ok ? null : const Color(0xFF9ca3af))),
           ),
         ],
       ),

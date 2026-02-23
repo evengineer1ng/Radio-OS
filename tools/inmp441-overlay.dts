@@ -1,0 +1,65 @@
+// INMP441 I2S microphone overlay for Raspberry Pi 5 (BCM2712 / RP1)
+//
+// Wiring (INMP441 → Pi 5 40-pin header):
+//   VDD  → Pin 1  (3.3V)
+//   GND  → Pin 6  (GND)
+//   SD   → Pin 38 (GPIO 20, I2S data in)
+//   WS   → Pin 35 (GPIO 19, I2S LRCLK)
+//   SCK  → Pin 12 (GPIO 18, I2S BCLK)
+//   L/R  → GND    (selects left channel)
+//
+// Pi 5 is the I2S clock master (drives BCLK + LRCLK).
+// Uses snd-soc-ics43432 codec driver (electrically identical to INMP441).
+// Capture: plughw:inmp441 or hw:2,0 — S32_LE, 48000 Hz, stereo
+//   (left channel = mic data, right channel = zeros)
+//
+// Install:
+//   dtc -@ -I dts -O dtb -o inmp441.dtbo inmp441-overlay.dts
+//   sudo cp inmp441.dtbo /boot/firmware/overlays/inmp441.dtbo
+//
+// /boot/firmware/config.txt:
+//   dtparam=i2s=on
+//   dtoverlay=inmp441
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    /* Enable the RP1 I2S producer port (Pi drives BCLK + LRCLK) */
+    fragment@0 {
+        target = <&i2s_clk_producer>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            ics43432_codec: ics43432-codec {
+                #sound-dai-cells = <0>;
+                compatible = "invensense,ics43432";
+                status = "okay";
+            };
+
+            inmp441_sound: inmp441-sound {
+                compatible = "simple-audio-card";
+                simple-audio-card,name = "inmp441";
+                simple-audio-card,format = "i2s";
+                /* Pi = clock master — INMP441 is slave (outputs data only) */
+                simple-audio-card,bitclock-master = <&inmp_cpu_dai>;
+                simple-audio-card,frame-master = <&inmp_cpu_dai>;
+
+                inmp_cpu_dai: simple-audio-card,cpu {
+                    sound-dai = <&i2s_clk_producer>;
+                };
+
+                simple-audio-card,codec {
+                    sound-dai = <&ics43432_codec>;
+                };
+            };
+        };
+    };
+};

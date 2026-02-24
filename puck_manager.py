@@ -279,30 +279,32 @@ class PuckManager:
                 pass
 
     async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 1000):
-        """Send a sine-wave test tone to a specific puck in 20ms I2S32 chunks."""
+        """Send a sine-wave test tone to a specific puck in 20ms stereo I2S32 chunks."""
         p = self._pucks.get(node_id)
         if not p or not p.connected:
             return
         sample_rate = 16000
-        chunk_samples = 320          # 20ms @ 16kHz — matches AUDIO_CHUNK_MS on firmware
+        chunk_samples = 320          # 20ms @ 16kHz
         n_total = int(sample_rate * duration_ms / 1000)
-        # Build all chunks as pre-converted I2S32 (left-shifted 16-bit → 32-bit)
         for chunk_start in range(0, n_total, chunk_samples):
             chunk_end = min(chunk_start + chunk_samples, n_total)
             samples = [
                 int(32767 * 0.5 * math.sin(2 * math.pi * freq_hz * i / sample_rate))
                 for i in range(chunk_start, chunk_end)
             ]
-            # Pad last chunk to full size so firmware DMA write is uniform
             while len(samples) < chunk_samples:
                 samples.append(0)
-            # Convert directly to I2S32 (skip the PCM16 → I2S32 step in _puck_sender)
-            i2s_frame = struct.pack(f"<{chunk_samples}i", *(s << 16 for s in samples))
+            # Stereo interleave: L+R duplicate, each as 32-bit MSB word
+            stereo = []
+            for s in samples:
+                word = s << 16
+                stereo.append(word)
+                stereo.append(word)
+            i2s_frame = struct.pack(f"<{len(stereo)}i", *stereo)
             try:
-                p.send_q.put_nowait((i2s_frame, True))   # already I2S32
+                p.send_q.put_nowait((i2s_frame, True))
             except asyncio.QueueFull:
                 pass
-            # Yield every 8 chunks (~160ms) so the event loop can breathe
             if (chunk_start // chunk_samples) % 8 == 7:
                 await asyncio.sleep(0)
 
@@ -439,13 +441,18 @@ def _scale_pcm16(data: bytes, scale: float) -> bytes:
 
 
 def _pcm16_to_i2s32(data: bytes) -> bytes:
-    """Convert 16-bit signed PCM to 32-bit MSB-aligned PCM for I2S TX.
-    The ESP32-C6 I2S slot is configured as I2S_DATA_BIT_WIDTH_32BIT so each
-    sample must be left-shifted into the upper 16 bits of a 32-bit word."""
+    """Convert mono 16-bit PCM → stereo 32-bit MSB-aligned PCM for I2S TX.
+    Each sample is duplicated into both L and R 32-bit slots so the amp
+    receives audio regardless of which channel its SD pin selects."""
     n = len(data) // 2
     samples = struct.unpack(f"<{n}h", data)
-    # Each 16-bit sample → 32-bit word with value in upper half (little-endian)
-    return struct.pack(f"<{n}i", *(s << 16 for s in samples))
+    # Interleave: L, R, L, R … each sample left-shifted into upper 16 bits
+    stereo = []
+    for s in samples:
+        word = s << 16
+        stereo.append(word)   # left
+        stereo.append(word)   # right (duplicate)
+    return struct.pack(f"<{len(stereo)}i", *stereo)
 
 
 async def _puck_sender(ws: Any, puck: PuckState):

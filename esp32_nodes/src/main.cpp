@@ -8,10 +8,11 @@
 WebSocketsClient ws;
 bool ws_connected = false;
 
-// Audio buffer: AUDIO_CHUNK_MS worth of 16-bit mono samples
+// Audio buffer: AUDIO_CHUNK_MS worth of 16-bit mono samples (mic)
+// Speaker buffer: stereo 32-bit frames = 4x the mono sample count
 const int CHUNK_SAMPLES = (SAMPLE_RATE * AUDIO_CHUNK_MS) / 1000;
 int16_t  mic_buf[CHUNK_SAMPLES];
-int16_t  spk_buf[CHUNK_SAMPLES];
+int32_t  spk_buf[CHUNK_SAMPLES * 2];   // stereo 32-bit: L+R interleaved
 
 // New IDF v5 channel handles
 i2s_chan_handle_t rx_handle = nullptr;
@@ -26,7 +27,10 @@ void i2s_init() {
 
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        // Use STEREO so data appears on both L+R slots — MAX98357A picks up
+        // whichever channel its SD pin selects (float/high = left, low = right).
+        // This also avoids the ESP-IDF v5 mono→left-slot ambiguity.
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = (gpio_num_t)I2S_SCK,
@@ -68,10 +72,13 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
             // Incoming audio from server → play on speaker
             if (length <= sizeof(spk_buf)) {
                 memcpy(spk_buf, payload, length);
-                size_t written;
-                // Short timeout — don't block the WS event loop indefinitely
-                i2s_channel_write(tx_handle, spk_buf, length, &written,
+                size_t written = 0;
+                esp_err_t err = i2s_channel_write(tx_handle, spk_buf, length, &written,
                                   pdMS_TO_TICKS(100));
+                Serial.printf("[SPK] rx %d bytes  wrote %d  err=0x%x\n",
+                              (int)length, (int)written, (int)err);
+            } else {
+                Serial.printf("[SPK] frame too big: %d > %d\n", (int)length, (int)sizeof(spk_buf));
             }
             break;
 
@@ -100,6 +107,16 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.printf("\n=== Radio OS Node %d booting ===\n", NODE_ID);
+
+    // Drive MAX98357A SD pin HIGH to enable the amp.
+    // If AMP_ENABLE_PIN == -1 the SD line is tied to 3.3V on the board.
+#if AMP_ENABLE_PIN >= 0
+    pinMode(AMP_ENABLE_PIN, OUTPUT);
+    digitalWrite(AMP_ENABLE_PIN, HIGH);
+    Serial.printf("[AMP] Enable pin GPIO%d → HIGH\n", AMP_ENABLE_PIN);
+#else
+    Serial.println("[AMP] SD tied to 3V3 externally");
+#endif
 
     i2s_init();
     wifi_connect();

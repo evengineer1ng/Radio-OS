@@ -6662,6 +6662,131 @@ class AudioCLISession:
     # -----------------------------------------------------------------------
     # Mode switching (tkinter ↔ web)
     # -----------------------------------------------------------------------
+    def _handle_bluetooth_command(self, transcript: str) -> Optional[str]:
+        """
+        Intercept bluetooth voice commands and execute them directly via
+        bluetoothctl, bypassing the LLM entirely.
+
+        Returns a spoken response string if the transcript matched a bluetooth
+        command, or None if it did not match (caller should pass to LLM).
+
+        Supported phrases (case-insensitive, punctuation-tolerant):
+          • "connect [to] [my] <name>"  — connect a paired device by name
+          • "disconnect [bluetooth | <name>]" — disconnect current or named
+          • "pair [with] <name>"        — start pairing a nearby device
+          • "list bluetooth [devices]"  — read out known paired devices
+          • "bluetooth devices"         — same
+        """
+        import re as _re
+        import subprocess as _sp
+
+        t = _re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+
+        def _run_bt(*args: str, timeout: int = 20) -> str:
+            try:
+                result = _sp.run(
+                    ["bluetoothctl", *args],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                return (result.stdout + result.stderr).strip()
+            except Exception as exc:
+                return str(exc)
+
+        def _known_devices() -> list:
+            """Return list of (mac, name) tuples from bluetoothctl devices."""
+            raw = _run_bt("devices", timeout=5)
+            devices = []
+            for line in raw.splitlines():
+                parts = line.strip().split(" ", 2)
+                if len(parts) == 3 and parts[0] == "Device":
+                    devices.append((parts[1], parts[2]))
+            return devices
+
+        def _find_device(query: str) -> Optional[tuple]:
+            """Fuzzy-match a device name from known devices."""
+            query = query.strip().lower()
+            if not query:
+                return None
+            devices = _known_devices()
+            # Exact match first
+            for mac, name in devices:
+                if query == name.lower():
+                    return (mac, name)
+            # Substring match
+            for mac, name in devices:
+                if query in name.lower() or name.lower() in query:
+                    return (mac, name)
+            return None
+
+        # ── list devices ─────────────────────────────────────────────────
+        if _re.search(r"\b(list|show)\b.*\bbluetooth\b|\bbluetooth\b.*\bdevices\b|\bpaired devices\b", t):
+            devices = _known_devices()
+            if not devices:
+                return "No paired Bluetooth devices found."
+            names = ", ".join(name for _, name in devices)
+            return f"Paired Bluetooth devices: {names}."
+
+        # ── connect ───────────────────────────────────────────────────────
+        m = _re.search(r"\bconnect\b(?:\s+(?:to|my))?\s+(.+)", t)
+        if m:
+            query = m.group(1).strip()
+            device = _find_device(query)
+            if not device:
+                return f"I couldn't find a paired device matching '{query}'. Try saying 'list bluetooth devices' first."
+            mac, name = device
+            _log(f"Bluetooth: connecting {name} ({mac})")
+            out = _run_bt("connect", mac, timeout=20)
+            if "successful" in out.lower() or "connected" in out.lower():
+                return f"Connected to {name}."
+            else:
+                return f"Couldn't connect to {name}. Make sure it's powered on and in range."
+
+        # ── disconnect ────────────────────────────────────────────────────
+        m = _re.search(r"\bdisconnect\b(?:\s+(.+))?", t)
+        if m:
+            query = (m.group(1) or "").strip()
+            # If a name was given, find that device; otherwise disconnect all connected
+            if query and query not in ("bluetooth", "all"):
+                device = _find_device(query)
+                if not device:
+                    return f"I couldn't find a device matching '{query}'."
+                mac, name = device
+                _run_bt("disconnect", mac, timeout=10)
+                return f"Disconnected {name}."
+            else:
+                # Disconnect all currently connected devices
+                devices = _known_devices()
+                disconnected = []
+                for mac, name in devices:
+                    info = _run_bt("info", mac, timeout=5)
+                    if "connected: yes" in info.lower():
+                        _run_bt("disconnect", mac, timeout=10)
+                        disconnected.append(name)
+                if disconnected:
+                    return f"Disconnected: {', '.join(disconnected)}."
+                return "No Bluetooth devices are currently connected."
+
+        # ── pair ──────────────────────────────────────────────────────────
+        m = _re.search(r"\bpair\b(?:\s+(?:with|to|my))?\s+(.+)", t)
+        if m:
+            query = m.group(1).strip()
+            # First check if already known
+            device = _find_device(query)
+            if device:
+                mac, name = device
+                out = _run_bt("pair", mac, timeout=30)
+                if "already paired" in out.lower() or "successful" in out.lower():
+                    return f"{name} is already paired. Say 'connect {name}' to connect it."
+                return f"Pairing {name}... {out[:80] if out else 'check device for confirmation'}."
+            # Not found — need to scan first
+            return (
+                f"I don't see a device named '{query}' in the paired list. "
+                "Put your device in pairing mode, then try again — I'll scan for it."
+            )
+
+        # Not a bluetooth command
+        return None
+
     @property
     def current_mode(self) -> str:
         """Return 'web' or 'tkinter'."""
@@ -7049,6 +7174,16 @@ class AudioCLISession:
         if self._persona and _is_escape_phrase(transcript.lower().strip()):
             result = self.unload_persona()
             self.narration.speak(result)
+            self._session_just_spoke = True
+            self._update_status("Listening...")
+            return
+
+        # ── Bluetooth voice commands — handled locally, no LLM needed ──
+        _bt_result = self._handle_bluetooth_command(transcript)
+        if _bt_result is not None:
+            _log(f"Bluetooth command handled: {_bt_result}")
+            self._emit_flutter_event({"type": "llm_response", "text": _bt_result})
+            self.narration.speak(_bt_result)
             self._session_just_spoke = True
             self._update_status("Listening...")
             return

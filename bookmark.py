@@ -216,6 +216,25 @@ def _start_local_audio_watcher(audio_dir: str, pulse_device) -> None:
     import glob as _glob
     import soundfile as _sf
 
+    # Ensure PipeWire/PulseAudio socket env vars are set in this process.
+    # The service may not inherit XDG_RUNTIME_DIR from the user session.
+    _uid = os.getuid()
+    _rt = f"/run/user/{_uid}"
+    os.environ.setdefault("XDG_RUNTIME_DIR", _rt)
+    os.environ.setdefault("PULSE_RUNTIME_PATH", f"{_rt}/pulse")
+    os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={_rt}/bus")
+
+    # Re-probe pulse device now that env is correct
+    _dev = pulse_device
+    try:
+        import sounddevice as _sd2
+        for _i, _d in enumerate(_sd2.query_devices()):
+            if str(_d.get("name", "")).lower().startswith("pulse") and _d.get("max_output_channels", 0) > 0:
+                _dev = _i
+                break
+    except Exception:
+        pass
+
     _played: set = set()
 
     def _watcher():
@@ -237,7 +256,7 @@ def _start_local_audio_watcher(audio_dir: str, pulse_device) -> None:
                         data, sr = _sf.read(wav, dtype="float32")
                         if data.ndim == 1:
                             data = data.reshape(-1, 1)
-                        sd.play(data, sr, device=pulse_device, blocking=True)
+                        sd.play(data, sr, device=_dev, blocking=True)
                     except Exception as exc:
                         print(f"[local_audio] playback error: {exc}", file=sys.stderr)
                     finally:

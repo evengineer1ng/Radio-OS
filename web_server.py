@@ -289,6 +289,19 @@ class StationManager:
             # Also play audio locally through PulseAudio so the Pi's
             # speakers/soundbar work alongside the web stream.
             env["RADIO_OS_LOCAL_AUDIO"] = "1"
+            # Inject PipeWire/PulseAudio session vars so sd.play() in the
+            # station subprocess can reach the user's audio socket.
+            # The socket lives at /run/user/<uid>/pulse regardless of whether
+            # the service has a full desktop session.
+            import pwd as _pwd
+            try:
+                _uid = _pwd.getpwnam(env.get("USER", "airfryer")).pw_uid
+            except Exception:
+                _uid = 1000
+            _runtime_dir = f"/run/user/{_uid}"
+            env.setdefault("XDG_RUNTIME_DIR", _runtime_dir)
+            env.setdefault("PULSE_RUNTIME_PATH", f"{_runtime_dir}/pulse")
+            env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={_runtime_dir}/bus")
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUNBUFFERED"] = "1"
 

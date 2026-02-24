@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../c          padding: const EdgeInsets.fromLTRB(10, 16, 10, 16),nfig/constants.dart';
+import '../../../config/constants.dart';
 import '../../../data/models/station.dart';
 import '../../../domain/providers.dart';
 import '../../widgets/connection_banner.dart';

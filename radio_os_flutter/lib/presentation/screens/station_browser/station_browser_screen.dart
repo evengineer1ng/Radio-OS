@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../config/constants.dart';
+import '../../../c          padding: const EdgeInsets.fromLTRB(10, 16, 10, 16),nfig/constants.dart';
 import '../../../data/models/station.dart';
 import '../../../domain/providers.dart';
 import '../../widgets/connection_banner.dart';
@@ -239,6 +239,8 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
           child: _ActionStrip(
             station: _focused,
             isRunning: isRunning,
+            stationCount: widget.stations.length,
+            focusedIndex: _focusedIndex,
             onStop: _stop,
             onOpen: () => context.go('/station/${_focused.id}'),
             accent: accent,
@@ -274,31 +276,6 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
             ),
           ),
 
-        // ── Dot indicators ────────────────────────────────────────────────
-        if (widget.stations.length > 1)
-          Positioned(
-            bottom: 78,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(widget.stations.length, (i) {
-                final active = i == _focusedIndex;
-                return AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  width: active ? 20 : 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: active
-                        ? accent
-                        : accent.withValues(alpha: 0.25),
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                );
-              }),
-            ),
-          ),
       ],
     );
   }
@@ -401,7 +378,7 @@ class _CarouselCardState extends State<_CarouselCard>
         opacity: isFocused ? 1.0 : 0.45,
         duration: const Duration(milliseconds: 280),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 16, 10, 76),
+          padding: const EdgeInsets.fromLTRB(10, 16, 10, 90),
           child: Container(
             decoration: BoxDecoration(
               color: theme.cardColor,
@@ -722,12 +699,14 @@ class _PulsingDotState extends State<_PulsingDot>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bottom action strip — open / stop / settings only (launch moved to card)
+// Bottom action strip — open / stop / settings + dot indicators
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ActionStrip extends StatelessWidget {
   final Station station;
   final bool isRunning;
+  final int stationCount;
+  final int focusedIndex;
   final VoidCallback onStop;
   final VoidCallback onOpen;
   final Color accent;
@@ -736,6 +715,8 @@ class _ActionStrip extends StatelessWidget {
   const _ActionStrip({
     required this.station,
     required this.isRunning,
+    required this.stationCount,
+    required this.focusedIndex,
     required this.onStop,
     required this.onOpen,
     required this.accent,
@@ -795,8 +776,30 @@ class _ActionStrip extends StatelessWidget {
               ),
             ),
 
-          // ── Spacer when not running ───────────────────────────────────────
-          if (!isRunning) const Spacer(flex: 5),
+          // ── Stopped: dot indicators centred in the strip ──────────────────
+          if (!isRunning)
+            Expanded(
+              child: Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: List.generate(stationCount, (i) {
+                    final active = i == focusedIndex;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                      width: active ? 20 : 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: active
+                            ? accent
+                            : accent.withValues(alpha: 0.25),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    );
+                  }),
+                ),
+              ),
+            ),
 
           // ── Stop (running) ───────────────────────────────────────────────
           if (isRunning)

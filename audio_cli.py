@@ -98,18 +98,31 @@ def _load_audio_cli_config() -> dict:
 # when the process was started by a systemd service that doesn't inherit them.
 # ---------------------------------------------------------------------------
 def _load_system_env() -> None:
-    """Parse /etc/environment and inject any missing vars into os.environ."""
+    """Parse /etc/environment and inject any missing vars into os.environ.
+    Handles values that wrap across multiple lines (no backslash continuation).
+    """
     try:
         with open("/etc/environment", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
+            raw = f.read()
+        # Join any lines that don't contain '=' (continuation of previous value)
+        joined_lines: list = []
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                joined_lines.append(stripped)
+            elif "=" in stripped:
+                joined_lines.append(stripped)
+            elif joined_lines:
+                # Line with no '=' is a continuation — append to previous
+                joined_lines[-1] = joined_lines[-1] + stripped
+        for line in joined_lines:
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
     except Exception:
         pass
 

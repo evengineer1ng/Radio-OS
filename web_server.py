@@ -286,6 +286,9 @@ class StationManager:
 
             # Headless mode — no tkinter UI, audio pipes to WebSocket
             env["RADIO_OS_HEADLESS"] = "1"
+            # Also play audio locally through PulseAudio so the Pi's
+            # speakers/soundbar work alongside the web stream.
+            env["RADIO_OS_LOCAL_AUDIO"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUNBUFFERED"] = "1"
 

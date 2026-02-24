@@ -197,6 +197,64 @@ if HEADLESS:
     HEADLESS_AUDIO_DIR = os.path.join(STATION_DIR, ".audio_pipe")
     os.makedirs(HEADLESS_AUDIO_DIR, exist_ok=True)
 
+# Local audio playback in headless mode.
+# When RADIO_OS_LOCAL_AUDIO=1 a watcher thread plays each WAV segment
+# through PulseAudio as it lands in .audio_pipe/, so the Pi speakers /
+# soundbar play in sync with the web stream.  The web stream is unaffected.
+_LOCAL_AUDIO = os.environ.get("RADIO_OS_LOCAL_AUDIO", "").strip() in ("1", "true", "yes")
+
+def _start_local_audio_watcher(audio_dir: str, pulse_device) -> None:
+    """
+    Background thread: watches *audio_dir* for new seg_*.wav files and plays
+    each one through sounddevice (pulse device) in arrival order.
+
+    Plays then deletes the file so the directory doesn't grow unboundedly.
+    Does NOT interfere with the AudioBridge — that reads the file before we
+    delete it (the JSON sidecar is the queue marker the bridge uses; we only
+    delete the WAV after playback).
+    """
+    import glob as _glob
+    import soundfile as _sf
+
+    _played: set = set()
+
+    def _watcher():
+        while True:
+            try:
+                # Find all WAV files sorted by timestamp embedded in name
+                wavs = sorted(
+                    _glob.glob(os.path.join(audio_dir, "seg_*.wav")),
+                    key=lambda p: int(os.path.basename(p)[4:-4]) if os.path.basename(p)[4:-4].isdigit() else 0,
+                )
+                for wav in wavs:
+                    if wav in _played:
+                        continue
+                    # Wait until JSON sidecar exists — means writing is complete
+                    if not os.path.exists(wav + ".json"):
+                        continue
+                    _played.add(wav)
+                    try:
+                        data, sr = _sf.read(wav, dtype="float32")
+                        if data.ndim == 1:
+                            data = data.reshape(-1, 1)
+                        sd.play(data, sr, device=pulse_device, blocking=True)
+                    except Exception as exc:
+                        print(f"[local_audio] playback error: {exc}", file=sys.stderr)
+                    finally:
+                        # Small set cleanup to avoid unbounded growth
+                        if len(_played) > 200:
+                            oldest = sorted(_played)[:100]
+                            for p in oldest:
+                                _played.discard(p)
+            except Exception as exc:
+                print(f"[local_audio] watcher error: {exc}", file=sys.stderr)
+            time.sleep(0.05)
+
+    import threading as _th
+    t = _th.Thread(target=_watcher, name="local_audio_watcher", daemon=True)
+    t.start()
+    print("[bookmark] Local audio watcher started (RADIO_OS_LOCAL_AUDIO=1)", file=sys.stderr)
+
 # =======================
 # Live Feed Config Reloader
 # =======================
@@ -9289,6 +9347,12 @@ def main():
         log("audio", f"sounddevice default device: {sd.default.device}")
     except Exception as e:
         log("audio", f"sounddevice error: {e}")
+
+    # ------------------
+    # Local audio watcher (headless + RADIO_OS_LOCAL_AUDIO=1)
+    # ------------------
+    if HEADLESS and _LOCAL_AUDIO and HEADLESS_AUDIO_DIR:
+        _start_local_audio_watcher(HEADLESS_AUDIO_DIR, _PULSE_OUT)
 
     # ------------------
     # UI

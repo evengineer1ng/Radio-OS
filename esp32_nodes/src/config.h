@@ -6,7 +6,7 @@
 
 // Radio OS Python backend — Raspberry Pi at 10.0.0.120
 #define RADIO_OS_HOST "10.0.0.120"
-#define RADIO_OS_PORT 8765          // WebSocket port
+#define RADIO_OS_PORT 7800          // WebSocket port (Radio OS web shell)
 
 // ─── Node identity ───────────────────────────────────────────────────────────
 // NODE_ID is set per-environment in platformio.ini (1-4)

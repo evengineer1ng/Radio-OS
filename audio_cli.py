@@ -6971,9 +6971,12 @@ class AudioCLISession:
             return
 
         transcript_lower = transcript.lower().strip()
-        _log(f"Wake check: '{transcript_lower}'")
+        # Strip punctuation so "hey, radio." → "hey radio" still matches
+        import re as _re
+        transcript_clean = _re.sub(r"[^\w\s]", "", transcript_lower)
+        _log(f"Wake check: '{transcript_lower}' (clean: '{transcript_clean}')")
 
-        if WAKE_PHRASE in transcript_lower:
+        if WAKE_PHRASE in transcript_lower or WAKE_PHRASE in transcript_clean:
             self._begin_session()
 
     def _session_listen_cycle(self) -> None:
@@ -7018,7 +7021,8 @@ class AudioCLISession:
         self._emit_flutter_event({"type": "transcript_final", "text": transcript})
 
         # Check for exit phrase — ESCAPE HATCH, never overridden by persona
-        if EXIT_PHRASE in transcript.lower().strip():
+        _t_clean = __import__("re").sub(r"[^\w\s]", "", transcript.lower().strip())
+        if EXIT_PHRASE in transcript.lower().strip() or EXIT_PHRASE in _t_clean:
             # Mark inactive immediately so no silence-timeout or other
             # cycle can fire while the goodbye TTS plays.
             self.active = False
@@ -7286,7 +7290,8 @@ class AudioCLISession:
         _log(f"Audio KB heard: '{transcript}' (confirming={self._audio_kb_confirming})")
 
         # Always allow exit from keyboard
-        if EXIT_PHRASE in text_lower:
+        _t_kb_clean = __import__("re").sub(r"[^\w\s]", "", text_lower)
+        if EXIT_PHRASE in text_lower or EXIT_PHRASE in _t_kb_clean:
             self._deactivate_audio_keyboard("session exit")
             self.narration.speak("Audio keyboard cancelled. Exiting Audio CLI.")
             self._end_session()

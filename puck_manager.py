@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import struct
 import time
 import wave
@@ -65,6 +66,75 @@ class PuckManager:
 
         # Mic frame callbacks: node_id → list of async callables
         self._mic_callbacks: Dict[int, List[Any]] = {i: [] for i in range(1, 5)}
+
+        # Background poller task handle
+        self._poller_task: Optional[Any] = None
+
+    # ── Background audio poller ──────────────────────────────────────────────
+
+    def start_poller(self, stations_dir: str):
+        """Start the background task that polls station audio pipes.
+        Call this once after the event loop is running (e.g. from a FastAPI
+        startup event). Runs independently of any browser WebSocket connection.
+        """
+        if self._poller_task is not None:
+            return
+        self._poller_task = asyncio.ensure_future(
+            self._poll_loop(stations_dir)
+        )
+        print("[PuckManager] Background audio poller started.", flush=True)
+
+    async def _poll_loop(self, stations_dir: str):
+        """Continuously scan all station audio pipes and broadcast to pucks."""
+        while True:
+            try:
+                await self._poll_once(stations_dir)
+            except Exception as e:
+                print(f"[PuckManager] Poller error: {e}", flush=True)
+            await asyncio.sleep(0.3)
+
+    async def _poll_once(self, stations_dir: str):
+        """Scan every station's .audio_pipe dir and broadcast new WAV files."""
+        if not os.path.isdir(stations_dir):
+            return
+        # Check any connected pucks exist before doing file I/O
+        if not any(p.connected for p in self._pucks.values()):
+            return
+        try:
+            station_ids = os.listdir(stations_dir)
+        except Exception:
+            return
+        for station_id in station_ids:
+            audio_dir = os.path.join(stations_dir, station_id, ".audio_pipe")
+            if not os.path.isdir(audio_dir):
+                continue
+            try:
+                files = sorted(f for f in os.listdir(audio_dir) if f.endswith(".wav"))
+            except Exception:
+                continue
+            for fname in files:
+                fpath = os.path.join(audio_dir, fname)
+                meta_path = fpath + ".json"
+                try:
+                    if time.time() - os.path.getmtime(fpath) < 0.2:
+                        continue  # still being written
+                except Exception:
+                    continue
+                try:
+                    with open(fpath, "rb") as f:
+                        wav_bytes = f.read()
+                    if len(wav_bytes) < 44:
+                        continue
+                except Exception:
+                    continue
+                # Delete before broadcasting so we don't double-send
+                try:
+                    os.remove(fpath)
+                    if os.path.exists(meta_path):
+                        os.remove(meta_path)
+                except Exception:
+                    pass
+                await self.broadcast_wav(wav_bytes, station_id=station_id)
 
     # ── State accessors ──────────────────────────────────────────────────────
 

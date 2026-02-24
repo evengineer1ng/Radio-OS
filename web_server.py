@@ -556,6 +556,12 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         allow_headers=["*"],
     )
 
+    # ──── Startup: launch puck audio poller ────
+    @app.on_event("startup")
+    async def _start_puck_poller():
+        from puck_manager import get_puck_manager
+        get_puck_manager().start_poller(STATIONS_DIR)
+
     # ──── REST: Health ────
     @app.get("/api/health")
     async def health():
@@ -1239,12 +1245,6 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
                             print(f"[AudioWS] {station_id}: send failed: {e}", flush=True)
                             stop.set()
                             return
-                        # ── Broadcast to connected pucks ──
-                        try:
-                            from puck_manager import get_puck_manager
-                            await get_puck_manager().broadcast_wav(payload, route=station_id)
-                        except Exception as _pe:
-                            pass
                     await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"[AudioWS] {station_id}: poller error: {e}", flush=True)

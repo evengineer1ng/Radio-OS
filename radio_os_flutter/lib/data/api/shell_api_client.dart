@@ -141,6 +141,40 @@ class ShellApiClient {
   Future<Map<String, dynamic>> vacuumDatabases() =>
       _http.post('/api/storage/vacuum_databases');
 
+  // ── Pucks (ESP32 wireless audio nodes) ─────────────────────
+  Future<List<dynamic>> getPucks() async {
+    final res = await _http.get('/api/pucks');
+    // HTTP client wraps lists as {'items': [...]}
+    if (res.containsKey('items') && res['items'] is List) {
+      return res['items'] as List<dynamic>;
+    }
+    // puck_manager returns {'group_volume': N, 'pucks': {'1': {...}, ...}}
+    final pucksVal = res['pucks'];
+    if (pucksVal is Map) {
+      return pucksVal.values.toList();
+    }
+    if (pucksVal is List) return pucksVal;
+    return [];
+  }
+
+  Future<Map<String, dynamic>> setPuckVolume(int nodeId, int volume) =>
+      _http.post('/api/pucks/$nodeId/volume', data: {'volume': volume});
+
+  Future<Map<String, dynamic>> setGroupVolume(int volume) =>
+      _http.post('/api/pucks/group_volume', data: {'volume': volume});
+
+  Future<Map<String, dynamic>> setPuckMute(int nodeId, {required bool muted}) =>
+      _http.post('/api/pucks/$nodeId/mute', data: {'muted': muted});
+
+  Future<Map<String, dynamic>> muteAllPucks({required bool muted}) =>
+      _http.post('/api/pucks/mute_all', data: {'muted': muted});
+
+  Future<Map<String, dynamic>> setPuckRoute(int nodeId, String route) =>
+      _http.post('/api/pucks/$nodeId/route', data: {'route': route});
+
+  Future<Map<String, dynamic>> sendPuckTestTone(int nodeId) =>
+      _http.post('/api/pucks/$nodeId/test_tone');
+
   // ── Station logo URL ────────────────────────────────────────
   String stationLogoUrl(String stationId) =>
       '${_http.baseUrl}/api/stations/$stationId/logo';

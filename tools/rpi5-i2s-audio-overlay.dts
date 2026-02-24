@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0
+// Combined I2S audio overlay for Pi 5:
+//   Playback  → MAX98357A DAC/amp  (GPIO21 = DIN)
+//   Capture   → INMP441 mic        (GPIO20 = DOUT)
+//   Shared    → GPIO18=BCLK  GPIO19=LRCLK
+//
+// Single simple-audio-card with two dai-links sharing i2s@a0000.
+// Pi is clock master for both links.
+//
+// Build:
+//   dtc -@ -I dts -O dtb -o rpi5-i2s-audio.dtbo rpi5-i2s-audio-overlay.dts
+//   sudo cp rpi5-i2s-audio.dtbo /boot/firmware/overlays/
+// config.txt:  dtoverlay=rpi5-i2s-audio
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target = <&i2s_clk_producer>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+
+            inmp441_codec: inmp441-codec {
+                compatible = "invensense,ics43432";
+                #sound-dai-cells = <0>;
+                status = "okay";
+            };
+
+            max98357a_codec: max98357a-codec {
+                compatible = "maxim,max98357a";
+                #sound-dai-cells = <0>;
+                status = "okay";
+            };
+
+            rpi5-i2s-audio {
+                compatible = "simple-audio-card";
+                simple-audio-card,name = "rpi5-i2s-audio";
+                status = "okay";
+
+                // DAI link 0: playback — Pi master → MAX98357A
+                simple-audio-card,dai-link@0 {
+                    format = "i2s";
+                    bitclock-master = <&pb_cpu>;
+                    frame-master    = <&pb_cpu>;
+
+                    pb_cpu: cpu {
+                        sound-dai = <0xffffffff>;
+                    };
+
+                    codec {
+                        sound-dai = <&max98357a_codec>;
+                    };
+                };
+
+                // DAI link 1: capture — Pi master → INMP441
+                simple-audio-card,dai-link@1 {
+                    format = "i2s";
+                    bitclock-master = <&cap_cpu>;
+                    frame-master    = <&cap_cpu>;
+
+                    cap_cpu: cpu {
+                        sound-dai = <0xffffffff>;
+                    };
+
+                    codec {
+                        sound-dai = <&inmp441_codec>;
+                    };
+                };
+            };
+        };
+    };
+
+    __fixups__ {
+        i2s_clk_producer = "/fragment@1/__overlay__/rpi5-i2s-audio/simple-audio-card,dai-link@0/cpu:sound-dai:0",
+                           "/fragment@1/__overlay__/rpi5-i2s-audio/simple-audio-card,dai-link@1/cpu:sound-dai:0";
+    };
+
+    __local_fixups__ {
+        fragment@1 {
+            __overlay__ {
+                rpi5-i2s-audio {
+                    simple-audio-card,dai-link@0 {
+                        bitclock-master = <0>;
+                        frame-master    = <0>;
+                    };
+                    simple-audio-card,dai-link@1 {
+                        bitclock-master = <0>;
+                        frame-master    = <0>;
+                    };
+                };
+            };
+        };
+    };
+};

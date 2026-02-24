@@ -848,7 +848,7 @@ OUTPUT FORMAT
 "mode": "audio_cli",
 "actions": [
 {
-"type": "click | navigate | input | select | start | stop | open | close | back | wait | switch_mode | switch_context | start_game | show_browser | hide_browser | play_audio | stop_audio | mute_audio | list_plugins | toggle_feed | configure_feed | plugin_command | open_plugin_ui | restart_app | audio_keyboard | set_audio_mode | set_verbosity | load_persona | unload_persona",
+"type": "click | navigate | input | select | start | stop | open | close | back | wait | switch_mode | switch_context | start_game | show_browser | hide_browser | play_audio | stop_audio | mute_audio | list_plugins | toggle_feed | configure_feed | plugin_command | open_plugin_ui | restart_app | audio_keyboard | set_audio_mode | set_verbosity | load_persona | unload_persona | set_puck_volume | set_group_volume | mute_puck | route_puck | test_puck_tone",
 "target": "string_identifier",
 "params": { },
 "condition": "always | if_success | if_fail"
@@ -1416,7 +1416,48 @@ Trigger phrases:
 The current audio mode is included in the UI state as "audio_output_mode".
 Always narrate the mode change when it occurs.
 
-VERBOSITY CONTROL
+PUCK AUDIO CONTROL
+
+"Pucks" are ESP32 wireless speaker/mic nodes (node IDs 1-4). You can control
+their volume individually or as a group, mute/unmute them, change their audio
+route, or send a test tone to verify hardware.
+
+Actions:
+
+  set_puck_volume   — Set volume for one puck (0-100).
+    target: "1" | "2" | "3" | "4"  (node ID as string)
+    params: {"volume": 75}
+    Examples: "puck 1 volume 60", "turn down node 2", "set speaker 3 to 80 percent"
+    → {"type": "set_puck_volume", "target": "1", "params": {"volume": 60}}
+
+  set_group_volume  — Set all pucks to the same volume.
+    target: "all"
+    params: {"volume": 80}
+    Examples: "all pucks to 50", "lower all speakers", "group volume 70"
+    → {"type": "set_group_volume", "target": "all", "params": {"volume": 50}}
+
+  mute_puck         — Mute or unmute a puck, or all pucks.
+    target: "1" | "2" | "3" | "4" | "all"
+    params: {"muted": true}  or  {"muted": false}
+    Examples: "mute puck 2", "unmute all pucks", "silence node 3"
+    → {"type": "mute_puck", "target": "2", "params": {"muted": true}}
+    → {"type": "mute_puck", "target": "all", "params": {"muted": false}}
+
+  route_puck        — Route a puck to a specific station or broadcast to all.
+    target: "1" | "2" | "3" | "4" | "all"
+    params: {"route": "all"}  — route to all stations
+    params: {"route": "none"}  — silence (no audio)
+    params: {"route": "<station_id>"}  — route to named station only
+    Examples: "route puck 1 to algo fm", "send puck 3 to sports", "puck 2 all stations"
+    → {"type": "route_puck", "target": "1", "params": {"route": "algotradingfm"}}
+
+  test_puck_tone    — Play a test tone on a puck to verify wiring.
+    target: "1" | "2" | "3" | "4"
+    params: {}
+    Examples: "test puck 1", "test tone on node 2", "check speaker 3"
+    → {"type": "test_puck_tone", "target": "1", "params": {}}
+
+
 
 Audio CLI has five verbosity levels that control how much narration you
 generate. The current level is in the UI state as "verbosity".
@@ -4216,6 +4257,11 @@ class CommandDispatcher:
             "open_plugin_ui": self._open_plugin_ui,
             "restart_app": self._restart_app,
             "audio_keyboard": self._audio_keyboard,
+            "set_puck_volume": self._set_puck_volume,
+            "set_group_volume": self._set_group_volume,
+            "mute_puck": self._mute_puck,
+            "route_puck": self._route_puck,
+            "test_puck_tone": self._test_puck_tone,
         }
 
     def execute(self, actions: List[CLIAction]) -> List[str]:
@@ -4470,6 +4516,80 @@ class CommandDispatcher:
         _local_audio_player.muted = not _local_audio_player.muted
         status = "muted" if _local_audio_player.muted else "unmuted"
         return f"Local audio {status}."
+
+    # -- Puck (ESP32 wireless node) control ----------------------------------
+
+    def _puck_api(self, method: str, path: str, body: dict | None = None) -> dict:
+        """POST or GET to the local web server puck API."""
+        import urllib.request, urllib.error
+        port = getattr(self.shell, "_web_port", 7800)
+        url = f"http://127.0.0.1:{port}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _set_puck_volume(self, action: CLIAction) -> str:
+        node_id = action.target or "all"
+        volume = int((action.params or {}).get("volume", 80))
+        if node_id == "all":
+            self._puck_api("POST", "/api/pucks/group_volume", {"volume": volume})
+            return f"All pucks set to volume {volume}."
+        result = self._puck_api("POST", f"/api/pucks/{node_id}/volume", {"volume": volume})
+        if result.get("error"):
+            return f"Puck {node_id} volume error: {result['error']}"
+        return f"Puck {node_id} volume set to {volume}."
+
+    def _set_group_volume(self, action: CLIAction) -> str:
+        volume = int((action.params or {}).get("volume", 80))
+        self._puck_api("POST", "/api/pucks/group_volume", {"volume": volume})
+        return f"All pucks set to volume {volume}."
+
+    def _mute_puck(self, action: CLIAction) -> str:
+        node_id = action.target or "all"
+        muted = bool((action.params or {}).get("muted", True))
+        status = "muted" if muted else "unmuted"
+        if node_id == "all":
+            self._puck_api("POST", "/api/pucks/mute_all", {"muted": muted})
+            return f"All pucks {status}."
+        result = self._puck_api("POST", f"/api/pucks/{node_id}/mute", {"muted": muted})
+        if result.get("error"):
+            return f"Puck {node_id} mute error: {result['error']}"
+        return f"Puck {node_id} {status}."
+
+    def _route_puck(self, action: CLIAction) -> str:
+        node_id = action.target or "all"
+        route = str((action.params or {}).get("route", "all"))
+        if node_id == "all":
+            # route all pucks
+            try:
+                import urllib.request, json as _json
+                port = getattr(self.shell, "_web_port", 7800)
+                resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/pucks", timeout=3)
+                pucks = _json.loads(resp.read())
+                for p in pucks:
+                    self._puck_api("POST", f"/api/pucks/{p['node_id']}/route", {"route": route})
+            except Exception:
+                pass
+            return f"All pucks routed to '{route}'."
+        result = self._puck_api("POST", f"/api/pucks/{node_id}/route", {"route": route})
+        if result.get("error"):
+            return f"Puck {node_id} route error: {result['error']}"
+        return f"Puck {node_id} routed to '{route}'."
+
+    def _test_puck_tone(self, action: CLIAction) -> str:
+        node_id = action.target or "1"
+        result = self._puck_api("POST", f"/api/pucks/{node_id}/test_tone")
+        if result.get("error"):
+            return f"Test tone error on puck {node_id}: {result['error']}"
+        return f"Test tone sent to puck {node_id}."
 
     # -- Plugin / feed control (tkinter mode) --------------------------------
 

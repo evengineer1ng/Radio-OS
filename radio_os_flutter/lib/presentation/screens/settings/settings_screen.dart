@@ -63,6 +63,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _SectionDef('models', 'Models', Icons.psychology),
       _SectionDef('voices', 'Voices', Icons.record_voice_over),
       _SectionDef('environment', 'Environment', Icons.computer),
+      _SectionDef('sound', 'Sound', Icons.speaker),
       _SectionDef('appearance', 'Appearance', Icons.palette),
     ];
 
@@ -165,6 +166,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         return const _VoicesSection();
       case 'environment':
         return const _EnvironmentSection();
+      case 'sound':
+        return const _SoundSection();
       case 'appearance':
         return const _AppearanceSection();
       default:
@@ -881,6 +884,333 @@ class _AppearanceSection extends ConsumerWidget {
         height: 10,
         decoration: BoxDecoration(shape: BoxShape.circle, color: color),
       );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sound (Puck audio nodes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SoundSection extends ConsumerStatefulWidget {
+  const _SoundSection();
+  @override
+  ConsumerState<_SoundSection> createState() => _SoundSectionState();
+}
+
+class _SoundSectionState extends ConsumerState<_SoundSection> {
+  List<Map<String, dynamic>> _pucks = [];
+  bool _loading = true;
+  String? _error;
+  int _groupVolume = 80;
+
+  static const _routeOptions = ['all', 'none'];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPucks();
+  }
+
+  Future<void> _loadPucks() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final api = ref.read(shellApiProvider);
+      final raw = await api.getPucks();
+      final pucks = raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      // Derive group volume as mean of all puck volumes
+      if (pucks.isNotEmpty) {
+        final sum =
+            pucks.fold<int>(0, (s, p) => s + ((p['volume'] as num?)?.toInt() ?? 80));
+        _groupVolume = (sum / pucks.length).round();
+      }
+      setState(() {
+        _pucks = pucks;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _setGroupVolume(int v) async {
+    setState(() => _groupVolume = v);
+    final api = ref.read(shellApiProvider);
+    await api.setGroupVolume(v);
+    // Reflect in each puck locally
+    setState(() {
+      for (final p in _pucks) {
+        p['volume'] = v;
+      }
+    });
+  }
+
+  Future<void> _setPuckVolume(int nodeId, int v) async {
+    setState(() {
+      for (final p in _pucks) {
+        if ((p['node_id'] as int?) == nodeId) p['volume'] = v;
+      }
+    });
+    final api = ref.read(shellApiProvider);
+    await api.setPuckVolume(nodeId, v);
+  }
+
+  Future<void> _toggleMute(int nodeId, bool muted) async {
+    setState(() {
+      for (final p in _pucks) {
+        if ((p['node_id'] as int?) == nodeId) p['muted'] = muted;
+      }
+    });
+    final api = ref.read(shellApiProvider);
+    await api.setPuckMute(nodeId, muted: muted);
+  }
+
+  Future<void> _muteAll(bool muted) async {
+    setState(() {
+      for (final p in _pucks) {
+        p['muted'] = muted;
+      }
+    });
+    final api = ref.read(shellApiProvider);
+    await api.muteAllPucks(muted: muted);
+  }
+
+  Future<void> _setRoute(int nodeId, String route) async {
+    setState(() {
+      for (final p in _pucks) {
+        if ((p['node_id'] as int?) == nodeId) p['route'] = route;
+      }
+    });
+    final api = ref.read(shellApiProvider);
+    await api.setPuckRoute(nodeId, route);
+  }
+
+  Future<void> _testTone(int nodeId) async {
+    final api = ref.read(shellApiProvider);
+    await api.sendPuckTestTone(nodeId);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionHeader('Sound', Icons.speaker, 'Manage ESP32 wireless puck audio nodes'),
+          const SizedBox(height: 20),
+          if (_loading)
+            const Center(child: CircularProgressIndicator())
+          else if (_error != null)
+            _InfoCard(children: [
+              Row(children: [
+                const Icon(Icons.error_outline, color: Color(0xFFf87171), size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text('Could not load pucks: $_error',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: const Color(0xFFf87171)))),
+              ]),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: _loadPucks,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Retry'),
+              ),
+            ])
+          else ...[
+            // ── Group volume ──────────────────────────────────────────
+            _InfoCard(
+              header: Row(
+                children: [
+                  const Icon(Icons.volume_up, size: 16),
+                  const SizedBox(width: 6),
+                  Text('Group Volume', style: theme.textTheme.labelLarge),
+                  const Spacer(),
+                  OutlinedButton.icon(
+                    onPressed: () => _muteAll(true),
+                    style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    icon: const Icon(Icons.volume_off, size: 14),
+                    label: const Text('Mute all', style: TextStyle(fontSize: 12)),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => _muteAll(false),
+                    style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    icon: const Icon(Icons.volume_up, size: 14),
+                    label: const Text('Unmute all', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+              children: [
+                Row(
+                  children: [
+                    Text('$_groupVolume',
+                        style: theme.textTheme.labelMedium
+                            ?.copyWith(fontFamily: 'monospace', fontSize: 16),
+                        textAlign: TextAlign.right),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Slider(
+                        value: _groupVolume.toDouble(),
+                        min: 0,
+                        max: 100,
+                        divisions: 20,
+                        label: '$_groupVolume',
+                        onChanged: (v) => setState(() => _groupVolume = v.round()),
+                        onChangeEnd: (v) => _setGroupVolume(v.round()),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // ── Per-puck rows ─────────────────────────────────────────
+            if (_pucks.isEmpty)
+              _InfoCard(children: [
+                Text('No pucks connected. Flash firmware and connect ESP32 nodes to WiFi.',
+                    style: theme.textTheme.bodySmall),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _loadPucks,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('Refresh'),
+                ),
+              ])
+            else
+              ..._pucks.map((puck) {
+                final nodeId = (puck['node_id'] as num?)?.toInt() ?? 0;
+                final volume = (puck['volume'] as num?)?.toInt() ?? 80;
+                final muted = puck['muted'] as bool? ?? false;
+                final connected = puck['connected'] as bool? ?? false;
+                final route = puck['route'] as String? ?? 'all';
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _InfoCard(
+                    header: Row(
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: connected
+                                ? const Color(0xFF34d399)
+                                : const Color(0xFF9ca3af),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text('Puck $nodeId',
+                            style: theme.textTheme.labelLarge),
+                        const SizedBox(width: 6),
+                        Text(connected ? 'connected' : 'offline',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                                color: connected
+                                    ? const Color(0xFF34d399)
+                                    : const Color(0xFF9ca3af))),
+                        const Spacer(),
+                        // Mute toggle
+                        IconButton(
+                          tooltip: muted ? 'Unmute' : 'Mute',
+                          icon: Icon(
+                            muted ? Icons.volume_off : Icons.volume_up,
+                            size: 18,
+                            color: muted ? const Color(0xFFf87171) : null,
+                          ),
+                          onPressed: () => _toggleMute(nodeId, !muted),
+                        ),
+                        // Test tone
+                        IconButton(
+                          tooltip: 'Send test tone',
+                          icon: const Icon(Icons.surround_sound, size: 18),
+                          onPressed: connected ? () => _testTone(nodeId) : null,
+                        ),
+                      ],
+                    ),
+                    children: [
+                      // Volume row
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 36,
+                            child: Text('$volume',
+                                style: theme.textTheme.bodySmall
+                                    ?.copyWith(fontFamily: 'monospace'),
+                                textAlign: TextAlign.right),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Slider(
+                              value: volume.toDouble(),
+                              min: 0,
+                              max: 100,
+                              divisions: 20,
+                              label: '$volume',
+                              onChanged: muted
+                                  ? null
+                                  : (v) => setState(() {
+                                        for (final p in _pucks) {
+                                          if ((p['node_id'] as int?) == nodeId) {
+                                            p['volume'] = v.round();
+                                          }
+                                        }
+                                      }),
+                              onChangeEnd: muted
+                                  ? null
+                                  : (v) => _setPuckVolume(nodeId, v.round()),
+                            ),
+                          ),
+                        ],
+                      ),
+                      // Route row
+                      Row(
+                        children: [
+                          Text('Route:',
+                              style: theme.textTheme.labelMedium),
+                          const SizedBox(width: 12),
+                          DropdownButton<String>(
+                            value: _routeOptions.contains(route) ? route : 'all',
+                            isDense: true,
+                            items: _routeOptions
+                                .map((r) => DropdownMenuItem(
+                                    value: r,
+                                    child: Text(r == 'all' ? 'All stations' : r == 'none' ? 'Silent' : r,
+                                        style: theme.textTheme.bodySmall)))
+                                .toList(),
+                            onChanged: (v) {
+                              if (v != null) _setRoute(nodeId, v);
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _loadPucks,
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Refresh puck status'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

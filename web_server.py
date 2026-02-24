@@ -1239,6 +1239,12 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
                             print(f"[AudioWS] {station_id}: send failed: {e}", flush=True)
                             stop.set()
                             return
+                        # ── Broadcast to connected pucks ──
+                        try:
+                            from puck_manager import get_puck_manager
+                            await get_puck_manager().broadcast_wav(payload, route=station_id)
+                        except Exception as _pe:
+                            pass
                     await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"[AudioWS] {station_id}: poller error: {e}", flush=True)
@@ -1302,6 +1308,66 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
                 await ws.close()
             except Exception:
                 pass
+
+    # ──── WebSocket: ESP32 puck audio nodes ────
+    @app.websocket("/audio")
+    async def ws_puck_audio(ws: WebSocket):
+        from puck_manager import get_puck_manager, handle_puck_websocket
+        await handle_puck_websocket(ws, get_puck_manager())
+
+    # ──── REST: Puck management ────
+    @app.get("/api/pucks")
+    async def api_get_pucks():
+        from puck_manager import get_puck_manager
+        return get_puck_manager().get_all_state()
+
+    @app.post("/api/pucks/group_volume")
+    async def api_group_volume(request: Request):
+        body = await request.json()
+        volume = int(body.get("volume", 80))
+        from puck_manager import get_puck_manager
+        get_puck_manager().set_group_volume(volume)
+        return {"ok": True, "volume": volume}
+
+    @app.post("/api/pucks/{node_id}/volume")
+    async def api_puck_volume(node_id: int, request: Request):
+        body = await request.json()
+        volume = int(body.get("volume", 80))
+        from puck_manager import get_puck_manager
+        get_puck_manager().set_puck_volume(node_id, volume)
+        return {"ok": True, "node_id": node_id, "volume": volume}
+
+    @app.post("/api/pucks/{node_id}/mute")
+    async def api_puck_mute(node_id: int, request: Request):
+        body = await request.json()
+        muted = bool(body.get("muted", True))
+        from puck_manager import get_puck_manager
+        get_puck_manager().set_puck_mute(node_id, muted)
+        return {"ok": True, "node_id": node_id, "muted": muted}
+
+    @app.post("/api/pucks/{node_id}/route")
+    async def api_puck_route(node_id: int, request: Request):
+        body = await request.json()
+        route = str(body.get("route", "all"))
+        from puck_manager import get_puck_manager
+        get_puck_manager().set_puck_route(node_id, route)
+        return {"ok": True, "node_id": node_id, "route": route}
+
+    @app.post("/api/pucks/{node_id}/test_tone")
+    async def api_puck_test_tone(node_id: int):
+        from puck_manager import get_puck_manager
+        await get_puck_manager().send_test_tone(node_id)
+        return {"ok": True, "node_id": node_id}
+
+    @app.post("/api/pucks/mute_all")
+    async def api_mute_all(request: Request):
+        body = await request.json()
+        muted = bool(body.get("muted", True))
+        from puck_manager import get_puck_manager
+        mgr = get_puck_manager()
+        for puck in mgr._pucks.values():
+            puck.muted = muted
+        return {"ok": True, "muted": muted}
 
     # ──── Serve the web shell frontend ────
     shell_dist = os.path.join(BASE_DIR, "web_shell", "dist")

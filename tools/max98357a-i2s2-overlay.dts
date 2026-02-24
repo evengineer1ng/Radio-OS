@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0
+// MAX98357A I2S DAC on RP1 i2s@a8000 (rp1_i2s2) — Pi 5 only
+// Pi is clock master. Wiring: GPIO 18=BCLK, 19=LRCLK, 21=DIN
+//
+// Build:
+//   dtc -@ -I dts -O dtb -o max98357a-i2s2.dtbo max98357a-i2s2-overlay.dts
+//   sudo cp max98357a-i2s2.dtbo /boot/firmware/overlays/
+// config.txt:  dtoverlay=max98357a-i2s2
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    // Enable i2s@a8000 and mark it as a DAI provider
+    fragment@0 {
+        target-path = "/axi/pcie@1000120000/rp1/i2s@a8000";
+        __overlay__ {
+            status = "okay";
+            #sound-dai-cells = <0>;
+        };
+    };
+
+    // Codec + sound card together so &max98357a_codec resolves locally
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+
+            max98357a_codec: max98357a-codec {
+                compatible = "maxim,max98357a";
+                #sound-dai-cells = <0>;
+                status = "okay";
+            };
+
+            max98357a-sound {
+                compatible = "simple-audio-card";
+                simple-audio-card,name = "MAX98357A";
+                simple-audio-card,format = "i2s";
+                simple-audio-card,bitclock-master = <&cpu_dai>;
+                simple-audio-card,frame-master   = <&cpu_dai>;
+                status = "okay";
+
+                cpu_dai: simple-audio-card,cpu {
+                    sound-dai = <0xffffffff>;
+                };
+
+                simple-audio-card,codec {
+                    sound-dai = <&max98357a_codec>;
+                };
+            };
+        };
+    };
+
+    __fixups__ {
+        rp1_i2s2 = "/fragment@1/__overlay__/max98357a-sound/simple-audio-card,cpu:sound-dai:0";
+    };
+
+    __local_fixups__ {
+        fragment@1 {
+            __overlay__ {
+                max98357a-sound {
+                    simple-audio-card,bitclock-master = <0>;
+                    simple-audio-card,frame-master    = <0>;
+                };
+            };
+        };
+    };
+};

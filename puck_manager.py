@@ -316,7 +316,7 @@ async def handle_puck_websocket(ws: Any, puck_mgr: "PuckManager"):
 
     try:
         while True:
-            msg = await asyncio.wait_for(ws.receive(), timeout=30.0)
+            msg = await asyncio.wait_for(ws.receive(), timeout=60.0)
             if msg["type"] == "websocket.disconnect":
                 break
 

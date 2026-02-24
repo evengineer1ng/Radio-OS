@@ -69,7 +69,9 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
             if (length <= sizeof(spk_buf)) {
                 memcpy(spk_buf, payload, length);
                 size_t written;
-                i2s_channel_write(tx_handle, spk_buf, length, &written, portMAX_DELAY);
+                // Short timeout — don't block the WS event loop indefinitely
+                i2s_channel_write(tx_handle, spk_buf, length, &written,
+                                  pdMS_TO_TICKS(100));
             }
             break;
 
@@ -105,6 +107,7 @@ void setup() {
     ws.begin(RADIO_OS_HOST, RADIO_OS_PORT, "/audio");
     ws.onEvent(ws_event);
     ws.setReconnectInterval(3000);
+    ws.enableHeartbeat(15000, 3000, 2);  // ping every 15s, pong timeout 3s, 2 retries
     Serial.printf("[WS] Connecting to ws://%s:%d/audio\n", RADIO_OS_HOST, RADIO_OS_PORT);
 }
 
@@ -114,10 +117,12 @@ void loop() {
 
     if (!ws_connected) return;
 
-    // Read mic (32-bit frames from INMP441, take upper 16 bits)
+    // Read mic — wait up to 25 ms for a full chunk then yield back to ws.loop()
     int32_t raw[CHUNK_SAMPLES];
-    size_t bytes_read;
-    i2s_channel_read(rx_handle, raw, sizeof(raw), &bytes_read, portMAX_DELAY);
+    size_t bytes_read = 0;
+    esp_err_t err = i2s_channel_read(rx_handle, raw, sizeof(raw), &bytes_read,
+                                     pdMS_TO_TICKS(25));
+    if (err != ESP_OK || bytes_read == 0) return;  // nothing ready, let ws.loop() run
 
     int samples_read = bytes_read / sizeof(int32_t);
     for (int i = 0; i < samples_read; i++) {

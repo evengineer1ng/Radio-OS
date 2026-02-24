@@ -3664,14 +3664,34 @@ class NarrationEngine:
         if sys.platform.startswith("linux"):
             try:
                 proc = subprocess.Popen(
-                    ["espeak", "-s", "170", text],
+                    ["espeak", "-s", "170", "--stdout", text],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                paplay = subprocess.Popen(
+                    ["paplay", "--raw", "--rate=22050", "--channels=1",
+                     "--format=s16le"],
+                    stdin=proc.stdout,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                self._wait_or_interrupt(proc)
+                proc.stdout.close()
+                self._active_proc = paplay
+                self._wait_or_interrupt(paplay)
+                proc.wait(timeout=2)
                 return
             except Exception:
-                pass
+                # Fall back to direct espeak (no PulseAudio routing)
+                try:
+                    proc = subprocess.Popen(
+                        ["espeak", "-s", "170", text],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    self._wait_or_interrupt(proc)
+                    return
+                except Exception:
+                    pass
 
         # Try voice_provider if available
         try:
@@ -3685,7 +3705,18 @@ class NarrationEngine:
                 if data is not None and len(data) > 0 and HAS_SD:
                     if data.ndim == 1:
                         data = data.reshape(-1, 1)
-                    sd.play(data, sr)
+                    # Route through PulseAudio/PipeWire so pactl sink
+                    # selection controls which speaker plays the audio.
+                    _pulse_dev = None
+                    try:
+                        import sounddevice as _sd2
+                        for _i, _d in enumerate(_sd2.query_devices()):
+                            if str(_d.get("name", "")).lower().startswith("pulse") and _d.get("max_output_channels", 0) > 0:
+                                _pulse_dev = _i
+                                break
+                    except Exception:
+                        pass
+                    sd.play(data, sr, device=_pulse_dev)
                     if self._speaker_mode:
                         # Speaker mode: just wait for playback, no barge-in
                         sd.wait()

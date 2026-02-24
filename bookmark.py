@@ -60,6 +60,31 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 
+
+def _pulse_output_device() -> int:
+    """Return the sounddevice index for the 'pulse' ALSA device.
+
+    On PipeWire-pulse / PulseAudio stacks the ALSA 'pulse' pseudo-device
+    routes audio through the PulseAudio/PipeWire mixer, meaning pactl sink
+    selection controls where the sound actually goes.  Using the raw ALSA
+    hw/default device bypasses PipeWire entirely and always goes to HDMI.
+
+    Falls back to sd.default.device[1] if pulse is not found.
+    """
+    try:
+        for i, dev in enumerate(sd.query_devices()):
+            if str(dev.get("name", "")).lower().startswith("pulse") and dev.get("max_output_channels", 0) > 0:
+                return i
+    except Exception:
+        pass
+    try:
+        return sd.default.device[1]
+    except Exception:
+        return None
+
+
+_PULSE_OUT = _pulse_output_device()
+
 # Tkinter — skip if truly headless (e.g. server with no display)
 _HEADLESS_EARLY = os.environ.get("RADIO_OS_HEADLESS", "").strip() in ("1", "true", "yes")
 if _HEADLESS_EARLY:
@@ -2233,7 +2258,7 @@ def play_wav(path: str) -> None:
     if _duck < 1.0:
         data = data * _duck
 
-    sd.play(data, sr)
+    sd.play(data, sr, device=_PULSE_OUT)
     sd.wait()
 def merged_voice_map() -> Dict[str, str]:
     """
@@ -2528,7 +2553,8 @@ def speak(text: str, voice_key: str = None, speaker_label: str = ""):
             with sd.OutputStream(
                 samplerate=sr,
                 channels=data.shape[1],
-                dtype="float32"
+                dtype="float32",
+                device=_PULSE_OUT,
             ) as stream:
 
                 total = len(data)
@@ -9130,6 +9156,9 @@ def main():
     
     if HAS_PYGAME:
         try:
+            # Force SDL to use PulseAudio/PipeWire-pulse so that pactl sink
+            # routing controls pygame music output, same as sounddevice.
+            os.environ.setdefault("SDL_AUDIODRIVER", "pulse")
             pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
             pygame.mixer.set_num_channels(16)  # Allow multiple simultaneous sounds
             log("audio", "pygame.mixer initialized for file audio playback")

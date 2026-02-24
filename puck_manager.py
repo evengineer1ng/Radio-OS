@@ -421,6 +421,16 @@ def _scale_pcm16(data: bytes, scale: float) -> bytes:
     return struct.pack(f"<{n}h", *scaled)
 
 
+def _pcm16_to_i2s32(data: bytes) -> bytes:
+    """Convert 16-bit signed PCM to 32-bit MSB-aligned PCM for I2S TX.
+    The ESP32-C6 I2S slot is configured as I2S_DATA_BIT_WIDTH_32BIT so each
+    sample must be left-shifted into the upper 16 bits of a 32-bit word."""
+    n = len(data) // 2
+    samples = struct.unpack(f"<{n}h", data)
+    # Each 16-bit sample → 32-bit word with value in upper half (little-endian)
+    return struct.pack(f"<{n}i", *(s << 16 for s in samples))
+
+
 async def _puck_sender(ws: Any, puck: PuckState):
     """Drain puck's send queue and write to WebSocket.
     Runs as a concurrent task alongside the receive loop so there is only
@@ -430,7 +440,7 @@ async def _puck_sender(ws: Any, puck: PuckState):
         while puck.connected:
             try:
                 pcm = await asyncio.wait_for(puck.send_q.get(), timeout=5.0)
-                await ws.send_bytes(pcm)
+                await ws.send_bytes(_pcm16_to_i2s32(pcm))
             except asyncio.TimeoutError:
                 continue
             except Exception as e:

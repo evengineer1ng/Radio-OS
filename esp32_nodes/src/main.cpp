@@ -20,16 +20,13 @@ i2s_chan_handle_t tx_handle = nullptr;
 
 // ─── I2S setup (ESP-IDF v5 API) ──────────────────────────────────────────────
 void i2s_init() {
-    // ESP32-C6 has one I2S peripheral — use it as full-duplex (RX + TX)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
+    // Full-duplex: TX for speaker, RX for mic
     i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle);
 
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        // Use STEREO so data appears on both L+R slots — MAX98357A picks up
-        // whichever channel its SD pin selects (float/high = left, low = right).
-        // This also avoids the ESP-IDF v5 mono→left-slot ambiguity.
         .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
@@ -46,7 +43,7 @@ void i2s_init() {
     i2s_channel_enable(rx_handle);
     i2s_channel_enable(tx_handle);
 
-    Serial.println("[I2S] Full-duplex I2S0 initialised (mic RX + speaker TX)");
+    Serial.println("[I2S] Full-duplex I2S0 initialised");
 }
 
 // ─── WebSocket events ────────────────────────────────────────────────────────
@@ -134,18 +131,18 @@ void loop() {
 
     if (!ws_connected) return;
 
-    // Read mic — wait up to 25 ms for a full chunk then yield back to ws.loop()
+    // Read mic (32-bit frames from INMP441, upper 16 bits are the sample)
     int32_t raw[CHUNK_SAMPLES];
     size_t bytes_read = 0;
     esp_err_t err = i2s_channel_read(rx_handle, raw, sizeof(raw), &bytes_read,
                                      pdMS_TO_TICKS(25));
-    if (err != ESP_OK || bytes_read == 0) return;  // nothing ready, let ws.loop() run
+    if (err != ESP_OK || bytes_read == 0) return;
 
     int samples_read = bytes_read / sizeof(int32_t);
     for (int i = 0; i < samples_read; i++) {
-        mic_buf[i] = (int16_t)(raw[i] >> 14);  // INMP441 data is in bits [29:14]
+        mic_buf[i] = (int16_t)(raw[i] >> 14);
     }
 
-    // Send mic audio to Radio OS backend as raw 16-bit PCM binary
+    // Send raw 16-bit PCM to server for recording/monitoring
     ws.sendBIN((uint8_t*)mic_buf, samples_read * sizeof(int16_t));
 }

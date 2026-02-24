@@ -1359,6 +1359,33 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         await get_puck_manager().send_test_tone(node_id)
         return {"ok": True, "node_id": node_id}
 
+    @app.post("/api/pucks/{node_id}/record")
+    async def api_puck_record(node_id: int, seconds: int = 5):
+        """Capture N seconds of mic audio from a puck and save as WAV on the Pi."""
+        import wave, struct, time as _time
+        from puck_manager import get_puck_manager
+        mgr = get_puck_manager()
+        frames = []
+        async def _capture(nid, pcm):
+            if nid == node_id:
+                frames.append(pcm)
+        mgr.register_mic_callback(node_id, _capture)
+        await asyncio.sleep(seconds)
+        # deregister
+        mgr._mic_callbacks[node_id] = [
+            cb for cb in mgr._mic_callbacks.get(node_id, []) if cb is not _capture
+        ]
+        if not frames:
+            return {"ok": False, "error": "no audio received"}
+        path = os.path.expanduser(f"~/puck{node_id}_mic.wav")
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"".join(frames))
+        total_bytes = sum(len(f) for f in frames)
+        return {"ok": True, "path": path, "bytes": total_bytes, "seconds": seconds}
+
     @app.post("/api/pucks/mute_all")
     async def api_mute_all(request: Request):
         body = await request.json()

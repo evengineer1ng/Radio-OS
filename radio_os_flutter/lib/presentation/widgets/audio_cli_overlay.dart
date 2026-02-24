@@ -350,8 +350,9 @@ class _UserColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final baseSize = isUltraWide ? 14.0 : 17.0;
-    final completedTurns =
+        // Large, readable sizes for the 1920×480 bar display
+        final baseSize = isUltraWide ? 22.0 : 24.0;
+        final completedTurns =
         state.turns.where((t) => t.userText.isNotEmpty).toList();
 
     return Column(
@@ -363,38 +364,45 @@ class _UserColumn extends StatelessWidget {
           color: const Color(0xFF4CC9F0),
           isUltraWide: isUltraWide,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         Expanded(
           child: ListView.builder(
-            reverse: true, // newest at bottom, scrolls up
+            reverse: true,
             itemCount: completedTurns.length,
             itemBuilder: (_, i) {
-              // reversed list: index 0 = newest
               final turn =
                   completedTurns[completedTurns.length - 1 - i];
               final isNewest = i == 0;
               return Padding(
-                padding: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.only(bottom: 14),
                 child: AnimatedOpacity(
-                  opacity: isNewest ? 1.0 : 0.55,
+                  opacity: isNewest ? 1.0 : 0.45,
                   duration: const Duration(milliseconds: 200),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('▸ ',
+                      Text('▸ ',
                           style: TextStyle(
-                              color: Color(0xFF4CC9F0), fontSize: 14)),
+                              color: const Color(0xFF4CC9F0),
+                              fontSize: baseSize)),
                       Expanded(
-                        child: Text(
-                          turn.userText,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: baseSize,
-                            fontWeight: isNewest
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                          ),
-                        ),
+                        child: isNewest
+                            ? _TypewriterText(
+                                text: turn.userText,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: baseSize,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              )
+                            : Text(
+                                turn.userText,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: baseSize,
+                                  fontWeight: FontWeight.normal,
+                                ),
+                              ),
                       ),
                     ],
                   ),
@@ -403,20 +411,20 @@ class _UserColumn extends StatelessWidget {
             },
           ),
         ),
-        // Partial transcript at bottom (live dictation)
+        // Live partial transcript
         if (state.partialTranscript.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: 6),
             child: Row(
               children: [
                 const _PulsingDot(color: Color(0xFF4CC9F0)),
-                const SizedBox(width: 8),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     state.partialTranscript,
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.6),
-                      fontSize: baseSize - 1,
+                      color: Colors.white.withValues(alpha: 0.55),
+                      fontSize: baseSize - 3,
                       fontStyle: FontStyle.italic,
                     ),
                     maxLines: 2,
@@ -429,9 +437,7 @@ class _UserColumn extends StatelessWidget {
       ],
     );
   }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
+}// ═══════════════════════════════════════════════════════════════════════════
 // RIGHT column — LLM responses
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -443,7 +449,7 @@ class _LlmColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final baseSize = isUltraWide ? 14.0 : 17.0;
+    final baseSize = isUltraWide ? 22.0 : 24.0;
     final completedTurns =
         state.turns.where((t) => t.isComplete && t.llmText.isNotEmpty).toList();
 
@@ -456,7 +462,7 @@ class _LlmColumn extends StatelessWidget {
           color: const Color(0xFF2EE59D),
           isUltraWide: isUltraWide,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         Expanded(
           child: ListView.builder(
             reverse: true,
@@ -466,27 +472,37 @@ class _LlmColumn extends StatelessWidget {
                   completedTurns[completedTurns.length - 1 - i];
               final isNewest = i == 0;
               return Padding(
-                padding: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.only(bottom: 14),
                 child: AnimatedOpacity(
-                  opacity: isNewest ? 1.0 : 0.55,
+                  opacity: isNewest ? 1.0 : 0.45,
                   duration: const Duration(milliseconds: 200),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('▸ ',
+                      Text('▸ ',
                           style: TextStyle(
-                              color: Color(0xFF2EE59D), fontSize: 14)),
+                              color: const Color(0xFF2EE59D),
+                              fontSize: baseSize)),
                       Expanded(
-                        child: Text(
-                          turn.llmText,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: baseSize,
-                            fontWeight: isNewest
-                                ? FontWeight.w500
-                                : FontWeight.normal,
-                          ),
-                        ),
+                        child: isNewest
+                            ? _TypewriterText(
+                                text: turn.llmText,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: baseSize,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                // LLM responses are longer — slightly faster cadence
+                                charDelayMs: 18,
+                              )
+                            : Text(
+                                turn.llmText,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: baseSize,
+                                  fontWeight: FontWeight.normal,
+                                ),
+                              ),
                       ),
                     ],
                   ),
@@ -495,9 +511,97 @@ class _LlmColumn extends StatelessWidget {
             },
           ),
         ),
-        // Thinking bubble
         if (state.isThinking) const _ThinkingBubble(),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Typewriter text widget — animates text character by character
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _TypewriterText extends StatefulWidget {
+  final String text;
+  final TextStyle style;
+
+  /// Milliseconds between each character appearing.
+  final int charDelayMs;
+
+  const _TypewriterText({
+    required this.text,
+    required this.style,
+    this.charDelayMs = 28,
+  });
+
+  @override
+  State<_TypewriterText> createState() => _TypewriterTextState();
+}
+
+class _TypewriterTextState extends State<_TypewriterText> {
+  int _visibleChars = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTyping();
+  }
+
+  @override
+  void didUpdateWidget(_TypewriterText old) {
+    super.didUpdateWidget(old);
+    if (old.text != widget.text) {
+      _timer?.cancel();
+      _visibleChars = 0;
+      _startTyping();
+    }
+  }
+
+  void _startTyping() {
+    if (widget.text.isEmpty) return;
+    _timer = Timer.periodic(
+      Duration(milliseconds: widget.charDelayMs),
+      (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        setState(() => _visibleChars++);
+        if (_visibleChars >= widget.text.length) {
+          t.cancel();
+        }
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = widget.text.substring(
+      0,
+      _visibleChars.clamp(0, widget.text.length),
+    );
+    final isDone = _visibleChars >= widget.text.length;
+    return RichText(
+      text: TextSpan(
+        style: widget.style,
+        children: [
+          TextSpan(text: shown),
+          if (!isDone)
+            TextSpan(
+              text: '▌',
+              style: widget.style.copyWith(
+                color: widget.style.color?.withValues(alpha: 0.7),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -523,15 +627,15 @@ class _ColumnHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, color: color, size: isUltraWide ? 16 : 18),
-        const SizedBox(width: 6),
+        Icon(icon, color: color, size: isUltraWide ? 20 : 22),
+        const SizedBox(width: 8),
         Text(
           label,
           style: TextStyle(
             color: color,
-            fontSize: isUltraWide ? 11 : 13,
+            fontSize: isUltraWide ? 14 : 15,
             fontWeight: FontWeight.w700,
-            letterSpacing: 1.2,
+            letterSpacing: 1.4,
           ),
         ),
       ],
@@ -612,12 +716,12 @@ class _ThinkingBubbleState extends State<_ThinkingBubble>
               },
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
           Text(
             'thinking…',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
-              fontSize: 13,
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 20,
               fontStyle: FontStyle.italic,
             ),
           ),

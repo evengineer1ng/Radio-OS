@@ -260,9 +260,6 @@ class _OverlayContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(audioCliStateProvider);
-    final size = MediaQuery.of(context).size;
-    // 1920×480 is our target but adapt to whatever screen is present
-    final isUltraWide = size.width > 1200 && size.height < 600;
 
     return AnimatedOpacity(
       opacity: state.isActive ? 1.0 : 0.0,
@@ -270,63 +267,35 @@ class _OverlayContent extends ConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // ── Frosted glass scrim ──────────────────────────────────────
+          // ── Dark scrim ───────────────────────────────────────────────
           ClipRect(
             child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
-              child: Container(
-                color: Colors.black.withValues(alpha: 0.78),
-              ),
+              filter: ImageFilter.blur(sigmaX: 4, sigmaY: 4),
+              child: Container(color: Colors.black.withValues(alpha: 0.85)),
             ),
           ),
 
-          // ── Two-column transcript layout ─────────────────────────────
+          // ── Conversation thread ──────────────────────────────────────
           Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: isUltraWide ? 32 : 24,
-              vertical: isUltraWide ? 12 : 20,
-            ),
-            child: Row(
-              children: [
-                // LEFT: user transcripts
-                Expanded(
-                  child: _UserColumn(state: state, isUltraWide: isUltraWide),
-                ),
-                Container(
-                  width: 1,
-                  color: Colors.white.withValues(alpha: 0.12),
-                  margin: const EdgeInsets.symmetric(horizontal: 24),
-                ),
-                // RIGHT: LLM responses
-                Expanded(
-                  child: _LlmColumn(state: state, isUltraWide: isUltraWide),
-                ),
-              ],
-            ),
+            padding: const EdgeInsets.fromLTRB(48, 12, 48, 12),
+            child: _ConversationThread(state: state),
           ),
 
-          // ── Corner label ─────────────────────────────────────────────
+          // ── AUDIO CLI badge (top-right) ───────────────────────────────
           Positioned(
-            top: isUltraWide ? 8 : 12,
-            right: isUltraWide ? 16 : 20,
+            top: 10,
+            right: 20,
             child: Row(
               children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF4CC9F0),
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Text(
+                const _PulsingDot(color: Color(0xFF4CC9F0)),
+                const SizedBox(width: 8),
+                const Text(
                   'AUDIO CLI',
                   style: TextStyle(
-                    color: const Color(0xFF4CC9F0),
-                    fontSize: isUltraWide ? 11 : 13,
+                    color: Color(0xFF4CC9F0),
+                    fontSize: 13,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
+                    letterSpacing: 1.6,
                   ),
                 ),
               ],
@@ -339,179 +308,280 @@ class _OverlayContent extends ConsumerWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// LEFT column — user speech
+// Conversation thread — iMessage-style, newest at right edge of screen
 // ═══════════════════════════════════════════════════════════════════════════
 
-class _UserColumn extends StatelessWidget {
+class _ConversationThread extends StatelessWidget {
   final AudioCliState state;
-  final bool isUltraWide;
-
-  const _UserColumn({required this.state, required this.isUltraWide});
+  const _ConversationThread({required this.state});
 
   @override
   Widget build(BuildContext context) {
-        // Large, readable sizes for the 1920×480 bar display
-        final baseSize = isUltraWide ? 22.0 : 24.0;
-        final completedTurns =
-        state.turns.where((t) => t.userText.isNotEmpty).toList();
+    // Show only the most recent turn prominently; fade out older ones.
+    final turns = state.turns;
+    final hasTurns = turns.isNotEmpty;
+    final latestTurn = hasTurns ? turns.last : null;
+    final olderTurns = hasTurns && turns.length > 1
+        ? turns.sublist(0, turns.length - 1)
+        : <AudioCliTurn>[];
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        _ColumnHeader(
-          icon: Icons.person_outline,
-          label: 'YOU',
-          color: const Color(0xFF4CC9F0),
-          isUltraWide: isUltraWide,
-        ),
-        const SizedBox(height: 10),
-        Expanded(
-          child: ListView.builder(
-            reverse: true,
-            itemCount: completedTurns.length,
-            itemBuilder: (_, i) {
-              final turn =
-                  completedTurns[completedTurns.length - 1 - i];
-              final isNewest = i == 0;
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: AnimatedOpacity(
-                  opacity: isNewest ? 1.0 : 0.45,
-                  duration: const Duration(milliseconds: 200),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('▸ ',
-                          style: TextStyle(
-                              color: const Color(0xFF4CC9F0),
-                              fontSize: baseSize)),
-                      Expanded(
-                        child: isNewest
-                            ? _TypewriterText(
-                                text: turn.userText,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: baseSize,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              )
-                            : Text(
-                                turn.userText,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: baseSize,
-                                  fontWeight: FontWeight.normal,
-                                ),
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        // Live partial transcript
-        if (state.partialTranscript.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                const _PulsingDot(color: Color(0xFF4CC9F0)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    state.partialTranscript,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.55),
-                      fontSize: baseSize - 3,
-                      fontStyle: FontStyle.italic,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
+        // ── Older turns — dimmed, stacked on the left ─────────────────
+        if (olderTurns.isNotEmpty)
+          Expanded(
+            flex: 2,
+            child: Opacity(
+              opacity: 0.3,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Show only the most recent of the older turns
+                  _OldTurnChip(turn: olderTurns.last),
+                ],
+              ),
             ),
           ),
+
+        if (olderTurns.isNotEmpty) const SizedBox(width: 24),
+
+        // ── Current / latest turn — full size ────────────────────────
+        Expanded(
+          flex: olderTurns.isNotEmpty ? 5 : 7,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Partial transcript (user currently speaking)
+              if (state.partialTranscript.isNotEmpty && latestTurn == null)
+                _PartialBubble(text: state.partialTranscript),
+
+              // Latest user bubble (left-aligned)
+              if (latestTurn != null)
+                _UserBubble(
+                  text: latestTurn.userText,
+                  animate: true,
+                ),
+
+              if (latestTurn != null) const SizedBox(height: 10),
+
+              // Latest Radio response (right-aligned) or thinking dots
+              if (state.isThinking)
+                const Align(
+                  alignment: Alignment.centerRight,
+                  child: _ThinkingBubble(),
+                )
+              else if (latestTurn != null && latestTurn.llmText.isNotEmpty)
+                _RadioBubble(
+                  text: latestTurn.llmText,
+                  animate: latestTurn.isComplete,
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }
-}// ═══════════════════════════════════════════════════════════════════════════
-// RIGHT column — LLM responses
-// ═══════════════════════════════════════════════════════════════════════════
+}
 
-class _LlmColumn extends StatelessWidget {
-  final AudioCliState state;
-  final bool isUltraWide;
-
-  const _LlmColumn({required this.state, required this.isUltraWide});
+// ── User speech bubble — LEFT aligned, blue ──────────────────────────────
+class _UserBubble extends StatelessWidget {
+  final String text;
+  final bool animate;
+  const _UserBubble({required this.text, this.animate = false});
 
   @override
   Widget build(BuildContext context) {
-    final baseSize = isUltraWide ? 22.0 : 24.0;
-    final completedTurns =
-        state.turns.where((t) => t.isComplete && t.llmText.isNotEmpty).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _ColumnHeader(
-          icon: Icons.radio,
-          label: 'RADIO',
-          color: const Color(0xFF2EE59D),
-          isUltraWide: isUltraWide,
+    const color = Color(0xFF4CC9F0);
+    const bubbleColor = Color(0xFF1A3A4A);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 900),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        decoration: BoxDecoration(
+          color: bubbleColor,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(4),
+            topRight: Radius.circular(20),
+            bottomLeft: Radius.circular(20),
+            bottomRight: Radius.circular(20),
+          ),
+          border: Border.all(color: color.withValues(alpha: 0.35), width: 1),
         ),
-        const SizedBox(height: 10),
-        Expanded(
-          child: ListView.builder(
-            reverse: true,
-            itemCount: completedTurns.length,
-            itemBuilder: (_, i) {
-              final turn =
-                  completedTurns[completedTurns.length - 1 - i];
-              final isNewest = i == 0;
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: AnimatedOpacity(
-                  opacity: isNewest ? 1.0 : 0.45,
-                  duration: const Duration(milliseconds: 200),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('▸ ',
-                          style: TextStyle(
-                              color: const Color(0xFF2EE59D),
-                              fontSize: baseSize)),
-                      Expanded(
-                        child: isNewest
-                            ? _TypewriterText(
-                                text: turn.llmText,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: baseSize,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                                // LLM responses are longer — slightly faster cadence
-                                charDelayMs: 18,
-                              )
-                            : Text(
-                                turn.llmText,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: baseSize,
-                                  fontWeight: FontWeight.normal,
-                                ),
-                              ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.person_outline, color: color, size: 22),
+            const SizedBox(width: 10),
+            Flexible(
+              child: animate
+                  ? _TypewriterText(
+                      text: text,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w600,
+                        height: 1.25,
                       ),
-                    ],
-                  ),
-                ),
-              );
-            },
+                      charDelayMs: 22,
+                    )
+                  : Text(
+                      text,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w600,
+                        height: 1.25,
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Radio response bubble — RIGHT aligned, green ─────────────────────────
+class _RadioBubble extends StatelessWidget {
+  final String text;
+  final bool animate;
+  const _RadioBubble({required this.text, this.animate = false});
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF2EE59D);
+    const bubbleColor = Color(0xFF0D2E22);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 900),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        decoration: BoxDecoration(
+          color: bubbleColor,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(20),
+            topRight: Radius.circular(4),
+            bottomLeft: Radius.circular(20),
+            bottomRight: Radius.circular(20),
+          ),
+          border: Border.all(color: color.withValues(alpha: 0.35), width: 1),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Flexible(
+              child: animate
+                  ? _TypewriterText(
+                      text: text,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 30,
+                        fontWeight: FontWeight.w400,
+                        height: 1.25,
+                      ),
+                      charDelayMs: 14,
+                    )
+                  : Text(
+                      text,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 30,
+                        fontWeight: FontWeight.w400,
+                        height: 1.25,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: 10),
+            const Icon(Icons.radio, color: color, size: 22),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Partial transcript (live dictation, before STT finalises) ─────────────
+class _PartialBubble extends StatelessWidget {
+  final String text;
+  const _PartialBubble({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 900),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: const Color(0xFF4CC9F0).withValues(alpha: 0.2),
           ),
         ),
-        if (state.isThinking) const _ThinkingBubble(),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const _PulsingDot(color: Color(0xFF4CC9F0)),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(
+                text,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.5),
+                  fontSize: 28,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Older turn chip — compact, dimmed history ─────────────────────────────
+class _OldTurnChip extends StatelessWidget {
+  final AudioCliTurn turn;
+  const _OldTurnChip({required this.turn});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (turn.userText.isNotEmpty)
+          Text(
+            turn.userText,
+            style: const TextStyle(
+              color: Color(0xFF4CC9F0),
+              fontSize: 18,
+              fontWeight: FontWeight.w500,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        if (turn.llmText.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              turn.llmText,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.7),
+                fontSize: 16,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
       ],
     );
   }
@@ -610,39 +680,6 @@ class _TypewriterTextState extends State<_TypewriterText> {
 // Sub-widgets
 // ═══════════════════════════════════════════════════════════════════════════
 
-class _ColumnHeader extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-  final bool isUltraWide;
-
-  const _ColumnHeader({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.isUltraWide,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, color: color, size: isUltraWide ? 20 : 22),
-        const SizedBox(width: 8),
-        Text(
-          label,
-          style: TextStyle(
-            color: color,
-            fontSize: isUltraWide ? 14 : 15,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.4,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 /// Animated three-dot thinking indicator
 class _ThinkingBubble extends StatefulWidget {
   const _ThinkingBubble();
@@ -672,59 +709,62 @@ class _ThinkingBubbleState extends State<_ThinkingBubble>
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D2E22),
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(20),
+          topRight: Radius.circular(4),
+          bottomLeft: Radius.circular(20),
+          bottomRight: Radius.circular(20),
+        ),
+        border: Border.all(
+          color: const Color(0xFF2EE59D).withValues(alpha: 0.35),
+        ),
+      ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: const Color(0xFF2EE59D).withValues(alpha: 0.4),
-              ),
-            ),
-            child: AnimatedBuilder(
-              animation: _controller,
-              builder: (_, __) {
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: List.generate(3, (i) {
-                    // Each dot peaks at a different phase
-                    final phase = (i / 3.0);
-                    final t = (_controller.value + phase) % 1.0;
-                    final scale = 0.5 + 0.5 * _bounceAt(t);
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 3),
-                      child: Transform.scale(
-                        scale: scale,
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF2EE59D)
-                                .withValues(alpha: 0.4 + 0.6 * scale),
-                            shape: BoxShape.circle,
-                          ),
+          AnimatedBuilder(
+            animation: _controller,
+            builder: (_, __) {
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List.generate(3, (i) {
+                  final phase = (i / 3.0);
+                  final t = (_controller.value + phase) % 1.0;
+                  final scale = 0.5 + 0.5 * _bounceAt(t);
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
+                    child: Transform.scale(
+                      scale: scale,
+                      child: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2EE59D)
+                              .withValues(alpha: 0.4 + 0.6 * scale),
+                          shape: BoxShape.circle,
                         ),
                       ),
-                    );
-                  }),
-                );
-              },
-            ),
+                    ),
+                  );
+                }),
+              );
+            },
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 14),
           Text(
             'thinking…',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.5),
-              fontSize: 20,
+              fontSize: 26,
               fontStyle: FontStyle.italic,
             ),
           ),
+          const SizedBox(width: 10),
+          const Icon(Icons.radio, color: Color(0xFF2EE59D), size: 22),
         ],
       ),
     );

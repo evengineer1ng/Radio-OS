@@ -128,6 +128,30 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
     ref.read(activeStationProvider.notifier).state = widget.stations[index];
   }
 
+  Future<void> _launchAndOpen() async {
+    if (_launching) return;
+    setState(() => _launching = true);
+    final api = ref.read(shellApiProvider);
+    final toasts = ref.read(toastsProvider.notifier);
+    final stations = ref.read(stationsProvider.notifier);
+    final id = _focused.id;
+    final name = _focused.name;
+    try {
+      final result = await api.launchStation(id);
+      if (!mounted) return;
+      final ok = result['status'] == 'launched' ||
+          result['status'] == 'already_running';
+      if (ok) {
+        stations.refresh();
+        context.go('/station/$id');
+      } else {
+        toasts.show('Launch failed', type: 'error');
+      }
+    } finally {
+      if (mounted) setState(() => _launching = false);
+    }
+  }
+
   Future<void> _launch() async {
     if (_launching) return;
     setState(() => _launching = true);
@@ -193,13 +217,15 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
             final isFocused = index == _focusedIndex;
             return GestureDetector(
               onTap: () => isFocused
-                  ? null // already focused — launch handled by button
+                  ? null // already focused — hold the card to launch
                   : _goTo(index),
               child: _CarouselCard(
                 station: station,
                 isFocused: isFocused,
                 accent: accent,
                 totalHeight: size.height,
+                launching: _launching,
+                onHoldLaunch: isFocused ? _launchAndOpen : null,
               ),
             );
           },
@@ -213,8 +239,6 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
           child: _ActionStrip(
             station: _focused,
             isRunning: isRunning,
-            launching: _launching,
-            onLaunch: _launch,
             onStop: _stop,
             onOpen: () => context.go('/station/${_focused.id}'),
             accent: accent,
@@ -281,27 +305,84 @@ class _CinematicCarouselState extends ConsumerState<_CinematicCarousel>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Individual carousel card
+// Individual carousel card — hold to launch when focused & stopped
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _CarouselCard extends StatelessWidget {
+class _CarouselCard extends StatefulWidget {
   final Station station;
   final bool isFocused;
   final Color accent;
   final double totalHeight;
+  final bool launching;
+  final VoidCallback? onHoldLaunch;
 
   const _CarouselCard({
     required this.station,
     required this.isFocused,
     required this.accent,
     required this.totalHeight,
+    this.launching = false,
+    this.onHoldLaunch,
   });
+
+  @override
+  State<_CarouselCard> createState() => _CarouselCardState();
+}
+
+class _CarouselCardState extends State<_CarouselCard>
+    with SingleTickerProviderStateMixin {
+  bool _pressing = false;
+  Timer? _holdTimer;
+  late AnimationController _fillCtrl;
+  late Animation<double> _fillAnim;
+
+  static const _holdMs = 700;
+
+  @override
+  void initState() {
+    super.initState();
+    _fillCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: _holdMs),
+    );
+    _fillAnim = CurvedAnimation(parent: _fillCtrl, curve: Curves.easeOut);
+  }
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    _fillCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onPressDown() {
+    if (!widget.isFocused) return;
+    if (widget.station.status == StationStatus.running) return;
+    if (widget.onHoldLaunch == null) return;
+    setState(() => _pressing = true);
+    _fillCtrl.forward(from: 0);
+    _holdTimer = Timer(const Duration(milliseconds: _holdMs), () {
+      widget.onHoldLaunch?.call();
+      setState(() => _pressing = false);
+      _fillCtrl.reset();
+    });
+  }
+
+  void _onPressUp() {
+    _holdTimer?.cancel();
+    _fillCtrl.reverse();
+    setState(() => _pressing = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final station = widget.station;
+    final isFocused = widget.isFocused;
+    final accent = widget.accent;
     final isRunning = station.status == StationStatus.running;
     final isError = station.status == StationStatus.error;
+    final canHold = isFocused && !isRunning && widget.onHoldLaunch != null;
     final glowColor = isRunning
         ? const Color(0xFF34d399)
         : isError
@@ -312,7 +393,7 @@ class _CarouselCard extends StatelessWidget {
         'http://${ApiConstants.defaultHost}:${ApiConstants.shellPort}'
         '/api/stations/${station.id}/logo';
 
-    return AnimatedScale(
+    Widget card = AnimatedScale(
       scale: isFocused ? 1.0 : 0.88,
       duration: const Duration(milliseconds: 320),
       curve: Curves.easeOutCubic,
@@ -431,12 +512,77 @@ class _CarouselCard extends StatelessWidget {
                       ],
                     ),
                   ),
+
+                  // ── Hold-to-launch progress overlay ──────────────────
+                  if (canHold && _pressing)
+                    Positioned.fill(
+                      child: AnimatedBuilder(
+                        animation: _fillAnim,
+                        builder: (_, __) => Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.bottomCenter,
+                              end: Alignment.topCenter,
+                              colors: [
+                                accent.withValues(alpha: 0.55 * _fillAnim.value),
+                                accent.withValues(alpha: 0.0),
+                              ],
+                              stops: [_fillAnim.value, 1.0],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                  // ── Hold-to-launch hint (bottom of card) ─────────────
+                  if (canHold && !widget.launching)
+                    Positioned(
+                      bottom: 14,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: AnimatedOpacity(
+                          opacity: _pressing ? 1.0 : 0.5,
+                          duration: const Duration(milliseconds: 150),
+                          child: Text(
+                            _pressing ? 'LAUNCHING…' : 'HOLD TO LAUNCH',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 2.5,
+                              color: accent,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                  // ── Launching spinner overlay ─────────────────────────
+                  if (widget.launching && isFocused)
+                    Positioned.fill(
+                      child: Container(
+                        color: Colors.black.withValues(alpha: 0.4),
+                        child: Center(
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2.5, color: accent),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+
+    if (!canHold) return card;
+
+    return GestureDetector(
+      onTapDown: (_) => _onPressDown(),
+      onTapUp: (_) => _onPressUp(),
+      onTapCancel: _onPressUp,
+      child: card,
     );
   }
 }
@@ -576,14 +722,12 @@ class _PulsingDotState extends State<_PulsingDot>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bottom action strip — the physical launch bar
+// Bottom action strip — open / stop / settings only (launch moved to card)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _ActionStrip extends StatefulWidget {
+class _ActionStrip extends StatelessWidget {
   final Station station;
   final bool isRunning;
-  final bool launching;
-  final VoidCallback onLaunch;
   final VoidCallback onStop;
   final VoidCallback onOpen;
   final Color accent;
@@ -592,8 +736,6 @@ class _ActionStrip extends StatefulWidget {
   const _ActionStrip({
     required this.station,
     required this.isRunning,
-    required this.launching,
-    required this.onLaunch,
     required this.onStop,
     required this.onOpen,
     required this.accent,
@@ -601,35 +743,10 @@ class _ActionStrip extends StatefulWidget {
   });
 
   @override
-  State<_ActionStrip> createState() => _ActionStripState();
-}
-
-class _ActionStripState extends State<_ActionStrip> {
-  bool _pressing = false;
-  Timer? _holdTimer;
-
-  void _onPressDown() {
-    if (widget.isRunning) return;
-    setState(() => _pressing = true);
-    _holdTimer = Timer(const Duration(milliseconds: 600), widget.onLaunch);
-  }
-
-  void _onPressUp() {
-    _holdTimer?.cancel();
-    setState(() => _pressing = false);
-  }
-
-  @override
-  void dispose() {
-    _holdTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final theme = widget.theme;
-    final accent = widget.accent;
-    final isRunning = widget.isRunning;
+    final theme = this.theme;
+    final accent = this.accent;
+    final isRunning = this.isRunning;
 
     return Container(
       height: 68,
@@ -640,75 +757,12 @@ class _ActionStripState extends State<_ActionStrip> {
       ),
       child: Row(
         children: [
-          // ── Launch / hold-to-launch ──────────────────────────────────────
-          if (!isRunning)
-            Expanded(
-              flex: 5,
-              child: GestureDetector(
-                onTapDown: (_) => _onPressDown(),
-                onTapUp: (_) => _onPressUp(),
-                onTapCancel: _onPressUp,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 120),
-                  margin: const EdgeInsets.fromLTRB(16, 10, 8, 10),
-                  decoration: BoxDecoration(
-                    color: _pressing
-                        ? accent
-                        : accent.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: accent.withValues(alpha: _pressing ? 1.0 : 0.4),
-                      width: 1.5,
-                    ),
-                    boxShadow: _pressing
-                        ? [
-                            BoxShadow(
-                                color: accent.withValues(alpha: 0.4),
-                                blurRadius: 16)
-                          ]
-                        : null,
-                  ),
-                  child: Center(
-                    child: widget.launching
-                        ? SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: accent),
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.play_arrow,
-                                  size: 22,
-                                  color: _pressing
-                                      ? theme.scaffoldBackgroundColor
-                                      : accent),
-                              const SizedBox(width: 8),
-                              Text(
-                                _pressing ? 'LAUNCHING…' : 'HOLD TO LAUNCH',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 2,
-                                  color: _pressing
-                                      ? theme.scaffoldBackgroundColor
-                                      : accent,
-                                ),
-                              ),
-                            ],
-                          ),
-                  ),
-                ),
-              ),
-            ),
-
           // ── Open dashboard (running) ──────────────────────────────────────
           if (isRunning)
             Expanded(
               flex: 5,
               child: GestureDetector(
-                onTap: widget.onOpen,
+                onTap: onOpen,
                 child: Container(
                   margin: const EdgeInsets.fromLTRB(16, 10, 8, 10),
                   decoration: BoxDecoration(
@@ -741,12 +795,15 @@ class _ActionStripState extends State<_ActionStrip> {
               ),
             ),
 
+          // ── Spacer when not running ───────────────────────────────────────
+          if (!isRunning) const Spacer(flex: 5),
+
           // ── Stop (running) ───────────────────────────────────────────────
           if (isRunning)
             Padding(
               padding: const EdgeInsets.fromLTRB(0, 10, 8, 10),
               child: GestureDetector(
-                onTap: widget.onStop,
+                onTap: onStop,
                 child: Container(
                   width: 52,
                   decoration: BoxDecoration(

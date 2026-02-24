@@ -93,7 +93,28 @@ def _load_audio_cli_config() -> dict:
     except Exception:
         return {}
 
+# ---------------------------------------------------------------------------
+# System environment loader — ensures /etc/environment vars are visible even
+# when the process was started by a systemd service that doesn't inherit them.
+# ---------------------------------------------------------------------------
+def _load_system_env() -> None:
+    """Parse /etc/environment and inject any missing vars into os.environ."""
+    try:
+        with open("/etc/environment", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception:
+        pass
+
 _ACLI_CFG = _load_audio_cli_config()
+_load_system_env()  # Ensure /etc/environment vars (e.g. OPENAI_API_KEY) are visible early
 
 # ---------------------------------------------------------------------------
 # Constants (overridable via Settings → Audio CLI)
@@ -104,7 +125,7 @@ SAMPLE_RATE = 16000               # 16 kHz mono for STT
 CHANNELS = 1
 WAKE_LISTEN_CHUNK_SEC = 2.0       # Seconds per wake-detection chunk
 COMMAND_LISTEN_MAX_SEC = 10.0     # Max seconds to capture a single command
-SILENCE_THRESHOLD = 0.025         # RMS below this = silence
+SILENCE_THRESHOLD = 0.018         # RMS below this = silence (lowered for better sensitivity)
 SILENCE_DURATION_SEC = float(_ACLI_CFG.get("silence_duration_sec", 2.2))  # Seconds of silence to end capture
 MIN_UTTERANCE_SEC = float(_ACLI_CFG.get("min_utterance_sec", 0.6))        # Minimum speech length before silence can end capture
 MIC_RING_BUFFER_SEC = 15.0        # Ring buffer length (must exceed COMMAND_LISTEN_MAX_SEC + margin)
@@ -3003,7 +3024,7 @@ class STTEngine:
         # ── faster-whisper (priority 0 — pure Python, works on ARM64/Pi 5) ──
         self._fw_model: Optional[Any] = None
         self._fw_model_size: str = acli_cfg.get("faster_whisper_model", "").strip() \
-            or os.environ.get("FASTER_WHISPER_MODEL", "tiny")
+            or os.environ.get("FASTER_WHISPER_MODEL", "base")
         self._fw_model_dir: str = acli_cfg.get("faster_whisper_model_dir", "").strip() \
             or os.environ.get("FASTER_WHISPER_MODEL_DIR", "")
         try:
@@ -4011,6 +4032,10 @@ class CommandParser:
             return
 
         try:
+            # Ensure env vars from /etc/environment are loaded — the systemd
+            # service may not inherit them even with EnvironmentFile.
+            _load_system_env()
+
             from model_provider import get_llm_provider, _resolve_default_model
 
             # Load config
@@ -6740,6 +6765,56 @@ class AudioCLISession:
                     return (mac, name)
             return None
 
+        def _route_audio_to_bluetooth(mac: str, device_name: str) -> None:
+            """
+            After a successful bluetooth connect, set the device as the
+            default PulseAudio/PipeWire sink and move all existing streams
+            to it.  Works on both PulseAudio and PipeWire-pulse stacks.
+            The MAC address is normalised to underscores for pactl sink names.
+            """
+            import time as _time
+            # Give bluez a moment to register the sink with pulseaudio
+            _time.sleep(2)
+            mac_under = mac.replace(":", "_")
+            try:
+                # List sinks and find one whose name contains the MAC
+                result = _sp.run(
+                    ["pactl", "list", "short", "sinks"],
+                    capture_output=True, text=True, timeout=8,
+                )
+                sink_name = None
+                for line in result.stdout.splitlines():
+                    if mac_under.lower() in line.lower() or "bluez" in line.lower():
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            sink_name = parts[1]
+                            break
+
+                if not sink_name:
+                    _log(f"Bluetooth audio routing: no sink found for {mac} yet, trying bluez pattern")
+                    # Fallback: just use the bluez sink pattern directly
+                    sink_name = f"bluez_sink.{mac_under}.a2dp_sink"
+
+                _log(f"Bluetooth audio routing: setting default sink to {sink_name}")
+                _sp.run(["pactl", "set-default-sink", sink_name],
+                        capture_output=True, timeout=5)
+
+                # Move all currently playing sink-inputs to the new sink
+                inputs = _sp.run(
+                    ["pactl", "list", "short", "sink-inputs"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in inputs.stdout.splitlines():
+                    parts = line.split()
+                    if parts:
+                        _sp.run(
+                            ["pactl", "move-sink-input", parts[0], sink_name],
+                            capture_output=True, timeout=5,
+                        )
+                _log(f"Bluetooth audio routing: done → {sink_name}")
+            except Exception as exc:
+                _log(f"Bluetooth audio routing failed (non-fatal): {exc}")
+
         # ── scan ─────────────────────────────────────────────────────────
         if _re.search(
             r"\bscan\b(?:\s+(?:for|bluetooth|devices|nearby|new))*"
@@ -6795,7 +6870,9 @@ class AudioCLISession:
             _log(f"Bluetooth: connecting {name} ({mac})")
             out = _run_bt("connect", mac, timeout=20)
             if "successful" in out.lower() or "connected" in out.lower():
-                return f"Connected to {name}."
+                # Route PulseAudio/PipeWire output to the new bluetooth sink
+                _route_audio_to_bluetooth(mac, name)
+                return f"Connected to {name}. Audio is now routed to {name}."
             else:
                 return f"Couldn't connect to {name}. Make sure it's powered on and in range."
 

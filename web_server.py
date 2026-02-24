@@ -1569,9 +1569,51 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
     # ──── Audio output (PulseAudio/PipeWire) ────
 
     def _run_pactl(*args: str, timeout: int = 8) -> str:
-        import subprocess
+        """Run pactl as the desktop user, even when web_server runs as root.
+
+        PulseAudio/PipeWire-pulse sockets live in /run/user/<uid>/pulse/.
+        When the service runs as root we need to inject the correct
+        XDG_RUNTIME_DIR (and matching PULSE_RUNTIME_PATH) so pactl can
+        find the socket.  We probe the UID of the first logged-in non-root
+        user via `loginctl` and fall back to the 'airfryer' account.
+        """
+        import subprocess, os, pwd
+
+        # Resolve the audio user UID
         try:
-            r = subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=timeout)
+            lc = subprocess.run(
+                ["loginctl", "list-sessions", "--no-legend"],
+                capture_output=True, text=True, timeout=5,
+            )
+            uid: int | None = None
+            for line in lc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        candidate = int(parts[1])
+                        if candidate != 0:
+                            uid = candidate
+                            break
+                    except ValueError:
+                        pass
+            if uid is None:
+                uid = pwd.getpwnam("airfryer").pw_uid
+        except Exception:
+            try:
+                uid = pwd.getpwnam("airfryer").pw_uid
+            except Exception:
+                uid = 1000
+
+        env = os.environ.copy()
+        runtime_dir = f"/run/user/{uid}"
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        env["PULSE_RUNTIME_PATH"] = f"{runtime_dir}/pulse"
+
+        try:
+            r = subprocess.run(
+                ["pactl", *args],
+                capture_output=True, text=True, timeout=timeout, env=env,
+            )
             return (r.stdout + r.stderr).strip()
         except Exception as exc:
             return str(exc)

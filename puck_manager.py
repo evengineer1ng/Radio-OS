@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import math
 import os
 import struct
 import time
@@ -262,7 +263,7 @@ class PuckManager:
             eff_vol = (p.volume / 100.0) * (self._group_volume / 100.0)
             out = _scale_pcm16(pcm, eff_vol) if eff_vol < 0.99 else pcm
             try:
-                p.send_q.put_nowait(out)
+                p.send_q.put_nowait((out, False))   # (pcm16_bytes, already_i2s32)
             except asyncio.QueueFull:
                 pass  # drop if puck is too slow
 
@@ -273,21 +274,37 @@ class PuckManager:
             eff_vol = (p.volume / 100.0) * (self._group_volume / 100.0)
             out = _scale_pcm16(pcm_bytes, eff_vol) if eff_vol < 0.99 else pcm_bytes
             try:
-                p.send_q.put_nowait(out)
+                p.send_q.put_nowait((out, False))   # (pcm16_bytes, already_i2s32)
             except asyncio.QueueFull:
                 pass
 
-    async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 500):
-        """Send a sine-wave test tone to a specific puck."""
-        import math
+    async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 1000):
+        """Send a sine-wave test tone to a specific puck in 20ms I2S32 chunks."""
+        p = self._pucks.get(node_id)
+        if not p or not p.connected:
+            return
         sample_rate = 16000
-        n = int(sample_rate * duration_ms / 1000)
-        samples = [
-            int(32767 * 0.5 * math.sin(2 * math.pi * freq_hz * i / sample_rate))
-            for i in range(n)
-        ]
-        pcm = struct.pack(f"<{n}h", *samples)
-        await self.send_to_puck(node_id, pcm)
+        chunk_samples = 320          # 20ms @ 16kHz — matches AUDIO_CHUNK_MS on firmware
+        n_total = int(sample_rate * duration_ms / 1000)
+        # Build all chunks as pre-converted I2S32 (left-shifted 16-bit → 32-bit)
+        for chunk_start in range(0, n_total, chunk_samples):
+            chunk_end = min(chunk_start + chunk_samples, n_total)
+            samples = [
+                int(32767 * 0.5 * math.sin(2 * math.pi * freq_hz * i / sample_rate))
+                for i in range(chunk_start, chunk_end)
+            ]
+            # Pad last chunk to full size so firmware DMA write is uniform
+            while len(samples) < chunk_samples:
+                samples.append(0)
+            # Convert directly to I2S32 (skip the PCM16 → I2S32 step in _puck_sender)
+            i2s_frame = struct.pack(f"<{chunk_samples}i", *(s << 16 for s in samples))
+            try:
+                p.send_q.put_nowait((i2s_frame, True))   # already I2S32
+            except asyncio.QueueFull:
+                pass
+            # Yield every 8 chunks (~160ms) so the event loop can breathe
+            if (chunk_start // chunk_samples) % 8 == 7:
+                await asyncio.sleep(0)
 
 
 # ── Helper: FastAPI WebSocket handler ────────────────────────────────────────
@@ -439,8 +456,10 @@ async def _puck_sender(ws: Any, puck: PuckState):
     try:
         while puck.connected:
             try:
-                pcm = await asyncio.wait_for(puck.send_q.get(), timeout=5.0)
-                await ws.send_bytes(_pcm16_to_i2s32(pcm))
+                item = await asyncio.wait_for(puck.send_q.get(), timeout=5.0)
+                pcm, already_i2s32 = item
+                frame = pcm if already_i2s32 else _pcm16_to_i2s32(pcm)
+                await ws.send_bytes(frame)
             except asyncio.TimeoutError:
                 continue
             except Exception as e:

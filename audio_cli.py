@@ -104,7 +104,7 @@ SAMPLE_RATE = 16000               # 16 kHz mono for STT
 CHANNELS = 1
 WAKE_LISTEN_CHUNK_SEC = 2.0       # Seconds per wake-detection chunk
 COMMAND_LISTEN_MAX_SEC = 10.0     # Max seconds to capture a single command
-SILENCE_THRESHOLD = 0.008         # RMS below this = silence
+SILENCE_THRESHOLD = 0.025         # RMS below this = silence
 SILENCE_DURATION_SEC = float(_ACLI_CFG.get("silence_duration_sec", 2.2))  # Seconds of silence to end capture
 MIN_UTTERANCE_SEC = float(_ACLI_CFG.get("min_utterance_sec", 0.6))        # Minimum speech length before silence can end capture
 MIC_RING_BUFFER_SEC = 15.0        # Ring buffer length (must exceed COMMAND_LISTEN_MAX_SEC + margin)
@@ -3294,8 +3294,10 @@ class STTEngine:
                     mono, language="en", vad_filter=True,
                 )
                 text = " ".join(s.text.strip() for s in segs).strip()
-                if text:
-                    return text
+                # faster-whisper ran successfully — trust its VAD result.
+                # Return immediately (even empty) so we don't fall through
+                # to network-based engines for ambient noise.
+                return text
             except Exception as _e:
                 _log(f"STT: faster-whisper transcribe error: {_e}")
 

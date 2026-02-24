@@ -6669,14 +6669,16 @@ class AudioCLISession:
         command, or None if it did not match (caller should pass to LLM).
 
         Supported phrases (case-insensitive, punctuation-tolerant):
-          • "connect [to] [my] <name>"  — connect a paired device by name
-          • "disconnect [bluetooth | <name>]" — disconnect current or named
-          • "pair [with] <name>"        — start pairing a nearby device
-          • "list bluetooth [devices]"  — read out known paired devices
-          • "bluetooth devices"         — same
+          • "scan [for] [bluetooth] [devices]" — 10s scan, read new devices found
+          • "list bluetooth [devices]"          — read out all known devices
+          • "bluetooth devices"                 — same
+          • "connect [to] [my] <name>"          — connect a paired device by name
+          • "disconnect [bluetooth | <name>]"   — disconnect current or named
+          • "pair [with] <name>"                — pair a nearby device by name
         """
         import re as _re
         import subprocess as _sp
+        import threading as _th
 
         t = _re.sub(r"[^\w\s]", "", transcript.lower()).strip()
 
@@ -6691,7 +6693,7 @@ class AudioCLISession:
                 return str(exc)
 
         def _known_devices() -> list:
-            """Return list of (mac, name) tuples from bluetoothctl devices."""
+            """Return list of (mac, name) tuples from 'bluetoothctl devices'."""
             raw = _run_bt("devices", timeout=5)
             devices = []
             for line in raw.splitlines():
@@ -6700,29 +6702,83 @@ class AudioCLISession:
                     devices.append((parts[1], parts[2]))
             return devices
 
+        def _scan_devices(duration: int = 10) -> list:
+            """
+            Enable discovery for `duration` seconds then return all newly
+            visible devices (all devices seen after scan, minus those known
+            before).  Runs bluetoothctl scan on/off via a timed subprocess.
+            """
+            before = {mac for mac, _ in _known_devices()}
+
+            # 'bluetoothctl --timeout N scan on' scans for N seconds then exits
+            try:
+                _sp.run(
+                    ["bluetoothctl", "--timeout", str(duration), "scan", "on"],
+                    capture_output=True, text=True,
+                    timeout=duration + 5,
+                )
+            except Exception:
+                pass
+
+            after = _known_devices()
+            # Return devices that weren't in the before-set (newly discovered)
+            new = [(mac, name) for mac, name in after if mac not in before]
+            # Also return all visible devices (for "what did you find")
+            return after, new
+
         def _find_device(query: str) -> Optional[tuple]:
             """Fuzzy-match a device name from known devices."""
             query = query.strip().lower()
             if not query:
                 return None
             devices = _known_devices()
-            # Exact match first
             for mac, name in devices:
                 if query == name.lower():
                     return (mac, name)
-            # Substring match
             for mac, name in devices:
                 if query in name.lower() or name.lower() in query:
                     return (mac, name)
             return None
 
+        # ── scan ─────────────────────────────────────────────────────────
+        if _re.search(
+            r"\bscan\b(?:\s+(?:for|bluetooth|devices|nearby|new))*"
+            r"|\bsearch\s+(?:for\s+)?(?:bluetooth|devices|nearby)\b",
+            t,
+        ):
+            scan_sec = 10
+            _log(f"Bluetooth: scanning for {scan_sec}s...")
+            self.narration.speak(f"Scanning for Bluetooth devices, please wait {scan_sec} seconds.")
+            self._session_just_spoke = True
+
+            all_devs, new_devs = _scan_devices(scan_sec)
+
+            if not all_devs:
+                return "Scan complete. No Bluetooth devices found nearby."
+            if new_devs:
+                names = ", ".join(name for _, name in new_devs)
+                return (
+                    f"Scan complete. Found {len(new_devs)} new device"
+                    f"{'s' if len(new_devs) != 1 else ''}: {names}. "
+                    "Say 'pair with' and the device name to pair."
+                )
+            else:
+                names = ", ".join(name for _, name in all_devs)
+                return f"Scan complete. No new devices found. Known devices: {names}."
+
         # ── list devices ─────────────────────────────────────────────────
-        if _re.search(r"\b(list|show)\b.*\bbluetooth\b|\bbluetooth\b.*\bdevices\b|\bpaired devices\b", t):
+        if _re.search(
+            r"\b(list|show)\b.*\bbluetooth\b"
+            r"|\bbluetooth\b.*\bdevices\b"
+            r"|\bpaired devices\b"
+            r"|\bwhat\b.*\bbluetooth\b",
+            t,
+        ):
             devices = _known_devices()
             if not devices:
-                return "No paired Bluetooth devices found."
+                return "No Bluetooth devices found. Say 'scan for bluetooth devices' to search."
             names = ", ".join(name for _, name in devices)
-            return f"Paired Bluetooth devices: {names}."
+            return f"Known Bluetooth devices: {names}."
 
         # ── connect ───────────────────────────────────────────────────────
         m = _re.search(r"\bconnect\b(?:\s+(?:to|my))?\s+(.+)", t)
@@ -6730,7 +6786,11 @@ class AudioCLISession:
             query = m.group(1).strip()
             device = _find_device(query)
             if not device:
-                return f"I couldn't find a paired device matching '{query}'. Try saying 'list bluetooth devices' first."
+                return (
+                    f"I couldn't find a paired device matching '{query}'. "
+                    "Try 'scan for bluetooth devices' to find new ones, "
+                    "or 'list bluetooth devices' to see what's already paired."
+                )
             mac, name = device
             _log(f"Bluetooth: connecting {name} ({mac})")
             out = _run_bt("connect", mac, timeout=20)
@@ -6743,7 +6803,6 @@ class AudioCLISession:
         m = _re.search(r"\bdisconnect\b(?:\s+(.+))?", t)
         if m:
             query = (m.group(1) or "").strip()
-            # If a name was given, find that device; otherwise disconnect all connected
             if query and query not in ("bluetooth", "all"):
                 device = _find_device(query)
                 if not device:
@@ -6752,7 +6811,6 @@ class AudioCLISession:
                 _run_bt("disconnect", mac, timeout=10)
                 return f"Disconnected {name}."
             else:
-                # Disconnect all currently connected devices
                 devices = _known_devices()
                 disconnected = []
                 for mac, name in devices:
@@ -6768,18 +6826,16 @@ class AudioCLISession:
         m = _re.search(r"\bpair\b(?:\s+(?:with|to|my))?\s+(.+)", t)
         if m:
             query = m.group(1).strip()
-            # First check if already known
             device = _find_device(query)
             if device:
                 mac, name = device
                 out = _run_bt("pair", mac, timeout=30)
                 if "already paired" in out.lower() or "successful" in out.lower():
                     return f"{name} is already paired. Say 'connect {name}' to connect it."
-                return f"Pairing {name}... {out[:80] if out else 'check device for confirmation'}."
-            # Not found — need to scan first
+                return f"Pairing {name}... check your device for a confirmation prompt."
             return (
-                f"I don't see a device named '{query}' in the paired list. "
-                "Put your device in pairing mode, then try again — I'll scan for it."
+                f"I don't see a device named '{query}' yet. "
+                "Say 'scan for bluetooth devices' first so I can find it."
             )
 
         # Not a bluetooth command

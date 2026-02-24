@@ -48,6 +48,7 @@ class PuckState:
     last_seen: Optional[float] = None
     ip: str = ""
     ws: Any = None                       # FastAPI WebSocket handle
+    send_q: Any = field(default_factory=lambda: asyncio.Queue(maxsize=32))
 
 
 # ─── PuckManager ─────────────────────────────────────────────────────────────
@@ -240,7 +241,7 @@ class PuckManager:
 
     async def broadcast_wav(self, wav_bytes: bytes, station_id: str = ""):
         """
-        Convert WAV bytes to 16kHz PCM16 mono, apply volume, send to pucks
+        Convert WAV bytes to 16kHz PCM16 mono, apply volume, enqueue to pucks
         whose route matches station_id (or route == "all").
         """
         try:
@@ -249,9 +250,8 @@ class PuckManager:
             print(f"[PuckManager] WAV decode failed: {e}", flush=True)
             return
 
-        tasks = []
         for p in self._pucks.values():
-            if not p.connected or p.ws is None:
+            if not p.connected:
                 continue
             if p.muted:
                 continue
@@ -259,21 +259,23 @@ class PuckManager:
                 continue
             if p.route != ROUTE_ALL and station_id and station_id not in p.route.split(","):
                 continue
-            # Apply combined volume
             eff_vol = (p.volume / 100.0) * (self._group_volume / 100.0)
             out = _scale_pcm16(pcm, eff_vol) if eff_vol < 0.99 else pcm
-            tasks.append(_send_to_puck(p, out))
-
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                p.send_q.put_nowait(out)
+            except asyncio.QueueFull:
+                pass  # drop if puck is too slow
 
     async def send_to_puck(self, node_id: int, pcm_bytes: bytes):
-        """Send raw PCM bytes directly to one puck (for testing)."""
+        """Enqueue raw PCM bytes for one puck (for testing)."""
         p = self._pucks.get(node_id)
-        if p and p.connected and p.ws and not p.muted:
+        if p and p.connected and not p.muted:
             eff_vol = (p.volume / 100.0) * (self._group_volume / 100.0)
             out = _scale_pcm16(pcm_bytes, eff_vol) if eff_vol < 0.99 else pcm_bytes
-            await _send_to_puck(p, out)
+            try:
+                p.send_q.put_nowait(out)
+            except asyncio.QueueFull:
+                pass
 
     async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 500):
         """Send a sine-wave test tone to a specific puck."""
@@ -325,6 +327,9 @@ async def handle_puck_websocket(ws: Any, puck_mgr: "PuckManager"):
                         node_id = int(text.split("node")[1])
                         await puck_mgr.on_puck_connect(ws, node_id, client_ip)
                         await ws.send_text(f"ACK:node{node_id}")
+                        asyncio.ensure_future(
+                            _puck_sender(ws, puck_mgr._pucks[node_id])
+                        )
                     except Exception as e:
                         print(f"[PuckWS] Bad HELLO: {text}  err={e}", flush=True)
                 elif text == "PING":
@@ -416,13 +421,28 @@ def _scale_pcm16(data: bytes, scale: float) -> bytes:
     return struct.pack(f"<{n}h", *scaled)
 
 
-async def _send_to_puck(p: PuckState, pcm: bytes):
+async def _puck_sender(ws: Any, puck: PuckState):
+    """Drain puck's send queue and write to WebSocket.
+    Runs as a concurrent task alongside the receive loop so there is only
+    ever one writer on the connection at a time (fixes websockets drain
+    AssertionError caused by concurrent sends from the poller task)."""
     try:
-        await p.ws.send_bytes(pcm)
-    except Exception as e:
-        print(f"[PuckManager] Send to puck {p.node_id} failed: {e}", flush=True)
-        p.connected = False
-        p.ws = None
+        while puck.connected:
+            try:
+                pcm = await asyncio.wait_for(puck.send_q.get(), timeout=5.0)
+                await ws.send_bytes(pcm)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                print(f"[PuckWS] sender node={puck.node_id} error: {e}", flush=True)
+                break
+    finally:
+        # Drain any leftover frames so the queue doesn't fill on reconnect
+        while not puck.send_q.empty():
+            try:
+                puck.send_q.get_nowait()
+            except Exception:
+                break
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

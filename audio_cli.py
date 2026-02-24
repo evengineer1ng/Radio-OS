@@ -2831,8 +2831,6 @@ class MicStream:
                 except Exception as e:
                     last_err = e
                     _log(f"MicStream: device={dev} rate={rate} failed: {e}")
-                last_err = e
-                _log(f"MicStream: device={dev} failed: {e}")
 
         _log(f"MicStream: all devices failed — mic unavailable. Last error: {last_err}")
 

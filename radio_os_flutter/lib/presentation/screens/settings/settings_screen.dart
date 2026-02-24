@@ -900,9 +900,17 @@ class _SoundSection extends ConsumerStatefulWidget {
 }
 
 class _SoundSectionState extends ConsumerState<_SoundSection> {
+  // ── Audio output state ───────────────────────────────────────
+  List<Map<String, dynamic>> _sinks = [];
+  String _defaultSink = '';
+  bool _sinksLoading = true;
+  bool _sinkSetting = false;
+  String? _sinksError;
+
+  // ── Puck state ───────────────────────────────────────────────
   List<Map<String, dynamic>> _pucks = [];
-  bool _loading = true;
-  String? _error;
+  bool _pucksLoading = true;
+  String? _pucksError;
   int _groupVolume = 80;
 
   static const _routeOptions = ['all', 'none'];
@@ -910,33 +918,74 @@ class _SoundSectionState extends ConsumerState<_SoundSection> {
   @override
   void initState() {
     super.initState();
+    _loadSinks();
     _loadPucks();
   }
 
+  Future<void> _loadSinks() async {
+    setState(() { _sinksLoading = true; _sinksError = null; });
+    try {
+      final api = ref.read(shellApiProvider);
+      final raw = await api.listAudioSinks();
+      if (!mounted) return;
+      final sinks = (raw['sinks'] as List? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      setState(() {
+        _sinks = sinks;
+        _defaultSink = raw['default'] as String? ?? '';
+        _sinksLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _sinksError = e.toString(); _sinksLoading = false; });
+    }
+  }
+
+  Future<void> _setDefaultSink(String sinkName) async {
+    setState(() => _sinkSetting = true);
+    try {
+      final api = ref.read(shellApiProvider);
+      final result = await api.setDefaultAudioSink(sinkName);
+      if (!mounted) return;
+      if (result['ok'] == true) {
+        setState(() => _defaultSink = sinkName);
+        ref.read(toastsProvider.notifier).show(
+          'Audio output set to ${_sinkLabel(sinkName)}',
+          type: 'success',
+        );
+        await _loadSinks();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ref.read(toastsProvider.notifier).show('Failed: $e', type: 'error');
+    } finally {
+      if (mounted) setState(() => _sinkSetting = false);
+    }
+  }
+
+  String _sinkLabel(String name) {
+    for (final s in _sinks) {
+      if (s['name'] == name) return s['description'] as String? ?? name;
+    }
+    return name;
+  }
+
   Future<void> _loadPucks() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    setState(() { _pucksLoading = true; _pucksError = null; });
     try {
       final api = ref.read(shellApiProvider);
       final raw = await api.getPucks();
       final pucks = raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-      // Derive group volume as mean of all puck volumes
       if (pucks.isNotEmpty) {
-        final sum =
-            pucks.fold<int>(0, (s, p) => s + ((p['volume'] as num?)?.toInt() ?? 80));
+        final sum = pucks.fold<int>(0, (s, p) => s + ((p['volume'] as num?)?.toInt() ?? 80));
         _groupVolume = (sum / pucks.length).round();
       }
-      setState(() {
-        _pucks = pucks;
-        _loading = false;
-      });
+      if (!mounted) return;
+      setState(() { _pucks = pucks; _pucksLoading = false; });
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
+      if (!mounted) return;
+      setState(() { _pucksError = e.toString(); _pucksLoading = false; });
     }
   }
 
@@ -944,78 +993,169 @@ class _SoundSectionState extends ConsumerState<_SoundSection> {
     setState(() => _groupVolume = v);
     final api = ref.read(shellApiProvider);
     await api.setGroupVolume(v);
-    // Reflect in each puck locally
-    setState(() {
-      for (final p in _pucks) {
-        p['volume'] = v;
-      }
-    });
+    setState(() { for (final p in _pucks) { p['volume'] = v; } });
   }
 
   Future<void> _setPuckVolume(int nodeId, int v) async {
-    setState(() {
-      for (final p in _pucks) {
-        if ((p['node_id'] as int?) == nodeId) p['volume'] = v;
-      }
-    });
-    final api = ref.read(shellApiProvider);
-    await api.setPuckVolume(nodeId, v);
+    setState(() { for (final p in _pucks) { if ((p['node_id'] as int?) == nodeId) p['volume'] = v; } });
+    await ref.read(shellApiProvider).setPuckVolume(nodeId, v);
   }
 
   Future<void> _toggleMute(int nodeId, bool muted) async {
-    setState(() {
-      for (final p in _pucks) {
-        if ((p['node_id'] as int?) == nodeId) p['muted'] = muted;
-      }
-    });
-    final api = ref.read(shellApiProvider);
-    await api.setPuckMute(nodeId, muted: muted);
+    setState(() { for (final p in _pucks) { if ((p['node_id'] as int?) == nodeId) p['muted'] = muted; } });
+    await ref.read(shellApiProvider).setPuckMute(nodeId, muted: muted);
   }
 
   Future<void> _muteAll(bool muted) async {
-    setState(() {
-      for (final p in _pucks) {
-        p['muted'] = muted;
-      }
-    });
-    final api = ref.read(shellApiProvider);
-    await api.muteAllPucks(muted: muted);
+    setState(() { for (final p in _pucks) { p['muted'] = muted; } });
+    await ref.read(shellApiProvider).muteAllPucks(muted: muted);
   }
 
   Future<void> _setRoute(int nodeId, String route) async {
-    setState(() {
-      for (final p in _pucks) {
-        if ((p['node_id'] as int?) == nodeId) p['route'] = route;
-      }
-    });
-    final api = ref.read(shellApiProvider);
-    await api.setPuckRoute(nodeId, route);
+    setState(() { for (final p in _pucks) { if ((p['node_id'] as int?) == nodeId) p['route'] = route; } });
+    await ref.read(shellApiProvider).setPuckRoute(nodeId, route);
   }
 
-  Future<void> _testTone(int nodeId) async {
-    final api = ref.read(shellApiProvider);
-    await api.sendPuckTestTone(nodeId);
-  }
+  Future<void> _testTone(int nodeId) async =>
+      ref.read(shellApiProvider).sendPuckTestTone(nodeId);
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final accent = theme.colorScheme.primary;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _SectionHeader('Sound', Icons.speaker, 'Manage ESP32 wireless puck audio nodes'),
+          _SectionHeader('Sound', Icons.speaker, 'Audio output device and wireless puck nodes'),
           const SizedBox(height: 20),
-          if (_loading)
+
+          // ── Audio Output ────────────────────────────────────────────────
+          _InfoCard(
+            header: Row(
+              children: [
+                Icon(Icons.speaker, size: 16, color: accent),
+                const SizedBox(width: 6),
+                Text('Audio Output Device', style: theme.textTheme.labelLarge),
+                const Spacer(),
+                if (_sinkSetting)
+                  const SizedBox(width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                else
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 16),
+                    tooltip: 'Refresh sinks',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: _loadSinks,
+                  ),
+              ],
+            ),
+            children: [
+              if (_sinksLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_sinksError != null)
+                Text('Could not load audio devices: $_sinksError',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: const Color(0xFFf87171)))
+              else if (_sinks.isEmpty)
+                Text('No audio sinks found. Is PulseAudio or PipeWire running?',
+                    style: theme.textTheme.bodySmall)
+              else
+                ..._sinks.map((sink) {
+                  final name = sink['name'] as String;
+                  final desc = sink['description'] as String? ?? name;
+                  final isDefault = sink['is_default'] as bool? ?? (name == _defaultSink);
+                  final isBt = sink['is_bluetooth'] as bool? ?? false;
+                  final state = sink['state'] as String? ?? '';
+                  return GestureDetector(
+                    onTap: isDefault || _sinkSetting ? null : () => _setDefaultSink(name),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isDefault
+                            ? accent.withValues(alpha: 0.12)
+                            : theme.cardColor,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isDefault
+                              ? accent.withValues(alpha: 0.6)
+                              : theme.dividerColor,
+                          width: isDefault ? 1.5 : 1,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isBt ? Icons.bluetooth_audio : Icons.speaker,
+                            size: 20,
+                            color: isDefault ? accent : theme.textTheme.bodySmall?.color,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(desc,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: isDefault ? FontWeight.w600 : FontWeight.normal,
+                                      color: isDefault ? accent : theme.textTheme.bodyMedium?.color,
+                                    )),
+                                if (state.isNotEmpty)
+                                  Text(state,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(fontSize: 11)),
+                              ],
+                            ),
+                          ),
+                          if (isDefault)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: accent.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: accent.withValues(alpha: 0.4)),
+                              ),
+                              child: Text('DEFAULT',
+                                  style: TextStyle(
+                                      color: accent,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 1.5)),
+                            )
+                          else
+                            Text('SET DEFAULT',
+                                style: TextStyle(
+                                    color: accent.withValues(alpha: 0.5),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 1)),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+            ],
+          ),
+          const SizedBox(height: 20),
+
+          // ── Puck audio nodes ────────────────────────────────────────────
+          if (_pucksLoading)
             const Center(child: CircularProgressIndicator())
-          else if (_error != null)
+          else if (_pucksError != null)
             _InfoCard(children: [
               Row(children: [
                 const Icon(Icons.error_outline, color: Color(0xFFf87171), size: 18),
                 const SizedBox(width: 8),
                 Expanded(
-                    child: Text('Could not load pucks: $_error',
+                    child: Text('Could not load pucks: $_pucksError',
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: const Color(0xFFf87171)))),
               ]),

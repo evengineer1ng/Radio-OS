@@ -1558,6 +1558,79 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         out = await _bluetoothctl(["power", "on" if on else "off"])
         return {"ok": True, "powered": on, "output": out}
 
+    @app.post("/api/bluetooth/power")
+    async def bt_power(request: Request):
+        """Power adapter on/off."""
+        body = await request.json()
+        on = body.get("on", True)
+        out = await _bluetoothctl(["power", "on" if on else "off"])
+        return {"ok": True, "powered": on, "output": out}
+
+    # ──── Audio output (PulseAudio/PipeWire) ────
+
+    def _run_pactl(*args: str, timeout: int = 8) -> str:
+        import subprocess
+        try:
+            r = subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=timeout)
+            return (r.stdout + r.stderr).strip()
+        except Exception as exc:
+            return str(exc)
+
+    @app.get("/api/audio/sinks")
+    async def audio_list_sinks():
+        """List all PulseAudio/PipeWire sinks with name, description, and active state."""
+        import asyncio
+        raw = await asyncio.get_event_loop().run_in_executor(None, lambda: _run_pactl("list", "short", "sinks"))
+        default_raw = await asyncio.get_event_loop().run_in_executor(None, lambda: _run_pactl("get-default-sink"))
+        default_sink = default_raw.strip()
+        sinks = []
+        for line in raw.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                sink_name = parts[1].strip()
+                state = parts[4].strip() if len(parts) > 4 else ""
+                sinks.append({
+                    "name": sink_name,
+                    "is_default": sink_name == default_sink,
+                    "state": state,
+                    "is_bluetooth": "bluez" in sink_name.lower(),
+                })
+        # Also get human-readable descriptions via pactl list sinks
+        long_raw = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _run_pactl("list", "sinks"))
+        desc_map: dict = {}
+        current: str | None = None
+        for line in long_raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Name:"):
+                current = stripped.split("Name:", 1)[1].strip()
+            elif stripped.startswith("Description:") and current:
+                desc_map[current] = stripped.split("Description:", 1)[1].strip()
+        for s in sinks:
+            s["description"] = desc_map.get(s["name"], s["name"])
+        return {"sinks": sinks, "default": default_sink}
+
+    @app.post("/api/audio/set-default-sink")
+    async def audio_set_default_sink(request: Request):
+        """Set the default PulseAudio/PipeWire sink and move all active streams."""
+        import asyncio
+        body = await request.json()
+        sink_name = (body.get("sink") or "").strip()
+        if not sink_name:
+            return {"ok": False, "error": "No sink name provided"}
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _run_pactl("set-default-sink", sink_name))
+        # Move all existing sink-inputs to the new sink
+        inputs_raw = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _run_pactl("list", "short", "sink-inputs"))
+        moved = 0
+        for line in inputs_raw.splitlines():
+            parts = line.split()
+            if parts:
+                _run_pactl("move-sink-input", parts[0], sink_name)
+                moved += 1
+        return {"ok": True, "sink": sink_name, "streams_moved": moved}
+
     # ──── Serve the web shell frontend ────
     shell_dist = os.path.join(BASE_DIR, "web_shell", "dist")
     shell_static = os.path.join(BASE_DIR, "web_shell")

@@ -100,6 +100,12 @@ class ShellApiClient {
           Map<String, dynamic> data) =>
       _http.post('/api/settings/environment', data: data);
 
+  // ── Audio output (PulseAudio/PipeWire) ──────────────────────
+  Future<Map<String, dynamic>> listAudioSinks() =>
+      _http.get('/api/audio/sinks');
+  Future<Map<String, dynamic>> setDefaultAudioSink(String sinkName) =>
+      _http.post('/api/audio/set-default-sink', data: {'sink': sinkName});
+
   // ── Plugins & Voices ────────────────────────────────────────
   Future<Map<String, dynamic>> listPlugins() => _http.get('/api/plugins');
 

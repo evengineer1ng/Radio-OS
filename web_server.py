@@ -1353,6 +1353,12 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         get_puck_manager().set_puck_route(node_id, route)
         return {"ok": True, "node_id": node_id, "route": route}
 
+    @app.post("/api/pucks/{node_id}/reboot")
+    async def api_puck_reboot(node_id: int):
+        from puck_manager import get_puck_manager
+        ok = await get_puck_manager().send_reboot(node_id)
+        return {"ok": ok, "node_id": node_id}
+
     @app.post("/api/pucks/{node_id}/test_tone")
     async def api_puck_test_tone(node_id: int):
         from puck_manager import get_puck_manager
@@ -1395,6 +1401,162 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         for puck in mgr._pucks.values():
             puck.muted = muted
         return {"ok": True, "muted": muted}
+
+    # ──── Audio CLI WebSocket + event broadcast ───────────────────────────
+
+    _audio_cli_ws_clients: Set[Any] = set()
+
+    @app.websocket("/ws/audio_cli")
+    async def ws_audio_cli(ws: WebSocket):
+        """WebSocket endpoint for Flutter Audio CLI overlay events."""
+        await ws.accept()
+        _audio_cli_ws_clients.add(ws)
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                # Ignore any inbound messages from the client
+        except Exception:
+            pass
+        finally:
+            _audio_cli_ws_clients.discard(ws)
+
+    @app.post("/internal/audio_cli_event")
+    async def internal_audio_cli_event(request: Request):
+        """Internal endpoint: audio_cli.py POSTs events here; we fan-out to Flutter."""
+        data = await request.json()
+        dead: Set[Any] = set()
+        for client in list(_audio_cli_ws_clients):
+            try:
+                await client.send_text(json.dumps(data))
+            except Exception:
+                dead.add(client)
+        _audio_cli_ws_clients.difference_update(dead)
+        return {"ok": True, "clients": len(_audio_cli_ws_clients)}
+
+    # ──── Bluetooth management ────────────────────────────────────────────
+
+    async def _bluetoothctl(args: List[str], timeout: int = 15) -> str:
+        """Run a bluetoothctl command and return combined stdout."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl", *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return stdout.decode(errors="replace").strip()
+        except asyncio.TimeoutError:
+            return ""
+        except Exception as e:
+            return f"error: {e}"
+
+    def _parse_bt_devices(raw: str) -> List[Dict[str, Any]]:
+        """Parse 'bluetoothctl devices' output into a list of dicts."""
+        devices = []
+        for line in raw.splitlines():
+            # Format: "Device AA:BB:CC:DD:EE:FF Device Name"
+            parts = line.strip().split(" ", 2)
+            if len(parts) >= 2 and parts[0] == "Device":
+                mac = parts[1]
+                name = parts[2] if len(parts) > 2 else mac
+                devices.append({"mac": mac, "name": name, "connected": False, "paired": False})
+        return devices
+
+    @app.get("/api/bluetooth/devices")
+    async def bt_devices():
+        """List known Bluetooth devices (paired + discovered)."""
+        paired_raw = await _bluetoothctl(["devices", "Paired"])
+        all_raw = await _bluetoothctl(["devices"])
+        paired_macs = {
+            line.split()[1] for line in paired_raw.splitlines()
+            if line.startswith("Device") and len(line.split()) >= 2
+        }
+        devices = _parse_bt_devices(all_raw)
+        # Mark paired status
+        for d in devices:
+            d["paired"] = d["mac"] in paired_macs
+        # Check connected status for each paired device
+        for d in devices:
+            if d["paired"]:
+                info = await _bluetoothctl(["info", d["mac"]])
+                d["connected"] = "Connected: yes" in info
+        return {"devices": devices}
+
+    @app.post("/api/bluetooth/scan")
+    async def bt_scan(request: Request):
+        """Start/stop discovery scan."""
+        body = await request.json()
+        action = "scan on" if body.get("enable", True) else "scan off"
+        # Fire scan in background — bluetoothctl scan blocks
+        asyncio.create_task(asyncio.create_subprocess_exec(
+            "bluetoothctl", *action.split(),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        ))
+        return {"ok": True, "scanning": body.get("enable", True)}
+
+    @app.post("/api/bluetooth/pair")
+    async def bt_pair(request: Request):
+        """Pair with a device by MAC address."""
+        body = await request.json()
+        mac = body.get("mac", "")
+        if not mac:
+            return JSONResponse({"ok": False, "error": "mac required"}, status_code=400)
+        out = await _bluetoothctl(["pair", mac], timeout=30)
+        success = "successful" in out.lower() or "already paired" in out.lower()
+        return {"ok": success, "output": out}
+
+    @app.post("/api/bluetooth/connect")
+    async def bt_connect(request: Request):
+        """Connect to a paired device."""
+        body = await request.json()
+        mac = body.get("mac", "")
+        if not mac:
+            return JSONResponse({"ok": False, "error": "mac required"}, status_code=400)
+        out = await _bluetoothctl(["connect", mac], timeout=20)
+        success = "successful" in out.lower() or "already connected" in out.lower()
+        return {"ok": success, "output": out}
+
+    @app.post("/api/bluetooth/disconnect")
+    async def bt_disconnect(request: Request):
+        """Disconnect from a connected device."""
+        body = await request.json()
+        mac = body.get("mac", "")
+        if not mac:
+            return JSONResponse({"ok": False, "error": "mac required"}, status_code=400)
+        out = await _bluetoothctl(["disconnect", mac], timeout=10)
+        success = "successful" in out.lower()
+        return {"ok": success, "output": out}
+
+    @app.post("/api/bluetooth/remove")
+    async def bt_remove(request: Request):
+        """Remove / forget a paired device."""
+        body = await request.json()
+        mac = body.get("mac", "")
+        if not mac:
+            return JSONResponse({"ok": False, "error": "mac required"}, status_code=400)
+        out = await _bluetoothctl(["remove", mac], timeout=10)
+        success = "removed" in out.lower() or "not available" in out.lower()
+        return {"ok": success, "output": out}
+
+    @app.get("/api/bluetooth/status")
+    async def bt_status():
+        """Return adapter power/discoverable state."""
+        out = await _bluetoothctl(["show"])
+        powered = "Powered: yes" in out
+        discovering = "Discovering: yes" in out
+        discoverable = "Discoverable: yes" in out
+        return {"powered": powered, "discovering": discovering, "discoverable": discoverable}
+
+    @app.post("/api/bluetooth/power")
+    async def bt_power(request: Request):
+        """Power adapter on/off."""
+        body = await request.json()
+        on = body.get("on", True)
+        out = await _bluetoothctl(["power", "on" if on else "off"])
+        return {"ok": True, "powered": on, "output": out}
 
     # ──── Serve the web shell frontend ────
     shell_dist = os.path.join(BASE_DIR, "web_shell", "dist")

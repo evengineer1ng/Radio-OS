@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'config/themes.dart';
 import 'presentation/router.dart';
 import 'presentation/screens/settings/settings_screen.dart';
+import 'presentation/widgets/audio_cli_overlay.dart';
 
 class RadioOsApp extends ConsumerWidget {
   const RadioOsApp({super.key});
@@ -22,6 +23,14 @@ class RadioOsApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: themeData,
       routerConfig: radioRouter,
+      builder: (context, child) {
+        return Stack(
+          children: [
+            child ?? const SizedBox.shrink(),
+            const AudioCliOverlay(),
+          ],
+        );
+      },
     );
   }
 }

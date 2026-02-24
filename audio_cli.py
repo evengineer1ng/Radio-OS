@@ -6389,6 +6389,12 @@ class AudioCLISession:
         self.on_session_end: Optional[Callable] = None
         self.on_status_change: Optional[Callable[[str], None]] = None
 
+        # Callbacks for Flutter overlay — all fire-and-forget, never raise
+        self.on_transcript_partial: Optional[Callable[[str], None]] = None
+        self.on_transcript_final: Optional[Callable[[str], None]] = None
+        self.on_llm_start: Optional[Callable] = None
+        self.on_llm_response: Optional[Callable[[str], None]] = None
+
     # -------------------------------------------------------------------
     # Audio Persona management
     # -------------------------------------------------------------------
@@ -7001,6 +7007,14 @@ class AudioCLISession:
 
         _log(f"User said: '{transcript}'")
 
+        # ── Flutter overlay: transcript finalised ──
+        if self.on_transcript_final:
+            try:
+                self.on_transcript_final(transcript)
+            except Exception:
+                pass
+        self._emit_flutter_event({"type": "transcript_final", "text": transcript})
+
         # Check for exit phrase — ESCAPE HATCH, never overridden by persona
         if EXIT_PHRASE in transcript.lower().strip():
             # Mark inactive immediately so no silence-timeout or other
@@ -7059,7 +7073,24 @@ class AudioCLISession:
                 _log(f"Persona prompt overlay error: {e}")
 
         # Send to LLM
+        # ── Flutter overlay: LLM is thinking ──
+        if self.on_llm_start:
+            try:
+                self.on_llm_start()
+            except Exception:
+                pass
+        self._emit_flutter_event({"type": "llm_thinking"})
+
         response = self.parser.parse(transcript, ui_state, persona_overlay)
+
+        # ── Flutter overlay: LLM response ready ──
+        if response.narration:
+            if self.on_llm_response:
+                try:
+                    self.on_llm_response(response.narration)
+                except Exception:
+                    pass
+            self._emit_flutter_event({"type": "llm_response", "text": response.narration})
 
         # Execute actions
         if response.actions:
@@ -7405,6 +7436,8 @@ class AudioCLISession:
             except Exception:
                 pass
 
+        self._emit_flutter_event({"type": "session_start"})
+
         # Signal station runtime to duck audio
         self._write_suppression_flag(True)
 
@@ -7473,11 +7506,39 @@ class AudioCLISession:
         # Remove ducking flag — station audio returns to full volume
         self._write_suppression_flag(False)
 
+        self._emit_flutter_event({"type": "session_end"})
+
         if self.on_session_end:
             try:
                 self.on_session_end()
             except Exception:
                 pass
+
+    # -----------------------------------------------------------------------
+    # Flutter event helpers (fire-and-forget, never raise)
+    # -----------------------------------------------------------------------
+    def _emit_flutter_event(self, event: Dict[str, Any]) -> None:
+        """POST an event to the internal audio_cli broadcast endpoint.
+
+        Runs in a daemon thread so it never blocks the voice pipeline.
+        Silently swallowed on any error — Flutter overlay is best-effort.
+        """
+        def _send():
+            try:
+                import urllib.request
+                data = json.dumps(event).encode()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:7800/internal/audio_cli_event",
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=1)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
 
     # -----------------------------------------------------------------------
     # Audio capture helpers (read from persistent MicStream)

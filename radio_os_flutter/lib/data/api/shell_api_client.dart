@@ -179,5 +179,30 @@ class ShellApiClient {
   String stationLogoUrl(String stationId) =>
       '${_http.baseUrl}/api/stations/$stationId/logo';
 
+  // ── Bluetooth ───────────────────────────────────────────────
+  Future<Map<String, dynamic>> getBluetoothDevices() =>
+      _http.get('/api/bluetooth/devices');
+
+  Future<Map<String, dynamic>> getBluetoothStatus() =>
+      _http.get('/api/bluetooth/status');
+
+  Future<Map<String, dynamic>> bluetoothPower({required bool on}) =>
+      _http.post('/api/bluetooth/power', data: {'on': on});
+
+  Future<Map<String, dynamic>> bluetoothScan({bool enable = true}) =>
+      _http.post('/api/bluetooth/scan', data: {'enable': enable});
+
+  Future<Map<String, dynamic>> bluetoothPair(String mac) =>
+      _http.post('/api/bluetooth/pair', data: {'mac': mac});
+
+  Future<Map<String, dynamic>> bluetoothConnect(String mac) =>
+      _http.post('/api/bluetooth/connect', data: {'mac': mac});
+
+  Future<Map<String, dynamic>> bluetoothDisconnect(String mac) =>
+      _http.post('/api/bluetooth/disconnect', data: {'mac': mac});
+
+  Future<Map<String, dynamic>> bluetoothRemove(String mac) =>
+      _http.post('/api/bluetooth/remove', data: {'mac': mac});
+
   void dispose() => _http.dispose();
 }

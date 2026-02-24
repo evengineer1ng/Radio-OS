@@ -65,6 +65,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _SectionDef('environment', 'Environment', Icons.computer),
       _SectionDef('sound', 'Sound', Icons.speaker),
       _SectionDef('appearance', 'Appearance', Icons.palette),
+      _SectionDef('bluetooth', 'Bluetooth', Icons.bluetooth),
     ];
 
     return Scaffold(
@@ -170,6 +171,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         return const _SoundSection();
       case 'appearance':
         return const _AppearanceSection();
+      case 'bluetooth':
+        return const _BluetoothSection();
       default:
         return Center(child: Text('Unknown section: ${widget.section}'));
     }
@@ -1331,6 +1334,490 @@ class _KVStatus extends StatelessWidget {
                     color: ok ? null : const Color(0xFF9ca3af))),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bluetooth
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _BluetoothSection extends ConsumerStatefulWidget {
+  const _BluetoothSection();
+
+  @override
+  ConsumerState<_BluetoothSection> createState() => _BluetoothSectionState();
+}
+
+class _BluetoothSectionState extends ConsumerState<_BluetoothSection> {
+  List<Map<String, dynamic>> _devices = [];
+  bool _loading = true;
+  bool _scanning = false;
+  bool _powered = false;
+  final Map<String, bool> _actionBusy = {};
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAll();
+  }
+
+  Future<void> _loadAll() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final api = ref.read(shellApiProvider);
+      final results = await Future.wait([
+        api.getBluetoothStatus(),
+        api.getBluetoothDevices(),
+      ]);
+      final status = results[0];
+      final devResult = results[1];
+      if (!mounted) return;
+      setState(() {
+        _powered = status['powered'] as bool? ?? false;
+        _scanning = status['discovering'] as bool? ?? false;
+        final raw = devResult['devices'];
+        _devices = raw is List
+            ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList()
+            : [];
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _togglePower() async {
+    final api = ref.read(shellApiProvider);
+    setState(() => _actionBusy['power'] = true);
+    try {
+      await api.bluetoothPower(on: !_powered);
+      await _loadAll();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _actionBusy.remove('power'));
+    }
+  }
+
+  Future<void> _toggleScan() async {
+    final api = ref.read(shellApiProvider);
+    final newScan = !_scanning;
+    setState(() => _scanning = newScan);
+    try {
+      await api.bluetoothScan(enable: newScan);
+      if (newScan) {
+        await Future.delayed(const Duration(seconds: 4));
+        await _loadAll();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _pair(String mac) async {
+    final api = ref.read(shellApiProvider);
+    setState(() => _actionBusy[mac] = true);
+    try {
+      await api.bluetoothPair(mac);
+      await _loadAll();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _actionBusy.remove(mac));
+    }
+  }
+
+  Future<void> _connect(String mac) async {
+    final api = ref.read(shellApiProvider);
+    setState(() => _actionBusy['${mac}_c'] = true);
+    try {
+      await api.bluetoothConnect(mac);
+      await _loadAll();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _actionBusy.remove('${mac}_c'));
+    }
+  }
+
+  Future<void> _disconnect(String mac) async {
+    final api = ref.read(shellApiProvider);
+    setState(() => _actionBusy['${mac}_d'] = true);
+    try {
+      await api.bluetoothDisconnect(mac);
+      await _loadAll();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _actionBusy.remove('${mac}_d'));
+    }
+  }
+
+  Future<void> _remove(String mac) async {
+    final api = ref.read(shellApiProvider);
+    setState(() => _actionBusy['${mac}_r'] = true);
+    try {
+      await api.bluetoothRemove(mac);
+      await _loadAll();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _actionBusy.remove('${mac}_r'));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final size = MediaQuery.of(context).size;
+    final isUltraWide = size.width > 1200 && size.height < 600;
+    final pad = isUltraWide ? 14.0 : 20.0;
+
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(pad),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header ────────────────────────────────────────────────────
+          Row(
+            children: [
+              Icon(Icons.bluetooth,
+                  color: theme.colorScheme.primary,
+                  size: isUltraWide ? 20 : 24),
+              const SizedBox(width: 10),
+              Text('Bluetooth',
+                  style: theme.textTheme.headlineSmall
+                      ?.copyWith(fontSize: isUltraWide ? 18 : 22)),
+              const Spacer(),
+              // Power toggle
+              if (_actionBusy['power'] == true)
+                const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+              else
+                Row(children: [
+                  Text(_powered ? 'On' : 'Off',
+                      style: theme.textTheme.bodySmall),
+                  const SizedBox(width: 6),
+                  Switch(
+                    value: _powered,
+                    onChanged: (_) => _togglePower(),
+                    activeColor: theme.colorScheme.primary,
+                  ),
+                ]),
+              const SizedBox(width: 8),
+              IconButton(
+                onPressed: _loadAll,
+                icon: const Icon(Icons.refresh),
+                tooltip: 'Refresh',
+                iconSize: isUltraWide ? 18 : 22,
+              ),
+            ],
+          ),
+          SizedBox(height: isUltraWide ? 8 : 12),
+
+          // ── Error banner ──────────────────────────────────────────────
+          if (_error != null) ...[
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.error.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(children: [
+                Icon(Icons.error_outline,
+                    color: theme.colorScheme.error, size: 16),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text(_error!,
+                        style: TextStyle(
+                            color: theme.colorScheme.error,
+                            fontSize: 13))),
+              ]),
+            ),
+            SizedBox(height: isUltraWide ? 8 : 12),
+          ],
+
+          // ── Scan bar ──────────────────────────────────────────────────
+          Container(
+            padding: EdgeInsets.all(isUltraWide ? 10 : 14),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: theme.dividerColor),
+            ),
+            child: Row(
+              children: [
+                if (_scanning)
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: theme.colorScheme.primary,
+                    ),
+                  )
+                else
+                  Icon(Icons.bluetooth_searching,
+                      color: theme.colorScheme.primary,
+                      size: isUltraWide ? 16 : 18),
+                const SizedBox(width: 10),
+                Text(
+                  _scanning
+                      ? 'Scanning for devices…'
+                      : 'Tap Scan to discover nearby devices',
+                  style: theme.textTheme.bodyMedium,
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: _powered ? _toggleScan : null,
+                  icon: Icon(_scanning ? Icons.stop : Icons.search,
+                      size: isUltraWide ? 15 : 17),
+                  label: Text(_scanning ? 'Stop' : 'Scan'),
+                ),
+              ],
+            ),
+          ),
+
+          SizedBox(height: isUltraWide ? 8 : 14),
+
+          // ── Device list ───────────────────────────────────────────────
+          if (_loading)
+            const Center(
+                child: Padding(
+              padding: EdgeInsets.all(24),
+              child: CircularProgressIndicator(),
+            ))
+          else if (_devices.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              child: Center(
+                child: Text(
+                  'No devices found. Enable Bluetooth and tap Scan.',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            )
+          else
+            ..._devices.map((dev) => _DeviceTile(
+                  device: dev,
+                  isUltraWide: isUltraWide,
+                  actionBusy: _actionBusy,
+                  onPair: () => _pair(dev['mac'] as String),
+                  onConnect: () => _connect(dev['mac'] as String),
+                  onDisconnect: () => _disconnect(dev['mac'] as String),
+                  onRemove: () => _remove(dev['mac'] as String),
+                )),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Device tile ──────────────────────────────────────────────────────────────
+
+class _DeviceTile extends StatelessWidget {
+  final Map<String, dynamic> device;
+  final bool isUltraWide;
+  final Map<String, bool> actionBusy;
+  final VoidCallback onPair;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+  final VoidCallback onRemove;
+
+  const _DeviceTile({
+    required this.device,
+    required this.isUltraWide,
+    required this.actionBusy,
+    required this.onPair,
+    required this.onConnect,
+    required this.onDisconnect,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final mac = device['mac'] as String? ?? '';
+    final name = device['name'] as String? ?? mac;
+    final paired = device['paired'] as bool? ?? false;
+    final connected = device['connected'] as bool? ?? false;
+
+    final isBusy = actionBusy[mac] == true ||
+        actionBusy['${mac}_c'] == true ||
+        actionBusy['${mac}_d'] == true ||
+        actionBusy['${mac}_r'] == true;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.symmetric(
+          horizontal: isUltraWide ? 12 : 16,
+          vertical: isUltraWide ? 8 : 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: connected
+              ? theme.colorScheme.primary.withValues(alpha: 0.6)
+              : theme.dividerColor,
+          width: connected ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            connected
+                ? Icons.bluetooth_connected
+                : paired
+                    ? Icons.bluetooth
+                    : Icons.bluetooth_disabled,
+            color: connected
+                ? theme.colorScheme.primary
+                : paired
+                    ? theme.textTheme.bodyMedium?.color
+                    : theme.textTheme.bodySmall?.color,
+            size: isUltraWide ? 18 : 22,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Text(name,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          fontSize: isUltraWide ? 13 : 15)),
+                  if (connected) ...[
+                    const SizedBox(width: 8),
+                    _BtBadge('CONNECTED', const Color(0xFF2EE59D)),
+                  ] else if (paired) ...[
+                    const SizedBox(width: 8),
+                    _BtBadge('PAIRED', const Color(0xFF4CC9F0)),
+                  ],
+                ]),
+                Text(mac,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                        fontFamily: 'monospace',
+                        fontSize: isUltraWide ? 10 : 12,
+                        color: theme.textTheme.bodySmall?.color)),
+              ],
+            ),
+          ),
+          if (isBusy)
+            const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2))
+          else
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!paired)
+                  _BtActionButton(
+                    label: 'Pair',
+                    icon: Icons.link,
+                    onTap: onPair,
+                    isUltraWide: isUltraWide,
+                  ),
+                if (paired && !connected)
+                  _BtActionButton(
+                    label: 'Connect',
+                    icon: Icons.bluetooth_connected,
+                    color: theme.colorScheme.primary,
+                    onTap: onConnect,
+                    isUltraWide: isUltraWide,
+                  ),
+                if (connected)
+                  _BtActionButton(
+                    label: 'Disconnect',
+                    icon: Icons.bluetooth_disabled,
+                    onTap: onDisconnect,
+                    isUltraWide: isUltraWide,
+                  ),
+                if (paired)
+                  _BtActionButton(
+                    label: 'Forget',
+                    icon: Icons.delete_outline,
+                    color: theme.colorScheme.error,
+                    onTap: onRemove,
+                    isUltraWide: isUltraWide,
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BtBadge extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _BtBadge(this.label, this.color);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+}
+
+class _BtActionButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+  final Color? color;
+  final bool isUltraWide;
+
+  const _BtActionButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.color,
+    required this.isUltraWide,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = color ?? theme.textTheme.bodyMedium?.color ?? Colors.white;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: TextButton.icon(
+        style: TextButton.styleFrom(
+          foregroundColor: c,
+          padding: EdgeInsets.symmetric(
+              horizontal: isUltraWide ? 8 : 10,
+              vertical: isUltraWide ? 4 : 6),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        onPressed: onTap,
+        icon: Icon(icon, size: isUltraWide ? 14 : 16),
+        label: Text(label,
+            style: TextStyle(fontSize: isUltraWide ? 11 : 13)),
       ),
     );
   }

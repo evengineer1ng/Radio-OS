@@ -160,12 +160,24 @@ def discover_meta_plugins() -> List[str]:
 
 
 def discover_voices() -> List[str]:
-    """List available voice model files."""
+    """List available voice model files.
+
+    Scans VOICES_DIR for:
+      - *.onnx files at the top level (piper voices)
+      - kokoro/  subdirectory — returns entries prefixed with 'kokoro/'
+        so callers can identify them as Kokoro models
+    """
     voices = []
     if os.path.isdir(VOICES_DIR):
         for fn in sorted(os.listdir(VOICES_DIR)):
-            if fn.endswith(".onnx"):
+            full = os.path.join(VOICES_DIR, fn)
+            if fn.endswith(".onnx") and os.path.isfile(full):
                 voices.append(fn)
+            elif fn == "kokoro" and os.path.isdir(full):
+                # Kokoro model directory — include .onnx files inside it
+                for kfn in sorted(os.listdir(full)):
+                    if kfn.endswith(".onnx"):
+                        voices.append(f"kokoro/{kfn}")
     return voices
 
 

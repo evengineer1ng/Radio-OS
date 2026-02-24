@@ -6931,6 +6931,156 @@ class AudioCLISession:
         # Not a bluetooth command
         return None
 
+    # ──────────────────────────────────────────────────────────────────────
+    def _handle_audio_device_command(self, transcript: str) -> Optional[str]:
+        """
+        Intercept audio-output / sound-device voice commands and execute
+        them directly via pactl, bypassing the LLM entirely.
+
+        Returns a spoken response string if matched, or None if not.
+
+        Supported phrases (case-insensitive, punctuation-tolerant):
+          • "list audio devices" / "list sound devices" / "what audio devices"
+            "what output devices" / "show audio devices"
+          • "set audio device <keyword>"  e.g. "set audio device hdmi"
+          • "use <keyword> [audio | sound | output | speaker]"
+          • "switch [audio | sound | output] to <keyword>"
+          • "route audio to <keyword>"
+          • "play [audio | sound | music] [on | through | via | to] <keyword>"
+        """
+        import re as _re
+        import subprocess as _sp
+
+        t = _re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+
+        # ── pactl helpers ────────────────────────────────────────────────
+
+        def _pactl(*args: str, timeout: int = 8) -> str:
+            try:
+                r = _sp.run(["pactl", *args], capture_output=True, text=True, timeout=timeout)
+                return (r.stdout + r.stderr).strip()
+            except Exception as exc:
+                return str(exc)
+
+        def _list_sinks() -> list[dict]:
+            """Return list of dicts with name, description, is_default, is_bluetooth."""
+            short = _pactl("list", "short", "sinks")
+            default = _pactl("get-default-sink").strip()
+
+            # Get human-readable descriptions from verbose output
+            descriptions: dict[str, str] = {}
+            verbose = _pactl("list", "sinks")
+            current_name = None
+            for line in verbose.splitlines():
+                line = line.strip()
+                if line.startswith("Name:"):
+                    current_name = line.split(":", 1)[1].strip()
+                elif line.startswith("Description:") and current_name:
+                    descriptions[current_name] = line.split(":", 1)[1].strip()
+
+            sinks = []
+            for line in short.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    name = parts[1]
+                    sinks.append({
+                        "name": name,
+                        "desc": descriptions.get(name, name),
+                        "is_default": (name == default),
+                        "is_bluetooth": ("bluez" in name.lower()),
+                    })
+            return sinks
+
+        def _set_sink(sink_name: str) -> None:
+            """Set default sink and move all active streams."""
+            _pactl("set-default-sink", sink_name)
+            inputs_raw = _pactl("list", "short", "sink-inputs")
+            for line in inputs_raw.splitlines():
+                parts = line.split()
+                if parts:
+                    _pactl("move-sink-input", parts[0], sink_name, timeout=5)
+
+        def _find_sink(query: str, sinks: list[dict]) -> Optional[dict]:
+            """Case-insensitive fuzzy match on name or description."""
+            q = query.strip().lower()
+            if not q:
+                return None
+            # Exact description match
+            for s in sinks:
+                if q == s["desc"].lower():
+                    return s
+            # Exact name match
+            for s in sinks:
+                if q == s["name"].lower():
+                    return s
+            # Substring match on description (most useful — "hdmi", "soundbar", "usb")
+            for s in sinks:
+                if q in s["desc"].lower() or q in s["name"].lower():
+                    return s
+            # Any single word of the query matches the description
+            for word in q.split():
+                if len(word) < 3:
+                    continue
+                for s in sinks:
+                    if word in s["desc"].lower() or word in s["name"].lower():
+                        return s
+            return None
+
+        # ── list audio devices ────────────────────────────────────────────
+        if _re.search(
+            r"\b(list|show|what|which)\b.{0,20}\b(audio|sound|output|speaker)\b.{0,20}\bdevice"
+            r"|\b(audio|sound|output)\b.{0,20}\bdevice.{0,10}\b(list|available|do i have|are there)"
+            r"|\bwhat.{0,10}(can i|output|sound|audio)",
+            t,
+        ):
+            sinks = _list_sinks()
+            if not sinks:
+                return "I couldn't find any audio output devices."
+            parts = []
+            for s in sinks:
+                label = s["desc"]
+                if s["is_default"]:
+                    label += " (currently active)"
+                if s["is_bluetooth"]:
+                    label += " via Bluetooth"
+                parts.append(label)
+            return f"Available audio output devices: {', '.join(parts)}."
+
+        # ── set / switch / use / route / play on ──────────────────────────
+        m = (
+            _re.search(r"\b(?:set|change)\b.{0,15}\b(?:audio|sound|output)?\b.{0,10}\bdevice\b.{0,5}\bto\b\s+(.+)", t)
+            or _re.search(r"\b(?:set|change)\b.{0,15}\b(?:audio|sound|output)\b.{0,10}\bto\b\s+(.+)", t)
+            or _re.search(r"\buse\b\s+(.+?)\s+(?:audio|sound|output|speaker|device|for audio|for sound)\b", t)
+            or _re.search(r"\buse\b\s+(?:the\s+)?(.+?)\s+(?:as|for)\b.{0,15}\b(?:audio|sound|output)\b", t)
+            or _re.search(r"\bswitch\b.{0,20}\bto\b\s+(.+)", t)
+            or _re.search(r"\broute\b.{0,15}\baudio\b.{0,10}\bto\b\s+(.+)", t)
+            or _re.search(r"\bplay\b.{0,20}\b(?:on|through|via|to)\b\s+(.+)", t)
+        )
+        if m:
+            query = m.group(1).strip()
+            # Strip filler words at the end
+            query = _re.sub(r"\b(please|now|instead|output|audio|sound|device|speaker)s?\b", "", query).strip()
+            if not query:
+                return None  # too vague, let LLM handle
+            sinks = _list_sinks()
+            if not sinks:
+                return "I couldn't reach the audio system right now."
+            sink = _find_sink(query, sinks)
+            if not sink:
+                names = ", ".join(s["desc"] for s in sinks)
+                return (
+                    f"I couldn't find an audio device matching '{query}'. "
+                    f"Available devices: {names}. "
+                    "Say 'list audio devices' to hear them again."
+                )
+            if sink["is_default"]:
+                return f"{sink['desc']} is already the active audio output."
+            _set_sink(sink["name"])
+            return f"Done. Audio output is now set to {sink['desc']}."
+
+        # Not an audio device command
+        return None
+
     @property
     def current_mode(self) -> str:
         """Return 'web' or 'tkinter'."""
@@ -7328,6 +7478,16 @@ class AudioCLISession:
             _log(f"Bluetooth command handled: {_bt_result}")
             self._emit_flutter_event({"type": "llm_response", "text": _bt_result})
             self.narration.speak(_bt_result)
+            self._session_just_spoke = True
+            self._update_status("Listening...")
+            return
+
+        # ── Audio device voice commands — handled locally, no LLM needed ──
+        _audio_dev_result = self._handle_audio_device_command(transcript)
+        if _audio_dev_result is not None:
+            _log(f"Audio device command handled: {_audio_dev_result}")
+            self._emit_flutter_event({"type": "llm_response", "text": _audio_dev_result})
+            self.narration.speak(_audio_dev_result)
             self._session_just_spoke = True
             self._update_status("Listening...")
             return

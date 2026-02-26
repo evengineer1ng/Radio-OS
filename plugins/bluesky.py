@@ -4,7 +4,7 @@ import hashlib
 from typing import Any, Dict, List
 
 # Import runtime objects
-from runtime import StationEvent, event_q
+from your_runtime import StationEvent, event_q
 
 
 # Plugin metadata

@@ -4,6 +4,7 @@
 #include <ESPmDNS.h>
 #include <WebSocketsClient.h>
 #include <driver/i2s_std.h>
+#include <math.h>
 #include "config.h"
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
@@ -30,10 +31,10 @@ void ws_log(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
     Serial.print(buf);
-    if (ws_connected) {
-        ws.sendTXT(buf);
-    } else {
-        boot_log += buf;  // accumulate for later
+    if (!ws_connected) {
+        // Only buffer/send before connection — after connect all WS sends
+        // must go through _puck_sender to avoid concurrent-write crashes
+        boot_log += buf;
     }
 }
 
@@ -64,28 +65,44 @@ static void es8311_init() {
     es8311_write(0x00, 0x1F); delay(10);
     es8311_write(0x00, 0x00); delay(10);
 
-    // Clock: MCLK from pin, 256fs divider for 16kHz → 4.096MHz MCLK
-    es8311_write(0x01, 0x30);  // MCLK from I2S MCLK pin
-    es8311_write(0x02, 0x10);  // ADC/DAC clk: div=2
-    es8311_write(0x03, 0x10);  // ADC/DAC OSR div
-    es8311_write(0x04, 0x10);  // system clock divide
-    es8311_write(0x05, 0x00);  // sysclk=MCLK
-    es8311_write(0x06, 0x03);  // BCLK = MCLK/8 (32fs × 2ch × 16kHz = 1.024MHz)
-    es8311_write(0x07, 0x00);  // LRCLK MSB
-    es8311_write(0x08, 0xFF);  // LRCLK divider = 256 → 4.096MHz/256 = 16kHz
+    // --- Clock config for MCLK=4.096MHz (256fs), rate=16kHz ---
+    // Source: Espressif ESP-ADF coeff_div[] table, entry {4096000, 16000}
+    // pre_div=1, pre_multi=1, adc_div=1, dac_div=1
+    // fs_mode=0 (single speed), lrck_h=0x00, lrck_l=0xFF, bclk_div=4
+    // adc_osr=0x10, dac_osr=0x20
 
-    // I2S format: standard I2S, 32-bit
-    es8311_write(0x09, 0x00);  // I2S standard
-    es8311_write(0x0A, 0x0C);  // 32-bit word length
+    // REG01: MCLK from I2S MCLK pin, not inverted
+    es8311_write(0x01, 0x30);
+    // REG02: pre_div=1 (bits[7:5]=0b000), pre_multi=1 (bits[4:3]=0b00)
+    es8311_write(0x02, 0x00);
+    // REG03: fs_mode=0, adc_osr=0x10
+    es8311_write(0x03, 0x10);
+    // REG04: dac_osr=0x20
+    es8311_write(0x04, 0x20);
+    // REG05: adc_div=1 (bits[7:4]=0x0), dac_div=1 (bits[3:0]=0x0)
+    es8311_write(0x05, 0x00);
+    // REG06: BCLK divider = 4 → BCLK = MCLK/4 = 1.024MHz = 32*2*16kHz ✓
+    es8311_write(0x06, 0x04);
+    // REG07/08: LRCLK divider MSB=0x00, LSB=0xFF → div=256 from MCLK side
+    // (BCLK/64 = 1.024MHz/64 = 16kHz ✓)
+    es8311_write(0x07, 0x00);
+    es8311_write(0x08, 0xFF);
 
-    // Output mixer and volume
-    es8311_write(0x0D, 0x01);  // power management: normal
-    es8311_write(0x12, 0x00);  // DAC power up
-    es8311_write(0x13, 0x10);  // DAC volume (0x10 = 0dB)
-    es8311_write(0x1C, 0x6A);  // ADC gain
-    es8311_write(0x37, 0x00);  // DAC mute off
-    es8311_write(0x44, 0x08);  // output driver on
-    es8311_write(0x45, 0x00);  // reserved
+    // I2S format: standard Philips I2S (REG09=0x00), 32-bit word (REG0A=0x0C)
+    es8311_write(0x09, 0x00);
+    es8311_write(0x0A, 0x0C);
+
+    // Power management: normal operation
+    es8311_write(0x0D, 0x01);
+    // DAC power on
+    es8311_write(0x12, 0x00);
+    // DAC volume: 0dB
+    es8311_write(0x32, 0x00);
+    // ADC/DAC equalizer off, no mute
+    es8311_write(0x37, 0x08);
+    // Output driver on, max gain
+    es8311_write(0x44, 0x08);
+    es8311_write(0x45, 0x00);
 
     ws_log("[ES8311] Init complete\n");
 }
@@ -263,27 +280,18 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_CONNECTED:
             ws_connected = true;
-            mic_streaming = false;  // don't stream mic until Pi asks
+            mic_streaming = false;  // don't stream mic until server asks
             {
                 char hello[32];
                 snprintf(hello, sizeof(hello), "HELLO:node%d", NODE_ID);
                 ws.sendTXT(hello);
+                // HELLO is the ONLY direct send allowed — happens before
+                // _puck_sender task starts so there's no concurrent writer yet.
             }
-            // Flush buffered boot log
-            if (!boot_log_sent && boot_log.length() > 0) {
-                int pos = 0;
-                while (pos < (int)boot_log.length()) {
-                    int end = min(pos + 200, (int)boot_log.length());
-                    int nl = boot_log.lastIndexOf('\n', end);
-                    if (nl > pos) end = nl + 1;
-                    ws.sendTXT(boot_log.substring(pos, end).c_str());
-                    delay(10);
-                    pos = end;
-                }
-                boot_log_sent = true;
-                boot_log = "";
-            }
-            ws_log("[WS] Connected node=%d\n", NODE_ID);
+            // Boot log: already visible on Serial, don't send over WS
+            // (would race with _puck_sender task that starts after ACK arrives)
+            boot_log = "";
+            boot_log_sent = true;
             break;
 
         case WStype_DISCONNECTED:
@@ -291,10 +299,19 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
             mic_streaming = false;
             break;
 
-        case WStype_BIN:
-            // Pi sends stereo I2S32 (already expanded by _pcm16_to_i2s32 on Pi)
+        case WStype_BIN: {
+            // Server sends stereo I2S32 (expanded by _pcm16_to_i2s32 server-side)
+            static uint32_t bin_count = 0;
+            static size_t bin_bytes = 0;
+            bin_count++;
+            bin_bytes += length;
+            if (bin_count % 50 == 1) {  // log every 50 frames (~1s)
+                Serial.printf("[BIN] frame=%u  total_bytes=%u  len=%u\n",
+                              bin_count, (unsigned)bin_bytes, (unsigned)length);
+            }
             play_i2s32_chunk(payload, length);
             break;
+        }
 
         case WStype_TEXT: {
             const char* cmd = (const char*)payload;
@@ -302,6 +319,24 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
                 ws_log("[CMD] Rebooting\n");
                 delay(200);
                 ESP.restart();
+            } else if (strcmp(cmd, "CMD:TONE") == 0) {
+                // Local test tone — 440Hz, 2s, generated on-device
+                ws_log("[CMD] Playing local 440Hz tone\n");
+                const int sr = 16000, dur_ms = 2000;
+                const int total = sr * dur_ms / 1000;
+                const int chunk = 320;
+                static int32_t buf[chunk * 2];  // stereo
+                for (int base = 0; base < total; base += chunk) {
+                    int n = min(chunk, total - base);
+                    for (int i = 0; i < n; i++) {
+                        int32_t s = (int32_t)(16383 * sinf(2.0f * M_PI * 440.0f * (base + i) / sr)) << 16;
+                        buf[i*2]   = s;
+                        buf[i*2+1] = s;
+                    }
+                    size_t written = 0;
+                    i2s_channel_write(tx_handle, buf, n * 2 * sizeof(int32_t), &written, pdMS_TO_TICKS(200));
+                }
+                ws_log("[CMD] Tone done\n");
             } else if (strcmp(cmd, "CMD:MIC_START") == 0) {
                 mic_streaming = true;
             } else if (strcmp(cmd, "CMD:MIC_STOP") == 0) {
@@ -358,13 +393,22 @@ void setup() {
     ws.begin(radioos_ip.toString().c_str(), RADIO_OS_PORT, "/audio");
     ws.onEvent(ws_event);
     ws.setReconnectInterval(3000);
-    ws.enableHeartbeat(15000, 3000, 2);
+    // Do NOT use enableHeartbeat — Starlette doesn't respond to WS protocol pings
+    // so the library would declare the connection dead every ~21s.
+    // Text PING/PONG in the app protocol handles keepalive instead.
     ws_log("[WS] Connecting to %s:%d\n", radioos_ip.toString().c_str(), RADIO_OS_PORT);
 }
 
 // ─── Loop ────────────────────────────────────────────────────────────────────
 void loop() {
     ws.loop();
+
+    // Send text PING every 10s to keep server's 60s receive-timeout alive
+    static uint32_t last_ping_ms = 0;
+    if (ws_connected && (millis() - last_ping_ms) >= 10000) {
+        ws.sendTXT("PING");
+        last_ping_ms = millis();
+    }
 
     // Always drain the I2S RX buffer to prevent overflow — ES7210 fills it regardless
     static int32_t raw[CHUNK_SAMPLES];

@@ -1392,6 +1392,19 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         ok = await get_puck_manager().send_reboot(node_id)
         return {"ok": ok, "node_id": node_id}
 
+    @app.post("/api/pucks/{node_id}/local_tone")
+    async def api_puck_local_tone(node_id: int):
+        """Tell the puck to generate a test tone locally (bypasses network audio path)."""
+        from puck_manager import get_puck_manager
+        p = get_puck_manager()._pucks.get(node_id)
+        if not p or not p.connected:
+            return {"ok": False, "error": "not connected"}
+        try:
+            p.send_q.put_nowait("CMD:TONE")
+        except Exception:
+            pass
+        return {"ok": True, "node_id": node_id}
+
     @app.post("/api/pucks/{node_id}/test_tone")
     async def api_puck_test_tone(node_id: int):
         from puck_manager import get_puck_manager

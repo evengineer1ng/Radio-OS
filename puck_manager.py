@@ -49,8 +49,14 @@ class PuckState:
     last_seen: Optional[float] = None
     ip: str = ""
     ws: Any = None                       # FastAPI WebSocket handle
-    send_q: Any = field(default_factory=lambda: asyncio.Queue(maxsize=32))
+    send_q: Any = None                   # asyncio.Queue — created lazily inside event loop
     sender_task: Any = None              # asyncio Task for _puck_sender
+
+    def get_or_create_queue(self) -> asyncio.Queue:
+        """Return send_q, creating a fresh one inside the running event loop if needed."""
+        if self.send_q is None:
+            self.send_q = asyncio.Queue(maxsize=64)
+        return self.send_q
 
 
 # ─── PuckManager ─────────────────────────────────────────────────────────────
@@ -205,12 +211,8 @@ class PuckManager:
             if p.sender_task and not p.sender_task.done():
                 p.sender_task.cancel()
                 p.sender_task = None
-            # Drain leftover audio from previous session
-            while not p.send_q.empty():
-                try:
-                    p.send_q.get_nowait()
-                except Exception:
-                    break
+            # Fresh queue each connection — old one may be from wrong event loop
+            p.send_q = asyncio.Queue(maxsize=64)
             p.ws = ws
             p.connected = True
             p.connected_at = time.time()
@@ -294,7 +296,10 @@ class PuckManager:
         p = self._pucks.get(node_id)
         if not p or not p.connected or not p.ws:
             return False
-        await p.ws.send_text("CMD:REBOOT")
+        try:
+            p.send_q.put_nowait("CMD:REBOOT")
+        except asyncio.QueueFull:
+            pass
         return True
 
     async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 1000):
@@ -364,20 +369,21 @@ async def handle_puck_websocket(ws: Any, puck_mgr: "PuckManager"):
                     try:
                         node_id = int(text.split("node")[1])
                         await puck_mgr.on_puck_connect(ws, node_id, client_ip)
-                        await ws.send_text(f"ACK:node{node_id}")
-                        task = asyncio.ensure_future(
-                            _puck_sender(ws, puck_mgr._pucks[node_id])
-                        )
-                        puck_mgr._pucks[node_id].sender_task = task
+                        puck = puck_mgr._pucks[node_id]
+                        task = asyncio.ensure_future(_puck_sender(ws, puck))
+                        puck.sender_task = task
+                        # ACK goes through the sender queue (only writer)
+                        puck.send_q.put_nowait(f"ACK:node{node_id}")
                     except Exception as e:
                         print(f"[PuckWS] Bad HELLO: {text}  err={e}", flush=True)
                 elif text == "PING":
                     if node_id:
                         await puck_mgr.on_puck_heartbeat(node_id)
-                    try:
-                        await ws.send_text("PONG")
-                    except Exception:
-                        break
+                        # PONG goes through sender queue to avoid concurrent writes
+                        try:
+                            puck_mgr._pucks[node_id].send_q.put_nowait("PONG")
+                        except asyncio.QueueFull:
+                            pass
                 else:
                     # Debug/diagnostic text from firmware
                     print(f"[Puck{node_id}] {text}", flush=True)
@@ -480,20 +486,24 @@ def _pcm16_to_i2s32(data: bytes) -> bytes:
 
 async def _puck_sender(ws: Any, puck: PuckState):
     """Drain puck's send queue and write to WebSocket.
-    Runs as a concurrent task alongside the receive loop so there is only
-    ever one writer on the connection at a time (fixes websockets drain
-    AssertionError caused by concurrent sends from the poller task)."""
+    Runs as the ONLY writer on the connection — all sends (bytes and text)
+    must go through this task to avoid concurrent-write AssertionErrors."""
     try:
         while puck.connected:
             try:
                 item = await asyncio.wait_for(puck.send_q.get(), timeout=5.0)
-                pcm, already_i2s32 = item
-                frame = pcm if already_i2s32 else _pcm16_to_i2s32(pcm)
-                await ws.send_bytes(frame)
             except asyncio.TimeoutError:
                 continue
+            try:
+                if isinstance(item, str):
+                    # Text frame (PONG, ACK, CMD:*)
+                    await ws.send_text(item)
+                else:
+                    pcm, already_i2s32 = item
+                    frame = pcm if already_i2s32 else _pcm16_to_i2s32(pcm)
+                    await ws.send_bytes(frame)
             except Exception as e:
-                print(f"[PuckWS] sender node={puck.node_id} error: {e}", flush=True)
+                print(f"[PuckWS] sender node={puck.node_id} error: {type(e).__name__}: {e}", flush=True)
                 break
     finally:
         # Drain any leftover frames so the queue doesn't fill on reconnect

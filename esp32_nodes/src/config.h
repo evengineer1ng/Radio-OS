@@ -4,35 +4,57 @@
 #define WIFI_SSID     "blender"
 #define WIFI_PASSWORD "strawberrybanana"
 
-// Radio OS Python backend — Raspberry Pi at 10.0.0.120
-#define RADIO_OS_HOST "10.0.0.120"
-#define RADIO_OS_PORT 7800          // WebSocket port (Radio OS web shell)
+// ─── Radio OS server discovery ────────────────────────────────────────────────
+// Puck resolves this mDNS name at boot — connects to whichever machine on the
+// local network is currently running web_server.py (Mac, PC, or Pi).
+#define RADIOOS_MDNS_HOST   "radioos.local"
+// Fallback IP if mDNS fails (e.g. router doesn't forward mDNS)
+#define RADIOOS_FALLBACK_HOST "10.0.0.70"
+#define RADIO_OS_PORT       7800
 
 // ─── Node identity ───────────────────────────────────────────────────────────
-// NODE_ID is set per-environment in platformio.ini (1-4)
-// Nodes 1-2 = ESP32-C6,  Nodes 3-4 = Classic ESP32
+// NODE_ID is set per-environment in platformio.ini
 
-// ─── I2S pins — ESP32-C6 ─────────────────────────────────────────────────────
-#if defined(BOARD_C6)
-  #define I2S_SCK         6    // Shared BCLK for mic + amp
-  #define I2S_WS          7    // Shared LRCLK for mic + amp
-  #define I2S_MIC_SD      2    // INMP441 data out  → ESP32 in
-  #define I2S_AMP_SD     10    // MAX98357A data in ← ESP32 out
-  // MAX98357A SD pin: drive HIGH to enable amp. Wire SD to this GPIO,
-  // or if you've tied SD to 3.3V on the breadboard set this to -1.
-  #define AMP_ENABLE_PIN  3    // GPIO3 → MAX98357A SD (change if needed)
+// ─── Waveshare ESP32-S3-AUDIO-Board ──────────────────────────────────────────
+// ES8311 DAC/amp + ES7210 mic ADC
+// Both codecs share one I2S bus and are configured via I2C
+#if defined(BOARD_S3_AUDIO)
+  // I2C — controls ES8311 (DAC) and ES7210 (mic ADC) chip config
+  #define PIN_I2C_SCL     10
+  #define PIN_I2C_SDA     11
+  // I2S — shared audio bus for both codecs
+  #define PIN_I2S_MCLK    12
+  #define PIN_I2S_BCLK    13
+  #define PIN_I2S_LRCLK   14
+  #define PIN_I2S_DIN     15   // data from ES7210 mic → ESP32
+  #define PIN_I2S_DOUT    16   // data from ESP32 → ES8311 amp
+  // RGB LED strip (WS2812, 7 LEDs)
+  #define PIN_RGB_LED     38
+  #define RGB_LED_COUNT    7
+  // ES8311 I2C address
+  #define ES8311_ADDR     0x18
+  // ES7210 I2C address
+  #define ES7210_ADDR     0x40
 
-// ─── I2S pins — Classic ESP32 ────────────────────────────────────────────────
+// ─── ESP32-C6 (Waveshare DEV-KIT-N8) ─────────────────────────────────────────
+#elif defined(BOARD_C6)
+  #define PIN_I2S_BCLK    4
+  #define PIN_I2S_LRCLK   5
+  #define PIN_I2S_DIN     2
+  #define PIN_I2S_DOUT    10
+  #define PIN_I2S_MCLK    -1
+  #define AMP_ENABLE_PIN  -1
+
+// ─── Classic ESP32 DevKit C ───────────────────────────────────────────────────
 #elif defined(BOARD_ESP32)
-  #define I2S_SCK        26
-  #define I2S_WS         25
-  #define I2S_MIC_SD     35    // input-only pin, good for mic
-  #define I2S_AMP_SD     22
-  #define AMP_ENABLE_PIN -1    // tie SD to 3.3V on classic board
+  #define PIN_I2S_BCLK    26
+  #define PIN_I2S_LRCLK   25
+  #define PIN_I2S_DIN     35
+  #define PIN_I2S_DOUT    22
+  #define PIN_I2S_MCLK    -1
+  #define AMP_ENABLE_PIN  -1
 #endif
 
-// ─── Audio config ────────────────────────────────────────────────────────────
+// ─── Audio config ─────────────────────────────────────────────────────────────
 #define SAMPLE_RATE     16000
-#define DMA_BUF_COUNT       4
-#define DMA_BUF_LEN       256
-#define AUDIO_CHUNK_MS     20   // ms of audio per WiFi packet (~640 bytes @ 16kHz)
+#define AUDIO_CHUNK_MS     20   // 20ms per WiFi packet = 320 samples @ 16kHz

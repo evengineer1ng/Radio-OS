@@ -160,24 +160,12 @@ def discover_meta_plugins() -> List[str]:
 
 
 def discover_voices() -> List[str]:
-    """List available voice model files.
-
-    Scans VOICES_DIR for:
-      - *.onnx files at the top level (piper voices)
-      - kokoro/  subdirectory — returns entries prefixed with 'kokoro/'
-        so callers can identify them as Kokoro models
-    """
+    """List available voice model files."""
     voices = []
     if os.path.isdir(VOICES_DIR):
         for fn in sorted(os.listdir(VOICES_DIR)):
-            full = os.path.join(VOICES_DIR, fn)
-            if fn.endswith(".onnx") and os.path.isfile(full):
+            if fn.endswith(".onnx"):
                 voices.append(fn)
-            elif fn == "kokoro" and os.path.isdir(full):
-                # Kokoro model directory — include .onnx files inside it
-                for kfn in sorted(os.listdir(full)):
-                    if kfn.endswith(".onnx"):
-                        voices.append(f"kokoro/{kfn}")
     return voices
 
 
@@ -286,22 +274,6 @@ class StationManager:
 
             # Headless mode — no tkinter UI, audio pipes to WebSocket
             env["RADIO_OS_HEADLESS"] = "1"
-            # Also play audio locally through PulseAudio so the Pi's
-            # speakers/soundbar work alongside the web stream.
-            env["RADIO_OS_LOCAL_AUDIO"] = "1"
-            # Inject PipeWire/PulseAudio session vars so sd.play() in the
-            # station subprocess can reach the user's audio socket.
-            # The socket lives at /run/user/<uid>/pulse regardless of whether
-            # the service has a full desktop session.
-            import pwd as _pwd
-            try:
-                _uid = _pwd.getpwnam(env.get("USER", "airfryer")).pw_uid
-            except Exception:
-                _uid = 1000
-            _runtime_dir = f"/run/user/{_uid}"
-            env.setdefault("XDG_RUNTIME_DIR", _runtime_dir)
-            env.setdefault("PULSE_RUNTIME_PATH", f"{_runtime_dir}/pulse")
-            env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={_runtime_dir}/bus")
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUNBUFFERED"] = "1"
 
@@ -567,6 +539,37 @@ class AudioBridge:
 
 WEB_SHELL_PORT = int(os.environ.get("RADIO_OS_WEB_PORT", "7800"))
 
+async def _register_mdns():
+    """Register radioos.local via zeroconf so ESP32 pucks can find this server."""
+    try:
+        from zeroconf.asyncio import AsyncZeroconf
+        from zeroconf import ServiceInfo
+        import socket as _socket
+        # Get the real LAN IP by connecting a UDP socket (doesn't send anything)
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        info = ServiceInfo(
+            "_radioos._tcp.local.",
+            "RadioOS._radioos._tcp.local.",
+            addresses=[_socket.inet_aton(ip)],
+            port=WEB_SHELL_PORT,
+            properties={"version": "1.0"},
+            server="radioos.local.",
+        )
+        zc = AsyncZeroconf()
+        await zc.async_register_service(info)
+        print(f"[mDNS] Registered radioos.local → {ip}:{WEB_SHELL_PORT}", flush=True)
+        _register_mdns._zc = zc
+        _register_mdns._info = info
+    except ImportError:
+        print("[mDNS] zeroconf not installed — pucks will use fallback IP", flush=True)
+    except Exception as e:
+        print(f"[mDNS] Registration failed: {e}", flush=True)
+
 def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
     """Build the Radio OS web shell FastAPI app."""
     _ensure_imports()
@@ -584,11 +587,13 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         allow_headers=["*"],
     )
 
-    # ──── Startup: launch puck audio poller ────
+    # ──── Startup: launch puck audio poller + register mDNS ────
     @app.on_event("startup")
     async def _start_puck_poller():
         from puck_manager import get_puck_manager
         get_puck_manager().start_poller(STATIONS_DIR)
+        # Register radioos.local so pucks can find this server via mDNS
+        asyncio.ensure_future(_register_mdns())
 
     # ──── REST: Health ────
     @app.get("/api/health")
@@ -1585,121 +1590,6 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         on = body.get("on", True)
         out = await _bluetoothctl(["power", "on" if on else "off"])
         return {"ok": True, "powered": on, "output": out}
-
-    @app.post("/api/bluetooth/power")
-    async def bt_power(request: Request):
-        """Power adapter on/off."""
-        body = await request.json()
-        on = body.get("on", True)
-        out = await _bluetoothctl(["power", "on" if on else "off"])
-        return {"ok": True, "powered": on, "output": out}
-
-    # ──── Audio output (PulseAudio/PipeWire) ────
-
-    def _run_pactl(*args: str, timeout: int = 8) -> str:
-        """Run pactl as the desktop user, even when web_server runs as root.
-
-        PulseAudio/PipeWire-pulse sockets live in /run/user/<uid>/pulse/.
-        When the service runs as root we need to inject the correct
-        XDG_RUNTIME_DIR (and matching PULSE_RUNTIME_PATH) so pactl can
-        find the socket.  We probe the UID of the first logged-in non-root
-        user via `loginctl` and fall back to the 'airfryer' account.
-        """
-        import subprocess, os, pwd
-
-        # Resolve the audio user UID
-        try:
-            lc = subprocess.run(
-                ["loginctl", "list-sessions", "--no-legend"],
-                capture_output=True, text=True, timeout=5,
-            )
-            uid: int | None = None
-            for line in lc.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3:
-                    try:
-                        candidate = int(parts[1])
-                        if candidate != 0:
-                            uid = candidate
-                            break
-                    except ValueError:
-                        pass
-            if uid is None:
-                uid = pwd.getpwnam("airfryer").pw_uid
-        except Exception:
-            try:
-                uid = pwd.getpwnam("airfryer").pw_uid
-            except Exception:
-                uid = 1000
-
-        env = os.environ.copy()
-        runtime_dir = f"/run/user/{uid}"
-        env["XDG_RUNTIME_DIR"] = runtime_dir
-        env["PULSE_RUNTIME_PATH"] = f"{runtime_dir}/pulse"
-
-        try:
-            r = subprocess.run(
-                ["pactl", *args],
-                capture_output=True, text=True, timeout=timeout, env=env,
-            )
-            return (r.stdout + r.stderr).strip()
-        except Exception as exc:
-            return str(exc)
-
-    @app.get("/api/audio/sinks")
-    async def audio_list_sinks():
-        """List all PulseAudio/PipeWire sinks with name, description, and active state."""
-        import asyncio
-        raw = await asyncio.get_event_loop().run_in_executor(None, lambda: _run_pactl("list", "short", "sinks"))
-        default_raw = await asyncio.get_event_loop().run_in_executor(None, lambda: _run_pactl("get-default-sink"))
-        default_sink = default_raw.strip()
-        sinks = []
-        for line in raw.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                sink_name = parts[1].strip()
-                state = parts[4].strip() if len(parts) > 4 else ""
-                sinks.append({
-                    "name": sink_name,
-                    "is_default": sink_name == default_sink,
-                    "state": state,
-                    "is_bluetooth": "bluez" in sink_name.lower(),
-                })
-        # Also get human-readable descriptions via pactl list sinks
-        long_raw = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _run_pactl("list", "sinks"))
-        desc_map: dict = {}
-        current: str | None = None
-        for line in long_raw.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Name:"):
-                current = stripped.split("Name:", 1)[1].strip()
-            elif stripped.startswith("Description:") and current:
-                desc_map[current] = stripped.split("Description:", 1)[1].strip()
-        for s in sinks:
-            s["description"] = desc_map.get(s["name"], s["name"])
-        return {"sinks": sinks, "default": default_sink}
-
-    @app.post("/api/audio/set-default-sink")
-    async def audio_set_default_sink(request: Request):
-        """Set the default PulseAudio/PipeWire sink and move all active streams."""
-        import asyncio
-        body = await request.json()
-        sink_name = (body.get("sink") or "").strip()
-        if not sink_name:
-            return {"ok": False, "error": "No sink name provided"}
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _run_pactl("set-default-sink", sink_name))
-        # Move all existing sink-inputs to the new sink
-        inputs_raw = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _run_pactl("list", "short", "sink-inputs"))
-        moved = 0
-        for line in inputs_raw.splitlines():
-            parts = line.split()
-            if parts:
-                _run_pactl("move-sink-input", parts[0], sink_name)
-                moved += 1
-        return {"ok": True, "sink": sink_name, "streams_moved": moved}
 
     # ──── Serve the web shell frontend ────
     shell_dist = os.path.join(BASE_DIR, "web_shell", "dist")

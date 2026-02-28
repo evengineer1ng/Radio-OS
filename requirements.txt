@@ -61,3 +61,4 @@ kokoro-onnx>=0.5.0
 # Gracefully degrades to simpler AI if not installed
 # Install if prompted during setup, or manually: pip install torch>=2.0.0
 # torch>=2.0.0
+zeroconf>=0.131

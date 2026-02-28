@@ -256,7 +256,15 @@ def _start_local_audio_watcher(audio_dir: str, pulse_device) -> None:
                         data, sr = _sf.read(wav, dtype="float32")
                         if data.ndim == 1:
                             data = data.reshape(-1, 1)
-                        sd.play(data, sr, device=_dev, blocking=True)
+                        # Use paplay (PulseAudio native) to avoid PortAudio
+                        # sample-format negotiation issues with PipeWire.
+                        import subprocess as _subp
+                        _subp.run(
+                            ["paplay", wav],
+                            stdout=_subp.DEVNULL,
+                            stderr=_subp.DEVNULL,
+                            timeout=60,
+                        )
                     except Exception as exc:
                         print(f"[local_audio] playback error: {exc}", file=sys.stderr)
                     finally:

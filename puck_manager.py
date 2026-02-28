@@ -50,6 +50,7 @@ class PuckState:
     ip: str = ""
     ws: Any = None                       # FastAPI WebSocket handle
     send_q: Any = field(default_factory=lambda: asyncio.Queue(maxsize=32))
+    sender_task: Any = None              # asyncio Task for _puck_sender
 
 
 # ─── PuckManager ─────────────────────────────────────────────────────────────
@@ -200,6 +201,16 @@ class PuckManager:
             p = self._pucks.get(node_id)
             if p is None:
                 return
+            # Cancel stale sender from a previous connection
+            if p.sender_task and not p.sender_task.done():
+                p.sender_task.cancel()
+                p.sender_task = None
+            # Drain leftover audio from previous session
+            while not p.send_q.empty():
+                try:
+                    p.send_q.get_nowait()
+                except Exception:
+                    break
             p.ws = ws
             p.connected = True
             p.connected_at = time.time()
@@ -278,6 +289,14 @@ class PuckManager:
             except asyncio.QueueFull:
                 pass
 
+    async def send_reboot(self, node_id: int):
+        """Send a REBOOT text command to the puck over WebSocket."""
+        p = self._pucks.get(node_id)
+        if not p or not p.connected or not p.ws:
+            return False
+        await p.ws.send_text("CMD:REBOOT")
+        return True
+
     async def send_test_tone(self, node_id: int, freq_hz: int = 440, duration_ms: int = 1000):
         """Send a sine-wave test tone to a specific puck in 20ms stereo I2S32 chunks."""
         p = self._pucks.get(node_id)
@@ -346,9 +365,10 @@ async def handle_puck_websocket(ws: Any, puck_mgr: "PuckManager"):
                         node_id = int(text.split("node")[1])
                         await puck_mgr.on_puck_connect(ws, node_id, client_ip)
                         await ws.send_text(f"ACK:node{node_id}")
-                        asyncio.ensure_future(
+                        task = asyncio.ensure_future(
                             _puck_sender(ws, puck_mgr._pucks[node_id])
                         )
+                        puck_mgr._pucks[node_id].sender_task = task
                     except Exception as e:
                         print(f"[PuckWS] Bad HELLO: {text}  err={e}", flush=True)
                 elif text == "PING":
@@ -358,6 +378,9 @@ async def handle_puck_websocket(ws: Any, puck_mgr: "PuckManager"):
                         await ws.send_text("PONG")
                     except Exception:
                         break
+                else:
+                    # Debug/diagnostic text from firmware
+                    print(f"[Puck{node_id}] {text}", flush=True)
 
             elif "bytes" in msg and msg["bytes"] and node_id:
                 await puck_mgr.on_mic_frame(node_id, msg["bytes"])

@@ -542,8 +542,7 @@ WEB_SHELL_PORT = int(os.environ.get("RADIO_OS_WEB_PORT", "7800"))
 async def _register_mdns():
     """Register radioos.local via zeroconf so ESP32 pucks can find this server."""
     try:
-        from zeroconf.asyncio import AsyncZeroconf
-        from zeroconf import ServiceInfo
+        from zeroconf import ServiceInfo, Zeroconf
         import socket as _socket
         # Get the real LAN IP by connecting a UDP socket (doesn't send anything)
         s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
@@ -560,8 +559,14 @@ async def _register_mdns():
             properties={"version": "1.0"},
             server="radioos.local.",
         )
-        zc = AsyncZeroconf()
-        await zc.async_register_service(info)
+        # Use synchronous Zeroconf in a thread — avoids Windows asyncio/multicast issues
+        import asyncio
+        loop = asyncio.get_event_loop()
+        def _register():
+            zc = Zeroconf()
+            zc.register_service(info)
+            return zc
+        zc = await loop.run_in_executor(None, _register)
         print(f"[mDNS] Registered radioos.local → {ip}:{WEB_SHELL_PORT}", flush=True)
         _register_mdns._zc = zc
         _register_mdns._info = info
@@ -569,6 +574,7 @@ async def _register_mdns():
         print("[mDNS] zeroconf not installed — pucks will use fallback IP", flush=True)
     except Exception as e:
         print(f"[mDNS] Registration failed: {e}", flush=True)
+        print("[mDNS] Pucks will use fallback IP from config.h", flush=True)
 
 def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
     """Build the Radio OS web shell FastAPI app."""

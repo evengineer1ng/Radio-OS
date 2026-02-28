@@ -3232,6 +3232,14 @@ def start_web_shell(port: int = WEB_SHELL_PORT, host: str = "0.0.0.0",
     Start the Radio OS web shell server.
     Can run standalone or in a daemon thread from shell_bookmark.py.
     """
+    # On Windows, the default ProactorEventLoop causes WinError 121 (semaphore
+    # timeout) when doing concurrent WebSocket reads and writes (puck audio).
+    # Force SelectorEventLoop which handles concurrent WS I/O correctly.
+    import sys
+    if sys.platform == "win32":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     _ensure_imports()
     import uvicorn
 

@@ -71,13 +71,19 @@ class PuckManager:
             i: PuckState(node_id=i) for i in range(1, 5)
         }
         self._group_volume: int = 80      # 0–100, applied on top of per-puck
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # created lazily inside event loop
 
         # Mic frame callbacks: node_id → list of async callables
         self._mic_callbacks: Dict[int, List[Any]] = {i: [] for i in range(1, 5)}
 
         # Background poller task handle
         self._poller_task: Optional[Any] = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Return the lock, creating it lazily inside the running event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # ── Background audio poller ──────────────────────────────────────────────
 
@@ -203,7 +209,7 @@ class PuckManager:
 
     async def on_puck_connect(self, ws: Any, node_id: int, ip: str = ""):
         """Called when an ESP32 puck WebSocket connects and sends HELLO."""
-        async with self._lock:
+        async with self._get_lock():
             p = self._pucks.get(node_id)
             if p is None:
                 return
@@ -221,7 +227,7 @@ class PuckManager:
         print(f"[PuckManager] Puck {node_id} connected  ip={ip}", flush=True)
 
     async def on_puck_disconnect(self, node_id: int):
-        async with self._lock:
+        async with self._get_lock():
             p = self._pucks.get(node_id)
             if p:
                 p.ws = None
@@ -229,7 +235,7 @@ class PuckManager:
         print(f"[PuckManager] Puck {node_id} disconnected", flush=True)
 
     async def on_puck_heartbeat(self, node_id: int):
-        async with self._lock:
+        async with self._get_lock():
             p = self._pucks.get(node_id)
             if p:
                 p.last_seen = time.time()

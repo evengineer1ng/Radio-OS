@@ -98,13 +98,46 @@ static void es8311_init() {
     es8311_write(0x12, 0x00);
     // DAC volume: 0dB
     es8311_write(0x32, 0x00);
-    // ADC/DAC equalizer off, no mute
-    es8311_write(0x37, 0x08);
-    // Output driver on, max gain
+    // DAC mute OFF (bit3=0), DAC_RAMPRATE normal
+    es8311_write(0x37, 0x00);
+    // Output driver on
     es8311_write(0x44, 0x08);
     es8311_write(0x45, 0x00);
+    // Speaker/headphone output enable (REG13: enable DAC to mixer)
+    es8311_write(0x13, 0x10);
+    // Analog output: enable speaker path (REG1C)
+    es8311_write(0x1C, 0x6A);
 
     ws_log("[ES8311] Init complete\n");
+}
+
+// ─── TCA9555 I/O expander — amp (PA) enable ──────────────────────────────────
+// The on-board Class-D amplifier power-amp enable is routed through the TCA9555
+// GPIO expander at I2C 0x20.  EXIO8 = Port-1 bit-0.
+// Confirmed from Waveshare official demo: Audio_ES8311.cpp → Audio_PA_EN()
+//   Set_EXIO(TCA9555_EXIO8, true)   (TCA9555_EXIO8 = 8)
+//
+// TCA9555 register map:
+//   0x02 Output Port 0,  0x03 Output Port 1
+//   0x06 Config Port 0,  0x07 Config Port 1  (0=output, 1=input)
+#define TCA9555_ADDR  0x20
+
+static void tca9555_pa_enable() {
+    // EXIO8 = Port-1 bit-0.  No read-modify-write — just write both registers.
+    // Config Port 1 (reg 0x07): bit0=0 → output, all others stay input (1)
+    Wire.beginTransmission(TCA9555_ADDR);
+    Wire.write(0x07);
+    Wire.write(0xFE);  // 1111 1110 — pin 8 as output
+    Wire.endTransmission();
+
+    // Output Port 1 (reg 0x03): bit0=1 → HIGH → amp enabled
+    Wire.beginTransmission(TCA9555_ADDR);
+    Wire.write(0x03);
+    Wire.write(0x01);  // pin 8 HIGH
+    Wire.endTransmission();
+
+    delay(50);
+    ws_log("[TCA9555] PA (EXIO8) enabled\n");
 }
 
 // ─── ES7210 codec (quad mic ADC) — init via I2C ──────────────────────────────
@@ -217,6 +250,9 @@ static void board_init() {
     es8311_init();
     es7210_init();
 
+    // Enable the on-board power amplifier via TCA9555 GPIO expander (EXIO8)
+    tca9555_pa_enable();
+
     // Init I2S (after codecs are configured)
     i2s_init();
 }
@@ -321,7 +357,13 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
                 ESP.restart();
             } else if (strcmp(cmd, "CMD:TONE") == 0) {
                 // Local test tone — 440Hz, 2s, generated on-device
-                ws_log("[CMD] Playing local 440Hz tone\n");
+                Serial.printf("[CMD] Playing local 440Hz tone\n");
+                // Dump key ES8311 registers first
+                Serial.printf("[ES8311] REG00=0x%02X REG01=0x%02X REG02=0x%02X REG06=0x%02X\n",
+                    es8311_read(0x00), es8311_read(0x01), es8311_read(0x02), es8311_read(0x06));
+                Serial.printf("[ES8311] REG0A=0x%02X REG0D=0x%02X REG12=0x%02X REG32=0x%02X REG37=0x%02X REG44=0x%02X\n",
+                    es8311_read(0x0A), es8311_read(0x0D), es8311_read(0x12),
+                    es8311_read(0x32), es8311_read(0x37), es8311_read(0x44));
                 const int sr = 16000, dur_ms = 2000;
                 const int total = sr * dur_ms / 1000;
                 const int chunk = 320;

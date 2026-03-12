@@ -1,6 +1,7 @@
 [Unit]
 Description=Radio OS OLED Soul Display Daemon
-After=network.target
+After=local-fs.target
+Wants=local-fs.target
 
 [Service]
 Type=simple

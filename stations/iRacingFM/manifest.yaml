@@ -1,0 +1,192 @@
+station:
+  name: iRacingFM
+  host: Alex
+  category: sim racing
+  logo: logos/iraciingfm.png
+  meta_plugin: iracing_meta   # plugins/meta/iracing_meta.py
+
+# ── LLM provider ──────────────────────────────────────────────────────────────
+llm:
+  provider: openai
+  api_key_env: OPENAI_API_KEY
+
+models:
+  producer: gpt-4o-mini
+  host: gpt-4o-mini
+  fast: gpt-4o-mini            # used for routine commentary (cheaper / faster)
+  navigator: gpt-4o-mini
+  embedding: text-embedding-3-small
+
+embedding:
+  enabled: true
+
+# ── Paths (relative to station dir) ────────────────────────────────────────────
+paths:
+  db: station.sqlite
+  memory: station_memory.json
+
+# ── Commentary pacing ─────────────────────────────────────────────────────────
+pacing:
+  # How far apart any two AI calls can be
+  min_commentary_gap_sec: 4
+  # Minimum gap between routine calls (lap completions, standings)
+  routine_commentary_gap_sec: 15
+  # Standard bookmark pipeline pacing
+  idle_riff_sec: 45
+  between_segments_sec: 3
+  queue_target_depth: 8
+  queue_max_depth: 20
+  producer_tick_sec: 60       # run producer slowly — live events dominate
+  audio_target_depth: 4
+  audio_max_depth: 8
+  audio_tick_sleep: 0.05
+
+producer:
+  target_depth: 4
+  max_depth: 10
+  tick_sec: 60
+  max_tokens: 280
+  temperature: 0.55
+  per_source_cap: 2
+
+# ── Two-voice broadcast crew ───────────────────────────────────────────────────
+characters:
+  pbp:
+    name: Alex
+    role: play_by_play
+    traits:
+      - exclamatory
+      - immediate
+      - vivid
+    focus:
+      - action
+      - drama
+      - position
+
+  color:
+    name: Jordan
+    role: color_commentator
+    traits:
+      - analytical
+      - measured
+      - insightful
+    focus:
+      - strategy
+      - context
+      - history
+
+  # Extra voices for non-live talk segments
+  analyst:
+    role: technical_voice
+    traits:
+      - precise
+      - data-driven
+    focus:
+      - setup
+      - telemetry
+      - car_balance
+
+# ── TTS voices ─────────────────────────────────────────────────────────────────
+tts:
+  min_gap_sec: 3
+  spam_break_priority: 98
+audio:
+  voices_provider: kokoro
+  voices:
+    Alex:   am_adam       # play-by-play
+    Jordan: af_sarah      # color
+    analyst: am_liam
+
+# ── Scheduler / source quotas ─────────────────────────────────────────────────
+scheduler:
+  source_quotas:
+    iracing_sdk: 8        # live events fill most of the queue
+    reddit:       3
+    rss:          1
+  reclaim_every_sec: 10
+  reaper_every_sec: 3
+  claim_timeout_sec: 45
+
+# ── Riff tags (for non-live talk breaks) ─────────────────────────────────────
+riff:
+  tag_catalog:
+    - sim_racing
+    - iracing
+    - strategy
+    - car_setup
+    - track_guide
+    - race_craft
+    - esports_motorsport
+    - driver_of_the_day
+  shapes:
+    - connect_two
+    - tradeoff
+    - myth_bust
+    - tease_next
+
+# ── Feed configuration ─────────────────────────────────────────────────────────
+feeds:
+
+  # ── PRIMARY: live iRacing telemetry ──────────────────────────────────────────
+  iracing_sdk:
+    enabled: true
+    poll_hz: 4                 # 4 Hz telemetry sampling
+    incident_threshold: 1      # incident points delta to announce
+    position_threshold: 1      # position delta to call as a pass
+    announce_session_changes: true
+    announce_lap_completions: true
+    announce_passes: true
+    announce_incidents: true
+    announce_fastest_lap: true
+    announce_flags: true
+    announce_pit: true
+    # ── Development / macOS (no iRacing running) ─────────────────────────────
+    # sim_mode: true will be auto-enabled on non-Windows regardless of this flag
+    sim_mode: false
+    sim_drivers: 12
+    sim_laps: 30
+    sim_track: Daytona International Speedway
+    sim_series: iRacing Demo Series
+
+  # ── Background content sources (fill dead air between races) ─────────────────
+  reddit:
+    enabled: true
+    subreddits:
+      - iracing
+      - simracing
+      - simracingstewards
+    poll_sec: 60
+    limit: 15
+    priority: 50
+    burst_delay: 0.2
+    seen_ttl_sec: 3600
+
+  rss:
+    enabled: true
+    urls:
+      - https://news.google.com/rss/search?q=iRacing+race
+      - https://news.google.com/rss/search?q=sim+racing+esports
+      - https://www.iracing.com/feed/
+    poll_sec: 300
+    priority: 45
+
+  # ── Everything else off by default ────────────────────────────────────────────
+  bluesky:       { enabled: false }
+  document:      { enabled: false }
+  google_alerts: { enabled: false }
+  markets:       { enabled: false }
+  flows:         { enabled: false }
+  portfolio:     { enabled: false }
+  facebook:      { enabled: false }
+  futuresight:   { enabled: false }
+  instagram:     { enabled: false }
+  music_breaks:  { enabled: false }
+  tiktok:        { enabled: false }
+  twitter:       { enabled: false }
+
+# ── Content mix weights ────────────────────────────────────────────────────────
+mix:
+  weights:
+    iracing_sdk: 0.75    # live telemetry dominates
+    reddit:       0.20
+    rss:          0.05

@@ -1,0 +1,2 @@
+// S3 Audio Board main — kept for reference, not compiled
+// Active firmware is main.cpp (guarded by #if defined(BOARD_S3_AUDIO))

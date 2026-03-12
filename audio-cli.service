@@ -1,0 +1,21 @@
+[Unit]
+Description=Radio OS Audio CLI — wake-phrase listener (web mode)
+After=network.target radioos-web.service sound.target
+Wants=radioos-web.service
+
+[Service]
+Type=simple
+User=airfryer
+WorkingDirectory=/home/airfryer/Radio-OS-1.03
+Environment="RADIO_OS_ROOT=/home/airfryer/Radio-OS-1.03"
+Environment="RADIO_OS_PLUGINS=/home/airfryer/Radio-OS-1.03/plugins"
+Environment="RADIO_OS_VOICES=/home/airfryer/Radio-OS-1.03/voices"
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/airfryer/Radio-OS-1.03/radioenv/bin/python3 audio_cli.py --web http://127.0.0.1:7800
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/airfryer/Radio-OS-1.03/audio_cli_service.log
+StandardError=append:/home/airfryer/Radio-OS-1.03/audio_cli_service.log
+
+[Install]
+WantedBy=multi-user.target

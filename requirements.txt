@@ -38,6 +38,8 @@ SpeechRecognition>=3.10.0           # Speech-to-text (if using audio input plugi
 faster-whisper>=1.2.0               # Priority-0 STT engine; pure-Python CTranslate2 (ARM64-compatible)
 matplotlib>=3.7.0                   # Visualization/plotting (analysis widgets)
 
+# iRacing Live Commentary Station (Windows only for real data; sim mode on all platforms)
+pyirsdk>=1.3.0; sys_platform == 'win32'   # iRacing shared-memory SDK Python wrapper
 # Web Server (Radio OS Web Shell — optional, for Tailscale/LAN access)
 fastapi>=0.100.0                    # Web API framework
 uvicorn>=0.23.0                     # ASGI server

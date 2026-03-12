@@ -88,25 +88,27 @@ static void es8311_init() {
     es8311_write(0x07, 0x00);
     es8311_write(0x08, 0xFF);
 
-    // I2S format: standard Philips I2S (REG09=0x00), 32-bit word (REG0A=0x0C)
-    es8311_write(0x09, 0x00);
-    es8311_write(0x0A, 0x0C);
+    // I2S format: standard Philips I2S, 32-bit word length
+    // REG09 = SDP In (ESP→codec): bits[4:2]=100 = 32-bit
+    // REG0A = SDP Out (codec→ESP): bits[4:2]=100 = 32-bit
+    es8311_write(0x09, 0x10);  // 32-bit in
+    es8311_write(0x0A, 0x10);  // 32-bit out (was 0x0C = 24-bit mismatch)
 
     // Power management: normal operation
     es8311_write(0x0D, 0x01);
     // DAC power on
     es8311_write(0x12, 0x00);
-    // DAC volume: 0dB
-    es8311_write(0x32, 0x00);
-    // DAC mute OFF (bit3=0), DAC_RAMPRATE normal
-    es8311_write(0x37, 0x00);
+    // DAC volume: 0xBF = ~75% (REG32: 0x00=min, 0xFF=0dB per ES8311 datasheet)
+    es8311_write(0x32, 0xBF);
+    // REG31: DAC mute OFF — bits[6:5] = 0b00 = unmuted (default may be muted)
+    es8311_write(0x31, 0x00);
+    // REG37: bypass DAC equalizer (bit3=1), fade normal — matches Waveshare library
+    es8311_write(0x37, 0x08);
     // Output driver on
     es8311_write(0x44, 0x08);
     es8311_write(0x45, 0x00);
     // Speaker/headphone output enable (REG13: enable DAC to mixer)
     es8311_write(0x13, 0x10);
-    // Analog output: enable speaker path (REG1C)
-    es8311_write(0x1C, 0x6A);
 
     ws_log("[ES8311] Init complete\n");
 }
@@ -138,6 +140,24 @@ static void tca9555_pa_enable() {
 
     delay(50);
     ws_log("[TCA9555] PA (EXIO8) enabled\n");
+}
+
+static uint8_t tca9555_read(uint8_t reg) {
+    Wire.beginTransmission(TCA9555_ADDR);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)TCA9555_ADDR, (uint8_t)1);
+    return Wire.available() ? Wire.read() : 0xFF;
+}
+
+static void tca9555_dump() {
+    Serial.printf("[TCA9555] IN0=0x%02X IN1=0x%02X OUT0=0x%02X OUT1=0x%02X CFG0=0x%02X CFG1=0x%02X\n",
+        tca9555_read(0x00), tca9555_read(0x01),
+        tca9555_read(0x02), tca9555_read(0x03),
+        tca9555_read(0x06), tca9555_read(0x07));
+    // Also dump the ES8311 DAC registers that control mute and volume
+    Serial.printf("[ES8311] REG31(mute)=0x%02X REG32(vol)=0x%02X REG37(eq)=0x%02X\n",
+        es8311_read(0x31), es8311_read(0x32), es8311_read(0x37));
 }
 
 // ─── ES7210 codec (quad mic ADC) — init via I2C ──────────────────────────────
@@ -356,29 +376,27 @@ void ws_event(WStype_t type, uint8_t* payload, size_t length) {
                 delay(200);
                 ESP.restart();
             } else if (strcmp(cmd, "CMD:TONE") == 0) {
-                // Local test tone — 440Hz, 2s, generated on-device
-                Serial.printf("[CMD] Playing local 440Hz tone\n");
-                // Dump key ES8311 registers first
-                Serial.printf("[ES8311] REG00=0x%02X REG01=0x%02X REG02=0x%02X REG06=0x%02X\n",
-                    es8311_read(0x00), es8311_read(0x01), es8311_read(0x02), es8311_read(0x06));
-                Serial.printf("[ES8311] REG0A=0x%02X REG0D=0x%02X REG12=0x%02X REG32=0x%02X REG37=0x%02X REG44=0x%02X\n",
-                    es8311_read(0x0A), es8311_read(0x0D), es8311_read(0x12),
-                    es8311_read(0x32), es8311_read(0x37), es8311_read(0x44));
-                const int sr = 16000, dur_ms = 2000;
-                const int total = sr * dur_ms / 1000;
-                const int chunk = 320;
-                static int32_t buf[chunk * 2];  // stereo
-                for (int base = 0; base < total; base += chunk) {
-                    int n = min(chunk, total - base);
-                    for (int i = 0; i < n; i++) {
-                        int32_t s = (int32_t)(16383 * sinf(2.0f * M_PI * 440.0f * (base + i) / sr)) << 16;
-                        buf[i*2]   = s;
-                        buf[i*2+1] = s;
+                // Local test tone — run in a task so WS loop isn't blocked
+                Serial.printf("[CMD] Tone requested\n");
+                tca9555_dump();
+                xTaskCreate([](void*) {
+                    const int sr = 16000, dur_ms = 2000;
+                    const int total = sr * dur_ms / 1000;
+                    const int chunk = 320;
+                    int32_t buf[chunk * 2];
+                    for (int base = 0; base < total; base += chunk) {
+                        int n = min(chunk, total - base);
+                        for (int i = 0; i < n; i++) {
+                            int32_t s = (int32_t)(16383 * sinf(2.0f * M_PI * 440.0f * (base + i) / sr)) << 16;
+                            buf[i*2]   = s;
+                            buf[i*2+1] = s;
+                        }
+                        size_t written = 0;
+                        i2s_channel_write(tx_handle, buf, n * 2 * sizeof(int32_t), &written, pdMS_TO_TICKS(200));
                     }
-                    size_t written = 0;
-                    i2s_channel_write(tx_handle, buf, n * 2 * sizeof(int32_t), &written, pdMS_TO_TICKS(200));
-                }
-                ws_log("[CMD] Tone done\n");
+                    Serial.printf("[CMD] Tone done\n");
+                    vTaskDelete(NULL);
+                }, "tone", 4096, nullptr, 5, nullptr);
             } else if (strcmp(cmd, "CMD:MIC_START") == 0) {
                 mic_streaming = true;
             } else if (strcmp(cmd, "CMD:MIC_STOP") == 0) {

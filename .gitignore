@@ -51,6 +51,9 @@ desktop.ini
 *.p12
 *.pfx
 
+# OpenClaw local agent config (machine-specific)
+.openclaw/
+
 # User-specific (root-level scratch files only, not tests/ directory)
 /test_*.py
 /fix_*.py

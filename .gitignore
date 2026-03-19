@@ -44,6 +44,13 @@ stations/**/runtime.log
 Thumbs.db
 desktop.ini
 
+# TLS certificates and private keys - NEVER commit these
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+
 # User-specific (root-level scratch files only, not tests/ directory)
 /test_*.py
 /fix_*.py

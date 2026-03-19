@@ -218,22 +218,24 @@ def _start_local_audio_watcher(audio_dir: str, pulse_device) -> None:
 
     # Ensure PipeWire/PulseAudio socket env vars are set in this process.
     # The service may not inherit XDG_RUNTIME_DIR from the user session.
-    _uid = os.getuid()
-    _rt = f"/run/user/{_uid}"
-    os.environ.setdefault("XDG_RUNTIME_DIR", _rt)
-    os.environ.setdefault("PULSE_RUNTIME_PATH", f"{_rt}/pulse")
-    os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={_rt}/bus")
-
-    # Re-probe pulse device now that env is correct
+    # os.getuid() is Linux-only; skip this block entirely on Windows.
     _dev = pulse_device
-    try:
-        import sounddevice as _sd2
-        for _i, _d in enumerate(_sd2.query_devices()):
-            if str(_d.get("name", "")).lower().startswith("pulse") and _d.get("max_output_channels", 0) > 0:
-                _dev = _i
-                break
-    except Exception:
-        pass
+    if hasattr(os, "getuid"):
+        _uid = os.getuid()
+        _rt = f"/run/user/{_uid}"
+        os.environ.setdefault("XDG_RUNTIME_DIR", _rt)
+        os.environ.setdefault("PULSE_RUNTIME_PATH", f"{_rt}/pulse")
+        os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={_rt}/bus")
+
+        # Re-probe pulse device now that env is correct
+        try:
+            import sounddevice as _sd2
+            for _i, _d in enumerate(_sd2.query_devices()):
+                if str(_d.get("name", "")).lower().startswith("pulse") and _d.get("max_output_channels", 0) > 0:
+                    _dev = _i
+                    break
+        except Exception:
+            pass
 
     _played: set = set()
 
@@ -1832,12 +1834,28 @@ def event_router_worker(
         t_start = time.time()
         routed = 0
 
+        def dispatch_event(evt: StationEvent) -> None:
+            """Route event to meta plugin (live commentary) or standard DB queue."""
+            # If a meta plugin with handle_event is active, route iracing_sdk events
+            # directly to it so it can generate multi-voice commentary via its own
+            # LLM pipeline.  Standard DB enqueue is skipped to avoid single-voice
+            # duplicate segments.
+            if (evt.source == "iracing_sdk"
+                    and ACTIVE_META_PLUGIN is not None
+                    and hasattr(ACTIVE_META_PLUGIN, "handle_event")):
+                try:
+                    ACTIVE_META_PLUGIN.handle_event(evt)
+                except Exception as _me:
+                    log("router", f"meta handle_event error: {type(_me).__name__}: {_me}")
+                return  # meta plugin owns this event
+            enqueue_from_event(evt)
+
         try:
             # Primary blocking pull
             try:
                 evt = event_q.get(timeout=poll_timeout)
                 if isinstance(evt, StationEvent) and dedupe_ok(evt):
-                    enqueue_from_event(evt)
+                    dispatch_event(evt)
                     routed += 1
             except queue.Empty:
                 pass
@@ -1850,7 +1868,7 @@ def event_router_worker(
                     break
 
                 if isinstance(evt, StationEvent) and dedupe_ok(evt):
-                    enqueue_from_event(evt)
+                    dispatch_event(evt)
                     routed += 1
 
         except Exception as e:
@@ -2217,7 +2235,7 @@ def clamp_text(t: str, max_len: int) -> str:
 def normalize_text(t: str) -> str:
     if not t:
         return ""
-    return (
+    t = (
         t.replace("\u2011", "-")
          .replace("\u2013", "-")
          .replace("\u2014", "-")
@@ -2225,6 +2243,10 @@ def normalize_text(t: str) -> str:
          .replace("\u201c", '"')
          .replace("\u201d", '"')
     )
+    # "#42" → "number 42", bare "#" → removed
+    t = re.sub(r'#\s*(\d+)', r'number \1', t)
+    t = t.replace('#', '')
+    return t
 
 def clean(t: str) -> str:
     if not t:

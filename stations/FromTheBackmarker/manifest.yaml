@@ -5,13 +5,12 @@ station:
   logo: logos/fromthebackmarker.jpg
 meta_plugin: ftb_narrator_plugin
 llm:
-  provider: openai
-  api_key_env: OPENAI_API_KEY
+  provider: ollama
 models:
-  producer: gpt-4o
-  host: gpt-4o
-  navigator: gpt-4o
-  narrator: gpt-4o
+  producer: qwen3:8b
+  host: qwen3:8b
+  navigator: qwen3:8b
+  narrator: qwen3:8b
   embedding: ''
 embedding:
   enabled: false

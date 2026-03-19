@@ -58,6 +58,7 @@ class OllamaProvider(ModelProvider):
             "prompt": prompt,
             "system": system,
             "stream": False,
+            "think": False,  # disable qwen3/deepseek thinking mode — it consumes all tokens
             "options": {
                 "temperature": float(temperature),
                 "num_predict": int(num_predict),
@@ -70,12 +71,16 @@ class OllamaProvider(ModelProvider):
         r = requests.post(
             self.endpoint,
             json=payload,
-            timeout=(3, max(4, int(timeout))),
+            timeout=(3, None),  # 3s connect timeout, no read timeout for local Ollama
             headers={"Connection": "close"},
         )
         r.raise_for_status()
 
         out = (r.json().get("response") or "").strip()
+
+        # Strip any <think>...</think> blocks that leak through (safety net)
+        import re as _re
+        out = _re.sub(r"<think>.*?</think>", "", out, flags=_re.DOTALL).strip()
 
         # Strip common wrappers
         out = out.replace("```json", "```").strip()

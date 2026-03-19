@@ -5,11 +5,10 @@ station:
   logo: logos/welcomefm.png
   meta_plugin: radio_station
 llm:
-  provider: openai
-  api_key_env: OPENAI_API_KEY
+  provider: ollama
 models:
-  producer: gpt-4o
-  host: gpt-4o
+  producer: qwen3:8b
+  host: qwen3:8b
   navigator: ''
   embedding: ''
 embedding:

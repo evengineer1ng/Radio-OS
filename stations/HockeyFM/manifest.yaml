@@ -5,11 +5,11 @@ station:
   logo: logos/hockeyfm.jpg
   meta_plugin: radio_station
 llm:
-  provider: openai
-  api_key_env: OPENAI_API_KEY
+  provider: ollama
+  endpoint: http://127.0.0.1:11434/api/generate
 models:
-  producer: gpt-4o
-  host: gpt-4o
+  producer: qwen3:8b
+  host: qwen3:8b
 audio:
   voices_provider: kokoro
   voices:
@@ -116,6 +116,7 @@ feeds:
   futuresight:
     enabled: true
     vision_provider: ollama
+  endpoint: http://127.0.0.1:11434/api/generate
     vision_model: llava:latest
   visual_reader:
     enabled: true

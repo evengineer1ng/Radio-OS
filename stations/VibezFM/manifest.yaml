@@ -5,13 +5,12 @@ station:
   logo: logos/vibezfm.png
   meta_plugin: radio_station
 llm:
-  provider: openai
-  api_key_env: OPENAI_API_KEY
+  provider: ollama
 models:
-  producer: gpt-4o
-  host: gpt-4o
-  navigator: gpt-4o
-  embedding: text-embedding-3-small
+  producer: qwen3:8b
+  host: qwen3:8b
+  navigator: qwen3:8b
+  embedding: nomic-embed-text:v1.5
 embedding:
   enabled: false
 scheduler:

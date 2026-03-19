@@ -1,0 +1,95 @@
+meta_plugin: ksp_meta
+
+station:
+  name: KerbalFM
+  host: Callum
+  category: space simulation
+  logo: logos/kerbalfm.png
+
+# ── LLM provider ──────────────────────────────────────────────────────────────
+llm:
+  endpoint: http://127.0.0.1:11434/api/generate
+
+models:
+  producer: qwen3:8b
+  host: qwen3:8b
+  fast: qwen3:8b
+  navigator: qwen3:8b
+  embedding: nomic-embed-text:v1.5
+
+embedding:
+  enabled: false
+
+# ── Paths (relative to station dir) ────────────────────────────────────────────
+paths:
+  db: station.sqlite
+  memory: station_memory.json
+
+# ── kRPC connection ─────────────────────────────────────────────────────────────
+krpc:
+  host: localhost
+  port: 50000
+  stream_port: 50001
+
+# ── Commentary pacing ─────────────────────────────────────────────────────────
+pacing:
+  min_commentary_gap_sec: 5
+  routine_commentary_gap_sec: 20
+  idle_riff_sec: 30             # space is quiet — fill sooner than racing
+  between_segments_sec: 3
+  queue_target_depth: 6
+  queue_max_depth: 16
+  producer_tick_sec: 90
+  audio_target_depth: 4
+  audio_max_depth: 8
+  audio_tick_sleep: 0.05
+
+producer:
+  target_depth: 4
+  max_depth: 10
+  tick_sec: 90
+  max_tokens: 300
+  temperature: 0.55
+  per_source_cap: 2
+
+# ── Two-voice broadcast crew (Launch Control + Flight Director) ───────────────
+characters:
+  pbp:
+    name: Callum
+    role: launch_control
+    traits:
+      - exclamatory
+      - immediate
+      - vivid
+      - technical
+    focus:
+      - events
+      - altitude
+      - velocity
+      - staging
+
+  color:
+    name: Valentina
+    role: flight_director
+    traits:
+      - analytical
+      - calm
+      - mission-critical
+    focus:
+      - orbital_mechanics
+      - fuel_budgets
+      - mission_planning
+      - anomalies
+
+# ── TTS voices ─────────────────────────────────────────────────────────────────
+tts:
+  min_gap_sec: 3
+  spam_break_priority: 98
+
+audio:
+  piper_bin: C:/Users/evana/Documents/radio_os/voices/piper_windows_amd64/piper/piper.exe
+
+voices:
+  host:      C:/Users/evana/OneDrive/Documents/Radio-OS/voices/en_US-lessac-high.onnx
+  Callum:    C:/Users/evana/OneDrive/Documents/Radio-OS/voices/en_GB-alan-medium.onnx
+  Valentina: C:/Users/evana/OneDrive/Documents/Radio-OS/voices/en_GB-southern_english_female-low.onnx

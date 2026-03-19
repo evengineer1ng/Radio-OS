@@ -6,12 +6,12 @@ station:
   logo: /Users/even/Documents/Radio-OS-1.03/logos/oraclekingdom.jpg
 meta_plugin: ok_narrator_plugin
 llm:
-  provider: openai
+  provider: ollama
   endpoint: http://127.0.0.1:11434/api/generate
 models:
-  producer: gpt-4o
-  host: gpt-4o
-  navigator: gpt-4o
+  producer: qwen3:8b
+  host: qwen3:8b
+  navigator: qwen3:8b
   embedding: ''
 embedding:
   enabled: false

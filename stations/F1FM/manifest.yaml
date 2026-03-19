@@ -1,27 +1,23 @@
 station:
-  name: FlowFM
-  host: DJ POWERS
-  category: Head down, FLOW UP!
-  logo: logos/flowfm.png
-  meta_plugin: radio_station
+  name: F1FM
+  host: Crofty
+  category: Silly Season!
+  logo: C:/Users/evana/Downloads/images.jpg
+meta_plugin: radio_station
 llm:
-  provider: ollama
+  endpoint: http://127.0.0.1:11434/api/generate
 models:
   producer: qwen3:8b
   host: qwen3:8b
   navigator: qwen3:8b
   embedding: nomic-embed-text:v1.5
 embedding:
-  enabled: true
+  enabled: false
 scheduler:
   source_quotas:
     bluesky: 2
-    document: 1
-    flows: 2
-    futuresight: 1
-    reddit: 1
-    rss: 13
-    visual_reader: 1
+    reddit: 6
+    rss: 1
   reclaim_every_sec: 10
   reaper_every_sec: 3
   claim_timeout_sec: 45
@@ -87,31 +83,37 @@ tts:
   min_gap_sec: 6
   deprioritize_penalty: 15
 audio:
-  voices_provider: kokoro
-  voices:
-    host: af_sarah
-    lil bat: bf_emma
-    marco vision: bm_george
-    nova spark: af_nova
-    rex static: am_onyx
-    echo lane: bf_alice
-    hoh: am_adam
+  piper_bin: C:/Users/evana/Documents/radio_os/voices/piper_windows_amd64/piper/piper.exe
+voices:
+  host: C:/Users/evana/Documents/radio_os/voices/en_US-lessac-high.onnx
+  lil bat: C:/Users/evana/Documents/radio_os/voices/en_GB-southern_english_female-low.onnx
+  marco vision: C:/Users/evana/Documents/radio_os/voices/en_US-danny-low.onnx
+  nova spark: C:/Users/evana/Documents/radio_os/voices/en_GB-alba-medium.onnx
+  rex static: C:/Users/evana/Documents/radio_os/voices/en_GB-alan-medium.onnx
+  echo lane: C:/Users/evana/Documents/radio_os/voices/en_US-hfc_female-medium.onnx
+  hoh: C:/Users/evana/Documents/radio_os/voices/en_US-eminem-medium.onnx
 feeds:
   bluesky:
     enabled: true
     identifier: easporks99.bsky.social
     password: dind-65zw-56ik-zuu5
     hashtags:
-    - hiphop
-    - rap
-    - flow
-    - bars
-    poll_sec: 120
-    limit: 5
-    priority: 70.0
-    burst_delay: 0.25
+    - f1
+    - formula1
+    - formulaone
+    - verstappen
+    - sainz
+    - albon
+    - leclerc
+    - williamsracing
+    - mclaren
+    - lando
+    - piastri
+    poll_sec: 60
+    limit: 20
+    priority: 70
   document:
-    enabled: true
+    enabled: false
     files:
     - name: strategy
       path: ./strategy_reference.txt
@@ -136,7 +138,7 @@ feeds:
     limit: 15
     priority: 70.0
   flows:
-    enabled: true
+    enabled: false
     reaction_frequency: 0.2
     min_reaction_gap_sec: 20
     flow_songs_min: 2
@@ -145,19 +147,46 @@ feeds:
     talk_segments_min: 2
     talk_segments_max: 5
     talk_segments_random: true
+  ftb_audio_engine:
+    enabled: false
+  ftb_broadcast_commentary:
+    enabled: false
+  ftb_broadcast_commentary_llm:
+    enabled: false
+  ftb_components:
+    enabled: false
+  ftb_db_archival:
+    enabled: false
+  ftb_heritage_templates:
+    enabled: false
+  ftb_historical_integration:
+    enabled: false
+  ftb_names:
+    enabled: false
+  ftb_narrative_prompts:
+    enabled: false
+  ftb_race_day:
+    enabled: false
+  ftb_sponsors:
+    enabled: false
+  ftb_state_db:
+    enabled: false
   futuresight:
-    enabled: true
+    enabled: false
     poll_sec: 0.25
     vision_provider: ollama
     vision_model: llava:latest
     vision_endpoint: http://localhost:11434
     vision_api_key: ''
     vision_prompt: Describe what is happening in this video frame as if you are a
-      commentator watching a live feed. Relay what is happening as precisely as possible
-      for a reactor to understand and react from your commentary. Emphasize what is
-      needed.
+      commentator watching a live feed. Focus on the action, the people, and the atmosphere.
+      Keep it immediate and descriptive.
   google_alerts:
     enabled: false
+    urls: []
+    poll_sec: 180
+    burst_delay: 0.5
+    feed_delay: 1.0
   instagram:
     enabled: false
     access_token: ''
@@ -171,46 +200,58 @@ feeds:
     poll_sec: 15
     breakout_pct: 0.2
     priority: 90
+    emit_limit: 2
+  mix_rebalance:
+    enabled: false
+  neikos:
+    enabled: false
+  ok_audio_engine:
+    enabled: false
+    poll_sec: 0.1
+  oracle_court:
+    enabled: false
+  oracle_court_feed:
+    enabled: false
+    tick_sec: 6.0
+    startup_delay: 8.0
+  oracle_kingdom_tk:
+    enabled: false
   portfolio:
+    enabled: false
+    mode: hyperliquid
+    user_address: ''
+    poll_sec: 6
+    min_emit_gap_sec: 20
+    min_equity_delta_frac: 0.003
+    big_equity_delta_frac: 0.015
+    positions_change_priority: 95
+    equity_change_priority: 93
+    big_move_priority: 98
+    base_url: https://api.hyperliquid.xyz
+  producer_mix:
+    enabled: false
+  producer_settings:
     enabled: false
   reddit:
     enabled: true
-    subreddits:
-    - hiphopheads
-    - hiphop
-    - rap
-    - trap
+    subreddits: []
     poll_sec: 30
     limit: 20
     priority: 60
-    burst_delay: 0.2
+    burst_delay: 0.25
     seen_ttl_sec: 3600
   rss:
     enabled: true
-    urls:
-    - https://allhiphop.com/feed
-    - https://xxlmag.com/feed
-    - https://hiphopwired.com/feed
-    - https://hiphop-n-more.com/feed
-    - https://undergroundhiphopblog.com/feed
-    - https://thesource.com/feed
-    - https://rapindustry.com/feed
-    - https://fmhiphop.com/feed
-    - https://hiphop411.tv/feed
-    - https://dopehiphop.net/feed
-    - https://earmilk.com/music/hiphop/feed
-    - https://djbooth.net/feed
-    - https://upcominghiphop.net/feed
-    - https://desihiphop.com/feed
-    - https://indiehiphop.com/feed
-    - https://hiphopfightclub.com/feed
-    - https://stopbeefinradio.com/feed
-    - https://hiphopallaround.com/feed
-    - https://xclusiveloaded.com/feed
-    - https://rss.app/feeds/worldstar-com-rss-feed.xml
-    - https://www.hiphoprx.com/rss-feeds
+    urls: []
     poll_sec: 180
     priority: 72
+    burst_delay: 0.5
+    feed_delay: 2.0
+    emit_limit: 2
+    deep_fetch:
+      enabled: false
+      timeout_sec: 5
+      max_chars: 1500
   tiktok:
     enabled: false
     api_key: ''
@@ -227,7 +268,7 @@ feeds:
     limit: 20
     priority: 75.0
   visual_reader:
-    enabled: true
+    enabled: false
     source_type: screen
     source_path: ''
     source_window: ''
@@ -406,100 +447,6 @@ characters:
     - game changing ideas
 mix:
   weights:
-    bluesky: 0.0679611650485437
-    document: 0.0
-    flows: 0.0679611650485437
-    futuresight: 0.0679611650485437
-    reddit: 0.0679611650485437
-    rss: 0.6601941747572816
-    visual_reader: 0.0679611650485437
-art:
-  global_bg:
-    type: image
-    value: '#0e0e0e'
-    path: /Users/even/Downloads/Gemini_Generated_Image_64hn5f64hn5f64hn.png
-  panels:
-    left:
-      type: color
-      value: '#121212'
-    center:
-      type: color
-      value: '#8080ff'
-      gradient:
-        type: linear
-        color1: '#121212'
-        color2: '#1e1e1e'
-    right:
-      type: color
-      value: '#808080'
-    toolbar:
-      type: gradient
-      value: '#ffffff'
-      gradient:
-        type: linear
-        color1: '#0e0e0e'
-        color2: '#1e1e1e'
-    subtitle:
-      type: gradient
-      value: '#0e0e0e'
-      gradient:
-        type: linear
-        color1: '#c0c0c0'
-        color2: '#808080'
-  accent: '#4cc9f0'
-  subtitle_wave: true
-ui_layout:
-  windows:
-    window_1:
-      window_id: window_1
-      geometry:
-        x: 0
-        y: 0
-        width: 526
-        height: 346
-      is_minimized: false
-      active_tab: null
-      tabs: []
-    window_2:
-      window_id: window_2
-      geometry:
-        x: 0
-        y: 337
-        width: 462
-        height: 334
-      is_minimized: false
-      active_tab: null
-      tabs: []
-    window_3:
-      window_id: window_3
-      geometry:
-        x: 1459
-        y: 4
-        width: 466
-        height: 600
-      is_minimized: false
-      active_tab: null
-      tabs: []
-  panes:
-    left:
-      tabs:
-      - widget_key: radio_dial
-        title: Radio • Dial
-    center:
-      tabs:
-      - widget_key: flows_control
-        title: Flows
-    right:
-      tabs:
-      - widget_key: mix_rebalance
-        title: Producer Feed Queue Rebalance
-      - widget_key: character_mix
-        title: Character • Mix
-enabled: false
-flow_songs_min: 2
-flow_songs_max: 4
-flow_songs_random: true
-talk_segments_min: 2
-talk_segments_max: 5
-talk_segments_random: true
-reaction_frequency: 0.2
+    bluesky: 0.3516483516483516
+    reddit: 0.3626373626373626
+    rss: 0.2857142857142857

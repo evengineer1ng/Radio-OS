@@ -1195,13 +1195,50 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
             .replace("{{STATION_HOST}}", station_host)
         )
 
+    # ──── WebSocket proxy: /station/{station_id}/ws/live → game port /ws/live ────
+    @app.websocket("/station/{station_id}/ws/live")
+    async def proxy_station_ws_live(ws: WebSocket, station_id: str):
+        ms = station_mgr.get(station_id)
+        if not ms or not ms.web_port:
+            await ws.close(code=1008, reason="Station not running")
+            return
+        await ws.accept()
+        try:
+            import websockets as _ws_lib
+        except ImportError:
+            await ws.send_text('{"type":"error","data":"websockets not installed"}')
+            await ws.close()
+            return
+        game_ws_url = f"ws://127.0.0.1:{ms.web_port}/ws/live"
+        try:
+            async with _ws_lib.connect(game_ws_url) as game_ws:
+                async def to_game():
+                    try:
+                        async for msg in ws.iter_text():
+                            await game_ws.send(msg)
+                    except Exception:
+                        pass
+                async def from_game():
+                    try:
+                        async for msg in game_ws:
+                            await ws.send_text(msg)
+                    except Exception:
+                        pass
+                await asyncio.gather(to_game(), from_game())
+        except Exception as e:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
     # ──── Proxy to station plugin web servers (e.g. FTB on :7555) ────
     @app.api_route("/station/{station_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def proxy_station_web(station_id: str, path: str, request: Request):
         """
         Proxy requests to a station's embedded plugin web server.
-        e.g. /station/BasketballFM/ → http://localhost:7555/
-        Passes through raw response with correct content-type (HTML, CSS, JS, etc.)
+        e.g. /station/F1FM/ → http://localhost:7555/
+        Injects a script shim into HTML to redirect fetch() and WebSocket calls
+        through this proxy so Tailscale only needs port 7800 open.
         """
         ms = station_mgr.get(station_id)
         if not ms or not ms.web_port:
@@ -1217,6 +1254,34 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
         if query:
             target_url += f"?{query}"
 
+        proxy_base = f"/station/{station_id}"
+
+        # Script injected into the game HTML that transparently rewrites all
+        # fetch() and WebSocket() calls so they go through the proxy path on
+        # port 7800 instead of hitting bare game ports directly.
+        shim_script = f"""<script>
+(function(){{
+  var _BASE = {repr(proxy_base)};
+  // Patch fetch
+  var _origFetch = window.fetch.bind(window);
+  window.fetch = function(url, opts) {{
+    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(_BASE)) {{
+      url = _BASE + url;
+    }}
+    return _origFetch(url, opts);
+  }};
+  // Patch WebSocket
+  var _OrigWS = window.WebSocket;
+  window.WebSocket = function(url, protocols) {{
+    if (typeof url === 'string') {{
+      url = url.replace(/^(wss?:\\/\\/[^\\/]+)\\//, '$1' + _BASE + '/');
+    }}
+    return protocols ? new _OrigWS(url, protocols) : new _OrigWS(url);
+  }};
+  Object.assign(window.WebSocket, _OrigWS);
+}})();
+</script>"""
+
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 resp = await client.request(
@@ -1227,10 +1292,26 @@ def create_shell_app(station_mgr: StationManager, audio_bridge: AudioBridge):
                     content=await request.body(),
                 )
                 from starlette.responses import Response
-                # Pass through the raw bytes with correct content-type
+                import re as _re
                 content_type = resp.headers.get("content-type", "application/octet-stream")
+                content = resp.content
+
+                if "html" in content_type:
+                    text = content.decode("utf-8", errors="replace")
+                    # Rewrite asset src/href so <script src="/assets/..."> etc.
+                    # resolve through the proxy, not the main shell.
+                    def _rewrite_attr(m):
+                        attr, val = m.group(1), m.group(2)
+                        if val.startswith(proxy_base) or val.startswith("http") or val.startswith("//"):
+                            return m.group(0)
+                        return f'{attr}="{proxy_base}{val}"'
+                    text = _re.sub(r'(src|href|action)="(/[^"]*)"', _rewrite_attr, text)
+                    # Inject shim before </head> so it runs before any app JS
+                    text = text.replace("</head>", shim_script + "\n</head>", 1)
+                    content = text.encode("utf-8")
+
                 return Response(
-                    content=resp.content,
+                    content=content,
                     status_code=resp.status_code,
                     media_type=content_type,
                 )
@@ -2894,9 +2975,9 @@ function detectPluginUIs(webPort) {
     const seen = new Set();
     const unique = links.filter(l => { if (seen.has(l.port)) return false; seen.add(l.port); return true; });
     document.getElementById('pluginLinks').innerHTML = unique.map(l => {
-      // Open directly on the station's dedicated game port (separate tab)
-      // Use same hostname the user is browsing from (works over LAN / Tailscale)
-      const url = location.protocol + '//' + location.hostname + ':' + l.port + l.path;
+      // Route through the web shell proxy so Tailscale only needs port 7800 open.
+      // /station/<id>/<path> is proxied internally to localhost:<game_port>.
+      const url = '/station/' + STATION_ID + l.path;
       return '<a class="plugin-link" href="' + url + '" target="_blank">' +
         l.label + ' (port ' + l.port + ')</a>';
     }).join('');
